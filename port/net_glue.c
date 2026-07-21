@@ -12,6 +12,7 @@
 // =============================================================================
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "lwip/init.h"
 #include "lwip/netif.h"
@@ -26,6 +27,16 @@
 #include "net_glue.h"
 
 #define BMOS_NET_IID 0
+
+// Firecracker (via its "boot from raw kernel args" path) writes a Linux
+// kernel-style "ip=" boot param string here for guests that have no other
+// way to read the kernel command line. Format (see Linux's
+// Documentation/admin-guide/nfs/nfsroot.rst):
+//   ip=<client-ip>:<server-ip>:<gw-ip>:<netmask>:<hostname>:<device>:<autoconf>
+// Only client-ip, gw-ip, and netmask are used here. When present and
+// parseable, it replaces DHCP entirely.
+#define FC_IP_PARAM_ADDR ((const char *)0x5a00UL)
+#define FC_IP_PARAM_MAXLEN 128
 
 static struct netif bmos_netif;
 
@@ -87,18 +98,73 @@ static err_t bmos_netif_init(struct netif *netif)
 	return ERR_OK;
 }
 
+// Copies the NUL-terminated string at FC_IP_PARAM_ADDR (capped at
+// FC_IP_PARAM_MAXLEN, in case it's uninitialized/non-Firecracker memory
+// with no NUL in range) and parses it as a Linux-style "ip=" param.
+// Returns 1 and fills *ip/*gw/*mask on success, 0 otherwise (no "ip="
+// prefix, or client-ip/gw-ip/netmask missing or unparseable).
+static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask)
+{
+	const char *src = FC_IP_PARAM_ADDR;
+	char buf[FC_IP_PARAM_MAXLEN];
+	size_t i;
+
+	for (i = 0; i < sizeof(buf) - 1 && src[i] != '\0'; i++)
+		buf[i] = src[i];
+	buf[i] = '\0';
+
+	if (strncmp(buf, "ip=", 3) != 0)
+		return 0;
+
+	// Split on ':' in place: fields[0]=client-ip, [1]=server-ip,
+	// [2]=gw-ip, [3]=netmask, [4]=hostname, [5]=device, [6]=autoconf.
+	char *fields[7] = { 0 };
+	char *p = buf + 3;
+	int n = 0;
+
+	fields[n++] = p;
+	while (n < 7 && (p = strchr(p, ':')) != NULL) {
+		*p = '\0';
+		p++;
+		fields[n++] = p;
+	}
+
+	if (n < 4)
+		return 0;
+
+	if (fields[0][0] == '\0' || fields[2][0] == '\0' || fields[3][0] == '\0')
+		return 0;
+
+	if (!ip4addr_aton(fields[0], ip))
+		return 0;
+	if (!ip4addr_aton(fields[2], gw))
+		return 0;
+	if (!ip4addr_aton(fields[3], mask))
+		return 0;
+
+	return 1;
+}
+
 void net_init(void)
 {
 	srand((unsigned int)b_system(TIMECOUNTER, 0, 0));
 
 	lwip_init();
 
-	netif_add(&bmos_netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY,
-		NULL, bmos_netif_init, ethernet_input);
-	netif_set_default(&bmos_netif);
-	netif_set_up(&bmos_netif);
+	ip4_addr_t ip, gw, mask;
+	if (fc_parse_ip_param(&ip, &gw, &mask)) {
+		netif_add(&bmos_netif, &ip, &mask, &gw,
+			NULL, bmos_netif_init, ethernet_input);
+		netif_set_default(&bmos_netif);
+		netif_set_up(&bmos_netif);
+	} else {
+		netif_add(&bmos_netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY,
+			NULL, bmos_netif_init, ethernet_input);
+		netif_set_default(&bmos_netif);
+		netif_set_up(&bmos_netif);
 
-	dhcp_start(&bmos_netif);
+		dhcp_start(&bmos_netif);
+	}
 }
 
 void net_poll(void)
@@ -123,7 +189,9 @@ void net_poll(void)
 
 int net_is_ready(void)
 {
-	return dhcp_supplied_address(&bmos_netif) != 0;
+	// Covers both paths: DHCP sets the netif's IPv4 address once bound,
+	// and the static Firecracker path sets it immediately in net_init().
+	return netif_is_up(&bmos_netif) && !ip4_addr_isany_val(*netif_ip4_addr(&bmos_netif));
 }
 
 int net_wait_ready(unsigned timeout_ms)
