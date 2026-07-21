@@ -129,9 +129,3 @@ Not implemented (all fall through to `-ENOSYS`):
   into one flat binary at a fixed load address. Not a gap so much as
   a permanent constraint of this environment (no ELF loader, no
   syscall trap to service `mmap`-based `dlopen`).
-- **musl and lwIP are vendored at different freshness policies.**
-  `scripts/get-musl.sh` always fetches latest; `scripts/get-lwip.sh` is
-  pinned to 2.2.0 because the port glue (`lwip_port/*`, `net_glue.c`,
-  `net_shim.c`) was written against that release's exact file layout
-  and config surface. Bumping the musl version is low-risk; bumping
-  lwIP needs re-checking the port glue against whatever changed.
