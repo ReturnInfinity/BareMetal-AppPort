@@ -11,6 +11,7 @@
 // from any kind of background thread.
 // =============================================================================
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,15 +29,18 @@
 
 #define BMOS_NET_IID 0
 
-// Firecracker (via its "boot from raw kernel args" path) writes a Linux
-// kernel-style "ip=" boot param string here for guests that have no other
-// way to read the kernel command line. Format (see Linux's
-// Documentation/admin-guide/nfs/nfsroot.rst):
+// Firecracker (via its "boot from raw kernel args" path) writes the
+// whole Linux kernel command line here for guests that have no other
+// way to read it, e.g.:
+//   console=ttyS0 reboot=k panic=1 pci=off ip=172.16.0.2::172.16.0.1:255.255.0.0::eth0:off root=/dev/vda rw
+// so "ip=" has to be found as a token amid the other params, not
+// assumed to be a prefix of the buffer. Its own format (see Linux's
+// Documentation/admin-guide/nfs/nfsroot.rst) is:
 //   ip=<client-ip>:<server-ip>:<gw-ip>:<netmask>:<hostname>:<device>:<autoconf>
 // Only client-ip, gw-ip, and netmask are used here. When present and
 // parseable, it replaces DHCP entirely.
 #define FC_IP_PARAM_ADDR ((const char *)0x5a00UL)
-#define FC_IP_PARAM_MAXLEN 128
+#define FC_IP_PARAM_MAXLEN 256
 
 static struct netif bmos_netif;
 
@@ -100,9 +104,10 @@ static err_t bmos_netif_init(struct netif *netif)
 
 // Copies the NUL-terminated string at FC_IP_PARAM_ADDR (capped at
 // FC_IP_PARAM_MAXLEN, in case it's uninitialized/non-Firecracker memory
-// with no NUL in range) and parses it as a Linux-style "ip=" param.
-// Returns 1 and fills *ip/*gw/*mask on success, 0 otherwise (no "ip="
-// prefix, or client-ip/gw-ip/netmask missing or unparseable).
+// with no NUL in range) and parses the "ip=" token out of it as a
+// Linux-style kernel command line. Returns 1 and fills *ip/*gw/*mask
+// on success, 0 otherwise (no "ip=" token, or client-ip/gw-ip/netmask
+// missing or unparseable).
 static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask)
 {
 	const char *src = FC_IP_PARAM_ADDR;
@@ -113,13 +118,31 @@ static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask)
 		buf[i] = src[i];
 	buf[i] = '\0';
 
-	if (strncmp(buf, "ip=", 3) != 0)
+	printf("net: fc cmdline @ %p: \"%s\"\n", (const void *)src, buf);
+
+	// "ip=" can appear anywhere among the other kernel params (e.g.
+	// "console=ttyS0 ... ip=172.16.0.2::172.16.0.1:255.255.0.0::eth0:off
+	// pci=off root=..."), so find it as a whole token -- at the start
+	// of the line, or preceded by whitespace -- rather than assuming
+	// it's a prefix of the buffer.
+	char *tok = buf;
+	for (;;) {
+		tok = strstr(tok, "ip=");
+		if (tok == NULL || tok == buf || tok[-1] == ' ')
+			break;
+		tok++;
+	}
+
+	if (tok == NULL) {
+		printf("net: fc cmdline: no \"ip=\" token found, falling back to DHCP\n");
 		return 0;
+	}
 
 	// Split on ':' in place: fields[0]=client-ip, [1]=server-ip,
-	// [2]=gw-ip, [3]=netmask, [4]=hostname, [5]=device, [6]=autoconf.
+	// [2]=gw-ip, [3]=netmask, [4]=hostname, [5]=device, [6]=autoconf
+	// (plus whatever follows in the cmdline after that -- unused).
 	char *fields[7] = { 0 };
-	char *p = buf + 3;
+	char *p = tok + 3;
 	int n = 0;
 
 	fields[n++] = p;
@@ -129,18 +152,31 @@ static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask)
 		fields[n++] = p;
 	}
 
-	if (n < 4)
+	if (n < 4) {
+		printf("net: fc ip param: only %d field(s), need at least 4 (client-ip:server-ip:gw-ip:netmask), falling back to DHCP\n", n);
 		return 0;
+	}
 
-	if (fields[0][0] == '\0' || fields[2][0] == '\0' || fields[3][0] == '\0')
-		return 0;
+	printf("net: fc ip param fields: client-ip=\"%s\" server-ip=\"%s\" gw-ip=\"%s\" netmask=\"%s\"\n",
+		fields[0], fields[1], fields[2], fields[3]);
 
-	if (!ip4addr_aton(fields[0], ip))
+	if (fields[0][0] == '\0' || fields[2][0] == '\0' || fields[3][0] == '\0') {
+		printf("net: fc ip param: client-ip/gw-ip/netmask empty, falling back to DHCP\n");
 		return 0;
-	if (!ip4addr_aton(fields[2], gw))
+	}
+
+	if (!ip4addr_aton(fields[0], ip)) {
+		printf("net: fc ip param: client-ip \"%s\" unparseable, falling back to DHCP\n", fields[0]);
 		return 0;
-	if (!ip4addr_aton(fields[3], mask))
+	}
+	if (!ip4addr_aton(fields[2], gw)) {
+		printf("net: fc ip param: gw-ip \"%s\" unparseable, falling back to DHCP\n", fields[2]);
 		return 0;
+	}
+	if (!ip4addr_aton(fields[3], mask)) {
+		printf("net: fc ip param: netmask \"%s\" unparseable, falling back to DHCP\n", fields[3]);
+		return 0;
+	}
 
 	return 1;
 }
@@ -153,6 +189,15 @@ void net_init(void)
 
 	ip4_addr_t ip, gw, mask;
 	if (fc_parse_ip_param(&ip, &gw, &mask)) {
+		// ip4addr_ntoa() returns a pointer to a single shared static
+		// buffer, so each address needs its own buffer here -- calling
+		// it three times as inline printf args would just print the
+		// last address three times.
+		char ip_s[IP4ADDR_STRLEN_MAX], gw_s[IP4ADDR_STRLEN_MAX], mask_s[IP4ADDR_STRLEN_MAX];
+		ip4addr_ntoa_r(&ip, ip_s, sizeof(ip_s));
+		ip4addr_ntoa_r(&gw, gw_s, sizeof(gw_s));
+		ip4addr_ntoa_r(&mask, mask_s, sizeof(mask_s));
+		printf("net: using fc static address ip=%s gw=%s mask=%s\n", ip_s, gw_s, mask_s);
 		netif_add(&bmos_netif, &ip, &mask, &gw,
 			NULL, bmos_netif_init, ethernet_input);
 		netif_set_default(&bmos_netif);
