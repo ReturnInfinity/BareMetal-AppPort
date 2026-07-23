@@ -16,12 +16,16 @@ mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
 if [ -d "$MUSL_DIR" ]; then
-	echo "error: $MUSL_DIR already exists -- remove it first if you want to re-fetch." >&2
-	exit 1
+	echo "$MUSL_DIR already exists -- skipping download. Remove it first if you want to re-fetch."
+	exit 0
 fi
 
-echo "Downloading ${URL}..."
-curl -L -o "${TARBALL}" "${URL}"
+if [ -f "$TARBALL" ]; then
+	echo "$TARBALL already exists -- skipping download."
+else
+	echo "Downloading ${URL}..."
+	curl -L -o "${TARBALL}" "${URL}"
+fi
 
 echo "Extracting ${TARBALL}..."
 tar -xzf "${TARBALL}"
