@@ -55,7 +55,20 @@ static int resolve(const char *hostname, ip4_addr_t *out)
 {
 	net_ensure_ready();
 
-	struct dns_wait w = { 0 };
+	// Static, not a stack local: &w is handed to lwIP as a callback
+	// context that outlives this call in lwIP's own bookkeeping --
+	// dns_gethostbyname()'s ERR_INPROGRESS path means lwIP has
+	// queued the query and will call on_found() whenever *it*
+	// decides the query is done (resolved, or lwIP's own internal
+	// retry/timeout gives up), which is not bounded by our
+	// DNS_BLOCK_TIMEOUT_MS wait loop below. If our loop gives up
+	// first, this function returns and a stack-local w's frame would
+	// be gone by the time that late callback fires -- writing
+	// through a dangling pointer into whatever now occupies that
+	// stack slot. Static storage means a late callback just harmlessly
+	// writes into memory nobody's reading anymore instead.
+	static struct dns_wait w;
+	memset(&w, 0, sizeof(w));
 	err_t e = dns_gethostbyname(hostname, out, on_found, &w);
 
 	if (e == ERR_OK)
