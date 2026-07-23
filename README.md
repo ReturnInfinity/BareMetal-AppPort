@@ -1,6 +1,6 @@
 # BareMetal AppPort
 
-A build system for compiling your own C applications to run as BareMetal apps: a musl libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), a BMFS file I/O layer, and lwIP-based TCP/IP networking. See `OPENISSUES.md` for what's supported and what isn't.
+A build system for compiling your own C applications to run as BareMetal apps: a [musl](https://musl.libc.org/) libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), a [BMFS](https://github.com/ReturnInfinity/BMFS) file I/O layer, and [lwIP](https://savannah.nongnu.org/projects/lwip/)-based TCP/IP networking. See `OPENISSUES.md` for what's supported and what isn't.
 
 ## Requirements
 
