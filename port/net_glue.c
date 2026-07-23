@@ -124,6 +124,37 @@ static err_t bmos_netif_init(struct netif *netif)
 // nfsroot ip= format) are present and parseable; the caller treats a
 // zeroed (any) address as "not provided" the same way it does for a
 // DHCP lease that came with no DNS option.
+// ip4addr_aton() implements legacy BSD inet_aton syntax, which accepts
+// a bare decimal/octal/hex number as a full 32-bit address (e.g. "5"
+// -> 0.0.0.5). dns0-ip/dns1-ip come from an unvalidated cmdline field,
+// so require the strict a.b.c.d shape before trusting one as a DNS
+// server -- otherwise a stray non-address token that happens to parse
+// would silently become the guest's resolver.
+static int is_dotted_quad(const char *s)
+{
+	int dots = 0;
+
+	for (int part = 0; part < 4; part++) {
+		int digits = 0;
+
+		while (s[0] >= '0' && s[0] <= '9') {
+			s++;
+			digits++;
+			if (digits > 3)
+				return 0;
+		}
+		if (digits == 0)
+			return 0;
+		if (part < 3) {
+			if (*s != '.')
+				return 0;
+			s++;
+			dots++;
+		}
+	}
+	return *s == '\0' && dots == 3;
+}
+
 static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask, ip4_addr_t *dns0, ip4_addr_t *dns1)
 {
 	const char *src = FC_IP_PARAM_ADDR;
@@ -157,13 +188,26 @@ static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask, i
 		return 0;
 	}
 
+	// "ip=" is just one token among the other space-separated cmdline
+	// params -- cut the buffer off at the token's own end (next
+	// whitespace or end of string) before splitting on ':', otherwise
+	// the split below would run straight through into unrelated later
+	// params (e.g. "... ip=...:eth0:off root=/dev/vda rw
+	// virtio_mmio.device=4K@0xc0001000:5") and misread their digits as
+	// trailing ip= fields such as dns0-ip/dns1-ip.
+	char *tok_end = tok + 3;
+	while (*tok_end != '\0' && *tok_end != ' ' && *tok_end != '\t')
+		tok_end++;
+	*tok_end = '\0';
+
 	// Split on ':' in place: fields[0]=client-ip, [1]=server-ip,
 	// [2]=gw-ip, [3]=netmask, [4]=hostname, [5]=device, [6]=autoconf,
 	// [7]=dns0-ip, [8]=dns1-ip (the last two are a non-standard
 	// extension some distros' initrds add on top of the base
 	// nfsroot ip= format -- optional, see the fc_parse_ip_param()
-	// comment above) (plus whatever follows in the cmdline after
-	// that -- unused).
+	// comment above). Now that the token is truncated at its own end,
+	// anything past the last real field is empty rather than leaking
+	// the rest of the cmdline.
 	char *fields[9] = { 0 };
 	char *p = tok + 3;
 	int n = 0;
@@ -201,14 +245,22 @@ static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask, i
 		return 0;
 	}
 
-	// dns0-ip/dns1-ip are optional -- an unparseable or absent one just
+	// dns0-ip/dns1-ip are optional -- an invalid or absent one just
 	// leaves the corresponding *dns0/*dns1 zeroed (already done above),
 	// it doesn't fail the whole "ip=" param the way client-ip/gw-ip/
 	// netmask do.
-	if (n > 7 && fields[7][0] != '\0' && ip4addr_aton(fields[7], dns0))
-		printf("net: fc ip param: dns0-ip=\"%s\"\n", fields[7]);
-	if (n > 8 && fields[8][0] != '\0' && ip4addr_aton(fields[8], dns1))
-		printf("net: fc ip param: dns1-ip=\"%s\"\n", fields[8]);
+	if (n > 7 && fields[7][0] != '\0') {
+		if (is_dotted_quad(fields[7]) && ip4addr_aton(fields[7], dns0))
+			printf("net: fc ip param: dns0-ip=\"%s\"\n", fields[7]);
+		else
+			printf("net: fc ip param: dns0-ip \"%s\" is not a valid address, ignoring\n", fields[7]);
+	}
+	if (n > 8 && fields[8][0] != '\0') {
+		if (is_dotted_quad(fields[8]) && ip4addr_aton(fields[8], dns1))
+			printf("net: fc ip param: dns1-ip=\"%s\"\n", fields[8]);
+		else
+			printf("net: fc ip param: dns1-ip \"%s\" is not a valid address, ignoring\n", fields[8]);
+	}
 
 	return 1;
 }
