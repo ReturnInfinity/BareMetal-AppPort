@@ -16,12 +16,25 @@ SECTIONS
 
 	.rodata : {
 		*(.rodata .rodata.*)
+		/*
+		 * -mcmodel=large routes objects too big to reach via a
+		 * 32-bit-relative access into .lrodata/.ldata/.lbss instead
+		 * of .rodata/.data/.bss (see build-app.sh's CFLAGS comment).
+		 * Without these, they'd be left as unclaimed orphan sections
+		 * that ld appends after __bss_stop -- outside zero_bss()'s
+		 * range and past what posix_shim.c's heap_cur = __bss_stop
+		 * treats as the start of free memory, so a large enough
+		 * static array and the malloc heap end up aliased onto the
+		 * same bytes.
+		 */
+		*(.lrodata .lrodata.*)
 	}
 
 	. = ALIGN(16);
 
 	.data : {
 		*(.data .data.*)
+		*(.ldata .ldata.*)
 	}
 
 	. = ALIGN(16);
@@ -55,6 +68,7 @@ SECTIONS
 	__bss_start = .;
 	.bss : {
 		*(.bss .bss.*)
+		*(.lbss .lbss.*)
 	}
 	__bss_stop = .;
 
