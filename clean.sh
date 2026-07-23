@@ -5,8 +5,8 @@ set -e
 
 cd "$(dirname "$0")"
 
-find . -type f \( -name '*.o' -o -name '*.a' -o -name '*.app' \) -print -delete
+find . -type f \( -name '*.o' -o -name '*.a' -o -name '*.app' \) -delete
 
 if [ -d build ]; then
-	find build -mindepth 1 -maxdepth 1 -type d -print -exec rm -rf {} +
+	find build -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
 fi
