@@ -24,7 +24,7 @@ This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads l
 
 Downloaded sources and intermediate `.o` files live under `build/`; the final `.app` is placed here in the top-level directory. It's a flat binary linked at `0xFFFF800000000000` (see `port/c.ld`), ready to load as a BareMetal app (e.g. copy it onto a BMFS disk image and load it from the BareMetal monitor).
 
-`./clean.sh` removes build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/` source trees.
+`./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/` zip/tarball.
 
 ## What's in here
 
@@ -61,4 +61,4 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
 
 ## Limitations
 
-This is not a general-purpose POSIX environment: no `fork`/`exec`, no threads (yet), no signals, flat BMFS namespace (no subdirectories), TCP only (no UDP/raw sockets exposed, no DNS), 30s timeout on blocking socket calls. See `OPENISSUES.md` for the full list and the reasoning behind each cut.
+This is not a general-purpose POSIX environment: no `fork`/`exec`, no threads (yet), no signals (yet?), flat BMFS namespace (no subdirectories), TCP/UDP only (no raw sockets exposed), 30s timeout on blocking socket calls. See `OPENISSUES.md` for the full list and the reasoning behind each cut.
