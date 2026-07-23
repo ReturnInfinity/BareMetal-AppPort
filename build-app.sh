@@ -12,7 +12,7 @@ BUILD_DIR="build"
 # Set BAREMETAL_DEBUG=TRUE in the environment to compile out net_glue.c's
 # diagnostic printf's (fc cmdline parsing, DHCP/DNS fallback, etc). Left
 # unset/FALSE, they print as normal.
-# BAREMETAL_DEBUG="${BAREMETAL_DEBUG:-FALSE}"
+BAREMETAL_DEBUG=TRUE
 
 MUSL_DIR="$BUILD_DIR/musl-1.2.6"
 MUSL_INC="$MUSL_DIR/sysroot/usr/local/musl/include"
