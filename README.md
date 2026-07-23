@@ -22,7 +22,7 @@ This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads l
 ./build-app.sh myapp.c     # builds your own app -> myapp.app
 ```
 
-Downloaded sources and intermediate `.o` files live under `build/`; the final `.app` is placed here in the top-level directory. It's a flat binary linked at `0xFFFF800000000000` (see `port/c.ld`), ready to load as a BareMetal app (e.g. copy it onto a BMFS disk image and load it from the BareMetal monitor).
+Downloaded sources and intermediate `.o` files live under `build/`; the final `.app` is placed here in the top-level directory. It's a flat binary linked at `0xFFFF800000000000` (see `port/c.ld`), ready to load as a BareMetal app (e.g. copy it onto a BMFS disk image and load it from the BareMetal monitor or run it as a unikernel).
 
 `./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/` zip/tarball.
 
