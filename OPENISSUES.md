@@ -91,16 +91,23 @@ Not implemented (all fall through to `-ENOSYS`):
 - **Small fixed open-file table** (`BMFS_MAX_OPEN` = 8 concurrent
   files across the whole process).
 
-## Networking (`net_glue.c`, `net_shim.c`)
+## Networking (`net_glue.c`, `net_shim.c`, `dns_shim.c`)
 
-- **TCP only.** No UDP or raw IP sockets exposed to application code
-  (`socket(AF_INET, SOCK_DGRAM, ...)` returns `-EAFNOSUPPORT`), even
-  though UDP is compiled into lwIP and used internally by the DHCP
-  client.
-- **No IPv6, no DNS resolution** (`LWIP_IPV6=0`, `LWIP_DNS=0` in
-  `lwip_port/lwipopts.h`). Programs must connect to a literal IPv4
-  address; `getaddrinfo()`/`gethostbyname()` have nothing to resolve
-  against.
+- **TCP and UDP only, no raw IP sockets.** `socket(AF_INET, SOCK_DGRAM,
+  ...)` works (`net_shim.c`), but there's no `listen`/`accept` for UDP
+  (`-EOPNOTSUPP`) and no multicast/broadcast support.
+- **No IPv6** (`LWIP_IPV6=0` in `lwip_port/lwipopts.h`). Programs must
+  use literal IPv4 addresses.
+- **`gethostbyname()` only, no `getaddrinfo()`/`gethostbyname_r()`.**
+  `dns_shim.c` provides `gethostbyname()` itself (IPv4 only, single
+  static `struct hostent` -- not thread-safe, but this port has no
+  threads), backed by lwIP's `dns_gethostbyname()` rather than musl's
+  own resolver: musl's reads `/etc/resolv.conf`, which nothing writes
+  on this port's BMFS image, so it'd fall back to querying
+  `127.0.0.1` instead of the DNS servers `net_glue.c` actually
+  configures (the fc `ip=` param's optional `dns0-ip`/`dns1-ip`
+  fields, DHCP's DNS option, or -- if neither provides one -- a
+  fallback to 8.8.8.8/1.1.1.1; see `dns_apply_fallback()`).
 - **All blocking socket calls (`connect`/`accept`/`send`/`recv`) have
   a hard-coded 30s timeout**, not indefinite POSIX blocking. Deliberate
   — there's no way to interrupt or recover a truly stuck call in a

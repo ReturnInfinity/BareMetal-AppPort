@@ -66,6 +66,7 @@ gcc $CFLAGS -o "$BUILD_DIR/posix_shim.o" "$PORT/posix_shim.c"
 gcc $CFLAGS -o "$BUILD_DIR/bmfs.o" "$PORT/bmfs.c"
 gcc $LWIP_CFLAGS -o "$BUILD_DIR/net_glue.o" "$PORT/net_glue.c"
 gcc $LWIP_CFLAGS -o "$BUILD_DIR/net_shim.o" "$PORT/net_shim.c"
+gcc $LWIP_CFLAGS -o "$BUILD_DIR/dns_shim.o" "$PORT/dns_shim.c"
 gcc $CFLAGS -o "$BUILD_DIR/libBareMetal.o" "$PORT/libBareMetal.c"
 
 APP_OBJS=""
@@ -75,13 +76,14 @@ for src in "${APP_SRCS[@]}"; do
 	APP_OBJS="$APP_OBJS $obj"
 done
 
-# lwIP core: IPv4 + Ethernet + ARP + DHCP + TCP (+ UDP, which DHCP
-# needs internally) only -- no IPv6, no AutoIP/IGMP/raw sockets/ACD
-# (see port/lwip_port/lwipopts.h), so their source files aren't built.
+# lwIP core: IPv4 + Ethernet + ARP + DHCP + TCP + UDP + DNS only --
+# no IPv6, no AutoIP/IGMP/raw sockets/ACD (see
+# port/lwip_port/lwipopts.h), so their source files aren't built.
 LWIP_SRCS="
 	core/def.c core/inet_chksum.c core/init.c core/ip.c core/mem.c
 	core/memp.c core/netif.c core/pbuf.c core/stats.c core/sys.c
 	core/tcp.c core/tcp_in.c core/tcp_out.c core/timeouts.c core/udp.c
+	core/dns.c
 	core/ipv4/dhcp.c core/ipv4/etharp.c core/ipv4/icmp.c
 	core/ipv4/ip4_addr.c core/ipv4/ip4.c core/ipv4/ip4_frag.c
 	netif/ethernet.c
@@ -95,6 +97,6 @@ done
 
 ld -T "$PORT/c.ld" -o "$APP_NAME" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" \
 	"$BUILD_DIR/bmfs.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS "$MUSL_LIB"
+	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS "$MUSL_LIB"
 
 echo "Built $APP_NAME"

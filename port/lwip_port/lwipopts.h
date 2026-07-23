@@ -39,12 +39,12 @@
 #define IP_FORWARD                 0
 
 #define LWIP_TCP                   1
-#define LWIP_UDP                   1 // needed internally by the DHCP client
+#define LWIP_UDP                   1 // also used by the DNS resolver and the DHCP client
 
 #define LWIP_DHCP                  1
 #define LWIP_DHCP_DOES_ACD_CHECK   0 // skip acd.c: one less thing to vendor/build
 #define LWIP_AUTOIP                0
-#define LWIP_DNS                   0
+#define LWIP_DNS                   1
 
 // ---- Buffer/window sizing, kept modest: app RAM here is whatever
 // the microVM was configured with (often just a few MiB -- see

@@ -18,6 +18,7 @@
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/dhcp.h"
+#include "lwip/dns.h"
 #include "lwip/timeouts.h"
 #include "lwip/pbuf.h"
 #include "lwip/etharp.h"
@@ -37,10 +38,18 @@
 // assumed to be a prefix of the buffer. Its own format (see Linux's
 // Documentation/admin-guide/nfs/nfsroot.rst) is:
 //   ip=<client-ip>:<server-ip>:<gw-ip>:<netmask>:<hostname>:<device>:<autoconf>
-// Only client-ip, gw-ip, and netmask are used here. When present and
-// parseable, it replaces DHCP entirely.
+// plus two more (non-standard) fields some distros' initrds append:
+//   :<dns0-ip>:<dns1-ip>
+// client-ip, gw-ip, and netmask are required; dns0-ip/dns1-ip are
+// optional. When present and parseable, this replaces DHCP entirely.
 #define FC_IP_PARAM_ADDR ((const char *)0x5a00UL)
 #define FC_IP_PARAM_MAXLEN 256
+
+// Used whenever neither the Firecracker "ip=" param nor DHCP hands us
+// a DNS server: public resolvers, so lookups still work rather than
+// failing outright with no DNS configured at all.
+#define FALLBACK_DNS0 "8.8.8.8"
+#define FALLBACK_DNS1 "1.1.1.1"
 
 static struct netif bmos_netif;
 
@@ -108,11 +117,21 @@ static err_t bmos_netif_init(struct netif *netif)
 // Linux-style kernel command line. Returns 1 and fills *ip/*gw/*mask
 // on success, 0 otherwise (no "ip=" token, or client-ip/gw-ip/netmask
 // missing or unparseable).
-static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask)
+//
+// *dns0/*dns1 are always zeroed first and only filled in if the
+// cmdline's optional dns0-ip/dns1-ip fields (the 8th/9th ':'-separated
+// fields -- an extension some distros' initrds add on top of the base
+// nfsroot ip= format) are present and parseable; the caller treats a
+// zeroed (any) address as "not provided" the same way it does for a
+// DHCP lease that came with no DNS option.
+static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask, ip4_addr_t *dns0, ip4_addr_t *dns1)
 {
 	const char *src = FC_IP_PARAM_ADDR;
 	char buf[FC_IP_PARAM_MAXLEN];
 	size_t i;
+
+	ip4_addr_set_zero(dns0);
+	ip4_addr_set_zero(dns1);
 
 	for (i = 0; i < sizeof(buf) - 1 && src[i] != '\0'; i++)
 		buf[i] = src[i];
@@ -139,14 +158,18 @@ static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask)
 	}
 
 	// Split on ':' in place: fields[0]=client-ip, [1]=server-ip,
-	// [2]=gw-ip, [3]=netmask, [4]=hostname, [5]=device, [6]=autoconf
-	// (plus whatever follows in the cmdline after that -- unused).
-	char *fields[7] = { 0 };
+	// [2]=gw-ip, [3]=netmask, [4]=hostname, [5]=device, [6]=autoconf,
+	// [7]=dns0-ip, [8]=dns1-ip (the last two are a non-standard
+	// extension some distros' initrds add on top of the base
+	// nfsroot ip= format -- optional, see the fc_parse_ip_param()
+	// comment above) (plus whatever follows in the cmdline after
+	// that -- unused).
+	char *fields[9] = { 0 };
 	char *p = tok + 3;
 	int n = 0;
 
 	fields[n++] = p;
-	while (n < 7 && (p = strchr(p, ':')) != NULL) {
+	while (n < 9 && (p = strchr(p, ':')) != NULL) {
 		*p = '\0';
 		p++;
 		fields[n++] = p;
@@ -178,6 +201,15 @@ static int fc_parse_ip_param(ip4_addr_t *ip, ip4_addr_t *gw, ip4_addr_t *mask)
 		return 0;
 	}
 
+	// dns0-ip/dns1-ip are optional -- an unparseable or absent one just
+	// leaves the corresponding *dns0/*dns1 zeroed (already done above),
+	// it doesn't fail the whole "ip=" param the way client-ip/gw-ip/
+	// netmask do.
+	if (n > 7 && fields[7][0] != '\0' && ip4addr_aton(fields[7], dns0))
+		printf("net: fc ip param: dns0-ip=\"%s\"\n", fields[7]);
+	if (n > 8 && fields[8][0] != '\0' && ip4addr_aton(fields[8], dns1))
+		printf("net: fc ip param: dns1-ip=\"%s\"\n", fields[8]);
+
 	return 1;
 }
 
@@ -187,8 +219,8 @@ void net_init(void)
 
 	lwip_init();
 
-	ip4_addr_t ip, gw, mask;
-	if (fc_parse_ip_param(&ip, &gw, &mask)) {
+	ip4_addr_t ip, gw, mask, dns0, dns1;
+	if (fc_parse_ip_param(&ip, &gw, &mask, &dns0, &dns1)) {
 		// ip4addr_ntoa() returns a pointer to a single shared static
 		// buffer, so each address needs its own buffer here -- calling
 		// it three times as inline printf args would just print the
@@ -202,6 +234,17 @@ void net_init(void)
 			NULL, bmos_netif_init, ethernet_input);
 		netif_set_default(&bmos_netif);
 		netif_set_up(&bmos_netif);
+
+		// DHCP's own DNS options are applied as part of dhcp_bind() (see
+		// dhcp_handle_ack() in lwIP), so this static path is the one
+		// case where nothing else sets these -- do it here rather than
+		// leaving it to net_wait_ready()'s fallback, so a cmdline-
+		// provided DNS server is preferred over the 8.8.8.8/1.1.1.1
+		// fallback.
+		if (!ip4_addr_isany_val(dns0))
+			dns_setserver(0, &dns0);
+		if (!ip4_addr_isany_val(dns1))
+			dns_setserver(1, &dns1);
 	} else {
 		netif_add(&bmos_netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY,
 			NULL, bmos_netif_init, ethernet_input);
@@ -239,6 +282,26 @@ int net_is_ready(void)
 	return netif_is_up(&bmos_netif) && !ip4_addr_isany_val(*netif_ip4_addr(&bmos_netif));
 }
 
+// Fills in whichever of the two DNS server slots is still unset (i.e.
+// neither the fc "ip=" param nor a DHCP lease's DNS option populated
+// it) with a public resolver, so name resolution still works rather
+// than silently having no DNS server configured at all. Per-slot
+// rather than all-or-nothing, so e.g. a DHCP lease that gave exactly
+// one DNS server keeps it in slot 0 and only slot 1 gets a fallback.
+static void dns_apply_fallback(void)
+{
+	ip4_addr_t fallback;
+
+	if (ip4_addr_isany_val(*dns_getserver(0)) && ip4addr_aton(FALLBACK_DNS0, &fallback)) {
+		printf("net: no DNS server provided by fc/DHCP, falling back to %s\n", FALLBACK_DNS0);
+		dns_setserver(0, &fallback);
+	}
+	if (ip4_addr_isany_val(*dns_getserver(1)) && ip4addr_aton(FALLBACK_DNS1, &fallback)) {
+		printf("net: no DNS server provided by fc/DHCP, falling back to %s\n", FALLBACK_DNS1);
+		dns_setserver(1, &fallback);
+	}
+}
+
 int net_wait_ready(unsigned timeout_ms)
 {
 	u32_t start = sys_now();
@@ -249,12 +312,27 @@ int net_wait_ready(unsigned timeout_ms)
 			return 0;
 	}
 
+	dns_apply_fallback();
+
 	return 1;
 }
 
 const char *net_ip_str(void)
 {
 	return ip4addr_ntoa(netif_ip4_addr(&bmos_netif));
+}
+
+#define NET_ENSURE_TIMEOUT_MS 30000
+
+static int net_ready;
+
+void net_ensure_ready(void)
+{
+	if (net_ready)
+		return;
+	net_init();
+	net_wait_ready(NET_ENSURE_TIMEOUT_MS);
+	net_ready = 1;
 }
 
 // =============================================================================

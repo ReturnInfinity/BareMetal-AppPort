@@ -1,8 +1,6 @@
-// net_test.c -- resolve one.one.one.one, connect to it on port 80, issue
-// a plain HTTP GET, and dump whatever the server sends back (headers +
-// body) to stdout. Proves the musl -> posix_shim -> net_shim -> lwIP TCP
-// path works end to end, and (via gethostbyname()) the dns_shim.c ->
-// lwIP DNS resolver path too.
+// net_test.c -- connect to 1.1.1.1:80, issue a plain HTTP GET, and dump
+// whatever the server sends back (headers + body) to stdout. Proves the
+// musl -> posix_shim -> net_shim -> lwIP TCP path works end to end.
 // build with build-app.sh
 //
 // This is also a valid *nix program of course.
@@ -13,23 +11,12 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netdb.h>
 
-#define HOST_NAME "one.one.one.one"
+#define HOST_IP "1.1.1.1"
 #define HOST_PORT 80
 
 int main(void)
 {
-	struct hostent *he = gethostbyname(HOST_NAME);
-	if (!he) {
-		printf("gethostbyname(\"%s\") failed\n", HOST_NAME);
-		return 1;
-	}
-
-	struct in_addr host_addr;
-	memcpy(&host_addr, he->h_addr, sizeof(host_addr));
-	printf("resolved %s -> %s\n", HOST_NAME, inet_ntoa(host_addr));
-
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) {
 		printf("socket() failed\n");
@@ -40,17 +27,21 @@ int main(void)
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(HOST_PORT);
-	addr.sin_addr = host_addr;
+	if (inet_pton(AF_INET, HOST_IP, &addr.sin_addr) != 1) {
+		printf("inet_pton() failed\n");
+		close(fd);
+		return 1;
+	}
 
 	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		printf("connect() to %s:%d failed\n", HOST_NAME, HOST_PORT);
+		printf("connect() to %s:%d failed\n", HOST_IP, HOST_PORT);
 		close(fd);
 		return 1;
 	}
 
 	static const char req[] =
 		"GET / HTTP/1.0\r\n"
-		"Host: " HOST_NAME "\r\n"
+		"Host: " HOST_IP "\r\n"
 		"Connection: close\r\n"
 		"\r\n";
 

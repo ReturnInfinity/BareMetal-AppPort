@@ -196,20 +196,6 @@ static void on_udp_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const i
 
 // ---- API ----
 
-// Lazily brings the interface up and waits for DHCP on the first
-// socket() call, rather than unconditionally at process startup --
-// most programs never touch the network, and DHCP takes real time.
-static int net_ready;
-
-static void net_ensure_ready(void)
-{
-	if (net_ready)
-		return;
-	net_init();
-	net_wait_ready(NET_BLOCK_TIMEOUT_MS);
-	net_ready = 1;
-}
-
 long net_shim_socket(long domain, long type, long protocol)
 {
 	(void)protocol;

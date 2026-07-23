@@ -21,6 +21,15 @@ int net_is_ready(void);
 // Returns 1 if ready, 0 on timeout.
 int net_wait_ready(unsigned timeout_ms);
 
+// Lazily brings the interface up and waits for DHCP the first time
+// anything actually needs the network (net_shim.c's first socket()
+// call, or dns_shim.c's first name lookup), rather than doing it
+// unconditionally at process startup -- most programs never touch
+// the network, and DHCP takes real time. Safe to call repeatedly
+// (and from more than one of those first-touch call sites) -- only
+// the first call does any work.
+void net_ensure_ready(void);
+
 // The netif's address as a string (e.g. "172.19.0.42"), or "0.0.0.0"
 // if not yet configured.
 const char *net_ip_str(void);
