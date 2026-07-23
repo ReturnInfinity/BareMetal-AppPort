@@ -15,6 +15,8 @@ long net_shim_accept(long fd, void *addr, socklen_t *addrlen);
 long net_shim_connect(long fd, const void *addr, long addrlen);
 long net_shim_send(long fd, const void *buf, size_t len, long flags);
 long net_shim_recv(long fd, void *buf, size_t len, long flags);
+long net_shim_sendto(long fd, const void *buf, size_t len, long flags, const void *addr, long addrlen);
+long net_shim_recvfrom(long fd, void *buf, size_t len, long flags, void *addr, socklen_t *addrlenp);
 long net_shim_close(long fd);
 
 #endif

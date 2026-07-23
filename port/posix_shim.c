@@ -261,7 +261,7 @@ static long sys_ioctl(long fd, long req, long arg)
 }
 
 // -----------------------------------------------------------------------
-// Networking (sockets) -- see net_shim.c/net_glue.c. IPv4 TCP only.
+// Networking (sockets) -- see net_shim.c/net_glue.c. IPv4 TCP/UDP only.
 // -----------------------------------------------------------------------
 
 static long sys_socket(long domain, long type, long protocol)
@@ -292,14 +292,12 @@ static long sys_connect(long fd, long addr, long addrlen)
 
 static long sys_sendto(long fd, long buf, long len, long flags, long addr, long addrlen)
 {
-	(void)addr; (void)addrlen; // connected TCP sockets only -- destination is implicit
-	return net_shim_send(fd, (const void *)buf, (size_t)len, flags);
+	return net_shim_sendto(fd, (const void *)buf, (size_t)len, flags, (const void *)addr, addrlen);
 }
 
 static long sys_recvfrom(long fd, long buf, long len, long flags, long addr, long addrlenp)
 {
-	(void)addr; (void)addrlenp; // connected TCP sockets only -- no peer address to report
-	return net_shim_recv(fd, (void *)buf, (size_t)len, flags);
+	return net_shim_recvfrom(fd, (void *)buf, (size_t)len, flags, (void *)addr, (socklen_t *)addrlenp);
 }
 
 // -----------------------------------------------------------------------
@@ -383,7 +381,7 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_exit:                                  return sys_exit(a1);
 	case SYS_exit_group:                             return sys_exit(a1);
 
-	// Networking -- IPv4 TCP only, see net_shim.c.
+	// Networking -- IPv4 TCP/UDP only, see net_shim.c.
 	case SYS_socket:      return sys_socket(a1, a2, a3);
 	case SYS_bind:         return sys_bind(a1, a2, a3);
 	case SYS_listen:        return sys_listen(a1, a2);
