@@ -9,6 +9,11 @@ set -e
 
 BUILD_DIR="build"
 
+# Set BAREMETAL_DEBUG=TRUE in the environment to compile out net_glue.c's
+# diagnostic printf's (fc cmdline parsing, DHCP/DNS fallback, etc). Left
+# unset/FALSE, they print as normal.
+# BAREMETAL_DEBUG="${BAREMETAL_DEBUG:-FALSE}"
+
 MUSL_DIR="$BUILD_DIR/musl-1.2.6"
 MUSL_INC="$MUSL_DIR/sysroot/usr/local/musl/include"
 MUSL_LIB="$MUSL_DIR/lib/libc.a"
@@ -21,6 +26,20 @@ PORT="port"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# Run a command, staying silent unless it fails -- then dump its output
+# and abort. Keeps musl/lwIP's noisy per-file build logs off the screen
+# on the (common) successful case.
+run_quiet() {
+	local log
+	log="$(mktemp)"
+	if ! "$@" >"$log" 2>&1; then
+		cat "$log"
+		rm -f "$log"
+		exit 1
+	fi
+	rm -f "$log"
+}
 
 if [ $# -eq 0 ]; then
 	echo "usage: $0 yourapp.c [otherfile.c ...]" >&2
@@ -58,13 +77,18 @@ LWIP_CFLAGS="$CFLAGS -I $LWIP_INC -I $LWIP_PORT"
 
 # Build musl's libc.a, and the merged header sysroot posix_shim.c/
 # app sources compile against.
-make -C "$MUSL_DIR" lib/libc.a
-make -C "$MUSL_DIR" install-headers DESTDIR="$(pwd)/$MUSL_DIR/sysroot"
+echo "Building musl..."
+run_quiet make -C "$MUSL_DIR" lib/libc.a
+run_quiet make -C "$MUSL_DIR" install-headers DESTDIR="$(pwd)/$MUSL_DIR/sysroot"
 
 gcc $CFLAGS -o "$BUILD_DIR/crt0.o" "$PORT/crt0.c"
 gcc $CFLAGS -o "$BUILD_DIR/posix_shim.o" "$PORT/posix_shim.c"
 gcc $CFLAGS -o "$BUILD_DIR/bmfs.o" "$PORT/bmfs.c"
-gcc $LWIP_CFLAGS -o "$BUILD_DIR/net_glue.o" "$PORT/net_glue.c"
+NET_GLUE_CFLAGS="$LWIP_CFLAGS"
+if [ "$BAREMETAL_DEBUG" = "TRUE" ]; then
+	NET_GLUE_CFLAGS="$NET_GLUE_CFLAGS -DBAREMETAL_DEBUG=1"
+fi
+gcc $NET_GLUE_CFLAGS -o "$BUILD_DIR/net_glue.o" "$PORT/net_glue.c"
 gcc $LWIP_CFLAGS -o "$BUILD_DIR/net_shim.o" "$PORT/net_shim.c"
 gcc $LWIP_CFLAGS -o "$BUILD_DIR/dns_shim.o" "$PORT/dns_shim.c"
 gcc $CFLAGS -o "$BUILD_DIR/libBareMetal.o" "$PORT/libBareMetal.c"
@@ -88,10 +112,11 @@ LWIP_SRCS="
 	core/ipv4/ip4_addr.c core/ipv4/ip4.c core/ipv4/ip4_frag.c
 	netif/ethernet.c
 "
+echo "Building lwIP..."
 LWIP_OBJS=""
 for src in $LWIP_SRCS; do
 	obj="$BUILD_DIR/lwip_$(basename "$src" .c).o"
-	gcc $LWIP_CFLAGS -o "$obj" "$LWIP_DIR/src/$src"
+	run_quiet gcc $LWIP_CFLAGS -o "$obj" "$LWIP_DIR/src/$src"
 	LWIP_OBJS="$LWIP_OBJS $obj"
 done
 
