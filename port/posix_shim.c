@@ -40,8 +40,12 @@
 // mallocng routes any single allocation >=128KB through mmap()
 // regardless of whether brk() is working, so mmap() draws from this
 // same arena rather than failing those allocations outright. There is
-// no real per-page unmapping available, so munmap() is a no-op: the
-// memory is simply never reclaimed.
+// no real per-page unmapping available, so munmap()'d ranges can't be
+// handed back to the OS -- instead they're kept on an address-sorted,
+// coalescing free list (see below) and reused by later mmap() calls
+// before the arena is bumped any further. brk()'s own sub-heap doesn't
+// need this: musl already reuses freed small objects internally and
+// only ever shrinks brk() from the top.
 // -----------------------------------------------------------------------
 
 extern char __bss_stop[];
@@ -88,6 +92,85 @@ static void *heap_alloc(size_t n)
 	return p;
 }
 
+// -----------------------------------------------------------------------
+// mmap() free list
+//
+// Freed mmap() ranges can't be handed back to the OS (see above), so
+// they're kept here instead and reused by later mmap() calls. Blocks
+// are kept address-sorted so adjacent frees coalesce into one larger
+// block -- otherwise an alloc/free churn cycle would fragment the
+// arena into pieces too small to satisfy the next request even though
+// the total free space is there. Node headers live inline in the freed
+// memory itself (safe: nothing else references it once freed), so this
+// costs no separate bookkeeping storage. brk() never touches this list;
+// it only ever grows/shrinks the arena from the tail, same as before.
+// -----------------------------------------------------------------------
+
+struct free_block {
+	struct free_block *next;
+	size_t size;
+};
+
+static struct free_block *free_list = 0;
+
+static void free_list_insert(void *addr, size_t size)
+{
+	struct free_block *blk = (struct free_block *)addr;
+	blk->size = size;
+
+	struct free_block *prev = 0;
+	struct free_block *cur = free_list;
+	while (cur && (char *)cur < (char *)addr) {
+		prev = cur;
+		cur = cur->next;
+	}
+
+	blk->next = cur;
+	if (prev)
+		prev->next = blk;
+	else
+		free_list = blk;
+
+	// Coalesce with the following block first: merging into blk
+	// here doesn't disturb the addresses free_list_insert() already
+	// used to link blk in, whereas merging into prev below would.
+	if (blk->next && (char *)blk + blk->size == (char *)blk->next) {
+		blk->size += blk->next->size;
+		blk->next = blk->next->next;
+	}
+
+	if (prev && (char *)prev + prev->size == (char *)blk) {
+		prev->size += blk->size;
+		prev->next = blk->next;
+	}
+}
+
+// First-fit: good enough for the large (>=128KB), comparatively
+// infrequent allocations mmap() actually serves.
+static void *free_list_alloc(size_t n)
+{
+	struct free_block **pp = &free_list;
+
+	while (*pp) {
+		struct free_block *cur = *pp;
+		if (cur->size >= n) {
+			size_t remaining = cur->size - n;
+			if (remaining >= sizeof(struct free_block)) {
+				struct free_block *rest = (struct free_block *)((char *)cur + n);
+				rest->size = remaining;
+				rest->next = cur->next;
+				*pp = rest;
+			} else {
+				*pp = cur->next;
+			}
+			return cur;
+		}
+		pp = &cur->next;
+	}
+
+	return 0;
+}
+
 static long sys_mmap(long addr, long len, long prot, long flags, long fd, long off)
 {
 	(void)addr; (void)prot; (void)fd; (void)off;
@@ -96,7 +179,18 @@ static long sys_mmap(long addr, long len, long prot, long flags, long fd, long o
 		return -ENODEV;
 
 	size_t n = ((size_t)len + 4095) & ~(size_t)4095;
-	void *p = heap_alloc(n);
+
+	// Anonymous mmap() is contractually zero-filled, and musl relies
+	// on that (e.g. calloc() skips its own memset for mmap-backed
+	// allocations). heap_alloc()'s bump path gets that for free --
+	// it only ever hands out untouched backing RAM -- but a
+	// free-list block may still hold a prior allocation's data (plus
+	// our own free_block header), so it has to be re-zeroed here.
+	void *p = free_list_alloc(n);
+	if (p)
+		memset(p, 0, n);
+	else
+		p = heap_alloc(n);
 	if (!p)
 		return -ENOMEM;
 
@@ -105,7 +199,11 @@ static long sys_mmap(long addr, long len, long prot, long flags, long fd, long o
 
 static long sys_munmap(long addr, long len)
 {
-	(void)addr; (void)len;
+	if (!addr || len <= 0)
+		return 0;
+
+	size_t n = ((size_t)len + 4095) & ~(size_t)4095;
+	free_list_insert((void *)addr, n);
 	return 0;
 }
 
