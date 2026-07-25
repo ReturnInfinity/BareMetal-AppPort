@@ -81,8 +81,13 @@ static void *heap_alloc(size_t n)
 {
 	heap_init();
 
+	// Done as a u64 subtraction/comparison, not "p + n < p" pointer
+	// arithmetic: overflowing a pointer is undefined behavior, so a
+	// compiler is entitled to assume it never happens and fold that
+	// comparison away - which silently defeats the overflow check.
 	char *p = heap_cur;
-	if (p + n > heap_end || p + n < p) {
+	u64 remaining = (u64)heap_end - (u64)p;
+	if (n > remaining) {
 		static const char msg[] = "posix_shim: out of memory\n";
 		b_output(msg, sizeof(msg) - 1);
 		return 0;
