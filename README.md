@@ -49,11 +49,12 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
     built on.
 - `scripts/` -- the fetch scripts `setup.sh` calls:
   - `get-musl.sh` -- downloads musl 1.2.6 and applies
-    `patches/musl-1.2.6-baremetal.patch`, the 3-file patch (syscall
-    transport, TLS bootstrap, cancellation-point syscalls), then
-    installs `patches/musl-1.2.6-config.mak` as musl's `config.mak`
-    (equivalent to running musl's `./configure` with the flags this
-    port needs, without you having to run `configure` yourself).
+    `port/musl_port/musl-1.2.6-baremetal.patch`, the 3-file patch
+    (syscall transport, TLS bootstrap, cancellation-point syscalls),
+    then installs `port/musl_port/musl-1.2.6-config.mak` as musl's
+    `config.mak` (equivalent to running musl's `./configure` with the
+    flags this port needs, without you having to run `configure`
+    yourself).
   - `get-lwip.sh` -- downloads lwIP 2.2.0. lwIP is vendored
     unmodified; all lwIP-side port work lives in `port/lwip_port/`
     and `port/net_glue.c`/`net_shim.c` instead of patches to lwIP
