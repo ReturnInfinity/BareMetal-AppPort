@@ -30,9 +30,9 @@
 
 // Built with -DBAREMETAL_DEBUG=1 (see build-app.sh's BAREMETAL_DEBUG
 // flag), this file's diagnostic printf's are compiled out entirely.
-#if BAREMETAL_DEBUG
-#define printf(...) ((void)0)
-#endif
+//#if BAREMETAL_DEBUG
+//#define printf(...) ((void)0)
+//#endif
 
 #define BMOS_NET_IID 0
 

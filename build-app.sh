@@ -12,7 +12,7 @@ BUILD_DIR="build"
 # Set BAREMETAL_DEBUG=TRUE in the environment to compile out net_glue.c's
 # diagnostic printf's (fc cmdline parsing, DHCP/DNS fallback, etc). Left
 # unset/FALSE, they print as normal.
-BAREMETAL_DEBUG=TRUE
+#BAREMETAL_DEBUG=TRUE
 
 # mbedTLS's bignum code (library/bignum.c) does 128-by-64-bit division
 # via __int128, which x86-64 has no single instruction for -- gcc emits
