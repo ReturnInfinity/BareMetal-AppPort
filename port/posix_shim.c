@@ -78,8 +78,11 @@ static void *heap_alloc(size_t n)
 	heap_init();
 
 	char *p = heap_cur;
-	if (p + n > heap_end || p + n < p)
+	if (p + n > heap_end || p + n < p) {
+		static const char msg[] = "posix_shim: out of memory\n";
+		b_output(msg, sizeof(msg) - 1);
 		return 0;
+	}
 
 	heap_cur = p + n;
 	return p;
