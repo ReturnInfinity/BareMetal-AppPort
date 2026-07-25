@@ -1,5 +1,5 @@
 /**
- * \file mbedtls_config.h
+ * \file baremetal_mbedtls_config.h
  *
  * \brief Configuration options (set of defines)
  *
@@ -15,7 +15,12 @@
 // BareMetal-AppPort: this is Mbed TLS 3.6.6's stock mbedtls_config.h
 // (see scripts/get-mbedtls.sh), with a handful of options flipped from
 // their upstream default -- each change is marked inline with a
-// "BareMetal-AppPort:" comment next to the option it touches. Summary:
+// "BareMetal-AppPort:" comment next to the option it touches. Renamed
+// from mbedtls_config.h so build-app.sh's -DMBEDTLS_CONFIG_FILE can't
+// lose a filename collision against mbedTLS's own bundled default of
+// that exact name (see build-app.sh's MBEDTLS_CFLAGS comment for why
+// that collision is silent -- no warning, no error, just the wrong
+// config compiled in). Summary of what's changed:
 //   - MBEDTLS_HAVE_TIME / MBEDTLS_HAVE_TIME_DATE: off (no clock source)
 //   - MBEDTLS_ENTROPY_HARDWARE_ALT: on, backed by port/mbedtls_port/
 //     entropy_hardware_poll.c (RDRAND -- no /dev/urandom, no getrandom())
@@ -3403,8 +3408,12 @@
  * Requires: MBEDTLS_PSA_CRYPTO_C,
  *           either MBEDTLS_PSA_ITS_FILE_C or a native implementation of
  *           the PSA ITS interface
+ *
+ * BareMetal-AppPort: disabled -- requires MBEDTLS_PSA_CRYPTO_C, which
+ * is off (see that option above). Left enabled in upstream's default
+ * mbedtls_config.h; check_config.h rejects the combination.
  */
-#define MBEDTLS_PSA_CRYPTO_STORAGE_C
+//#define MBEDTLS_PSA_CRYPTO_STORAGE_C
 
 /**
  * \def MBEDTLS_PSA_ITS_FILE_C

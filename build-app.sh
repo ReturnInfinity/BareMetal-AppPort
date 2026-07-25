@@ -98,11 +98,26 @@ LWIP_CFLAGS="$CFLAGS -I $LWIP_INC -I $LWIP_PORT"
 
 # mbedTLS headers pull in musl's the same way, plus mbedTLS's own
 # include/ tree; -DMBEDTLS_CONFIG_FILE points every mbedTLS source file
-# (library/ and our own) at our port/mbedtls_port/mbedtls_config.h
+# (library/ and our own) at our port/mbedtls_port/baremetal_mbedtls_config.h
 # instead of mbedTLS's own default -- see that file for what's changed
 # and why (short version: no clock, hardware RNG instead of
 # /dev/urandom, TLS 1.2 legacy-crypto-API only). See port/tls_shim.c.
-MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"mbedtls_config.h\""
+#
+# Deliberately NOT named mbedtls_config.h: mbedTLS's own build_info.h
+# does "#include MBEDTLS_CONFIG_FILE" as a computed *quote-form*
+# include, and the compiler's search order for a quote-form include
+# checks the directory of the file containing the #include (i.e.
+# mbedTLS's own include/mbedtls/, where build_info.h lives) before it
+# ever gets to any -I path. mbedTLS ships its own mbedtls_config.h
+# right there, so naming this file identically means that stock
+# desktop-oriented default (platform entropy via /dev/urandom, PSA
+# crypto, file I/O, no BAREMETAL_ENTROPY_HARDWARE_ALT hook, etc.) wins
+# silently every time, no matter what -I flags are passed -- gcc
+# doesn't warn, it just quietly compiles every mbedTLS source (and
+# this port's own tls_shim.c/entropy_hardware_poll.c) against the
+# wrong config. A unique filename is the only fix; -iquote/-I ordering
+# can't win against the "current file's own directory" search step.
+MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\""
 
 # Build musl's libc.a, and the merged header sysroot posix_shim.c/
 # app sources compile against.
@@ -155,7 +170,7 @@ done
 # library/*.c file in mbedTLS is individually guarded by
 # "#if defined(MBEDTLS_<ITS_OWN_MODULE>_C)" around its entire contents
 # (that's how mbedTLS's own Makefile/CMake builds it too), so a module
-# our mbedtls_config.h leaves disabled just compiles down to an empty
+# our baremetal_mbedtls_config.h leaves disabled just compiles down to an empty
 # translation unit -- no curated file list to keep in sync by hand.
 MBEDTLS_OBJS=""
 for src in "$MBEDTLS_DIR"/library/*.c; do

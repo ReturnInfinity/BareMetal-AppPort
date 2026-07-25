@@ -3,7 +3,7 @@
 // Copyright (C) 2008-2026 Return Infinity -- see LICENSE.TXT
 //
 // entropy_hardware_poll.c -- mbedTLS's MBEDTLS_ENTROPY_HARDWARE_ALT hook
-// (see mbedtls_config.h). There's no /dev/urandom and no getrandom()
+// (see baremetal_mbedtls_config.h). There's no /dev/urandom and no getrandom()
 // syscall here (see OPENISSUES.md), so mbedTLS's own built-in platform
 // entropy source is disabled (MBEDTLS_NO_PLATFORM_ENTROPY) and this
 // takes its place, the same way crt0.c's fill_random() seeds musl's
