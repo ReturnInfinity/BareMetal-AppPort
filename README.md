@@ -1,6 +1,6 @@
 # BareMetal AppPort
 
-A build system for compiling your own C applications to run as BareMetal apps: a [musl](https://musl.libc.org/) libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), a [BMFS](https://github.com/ReturnInfinity/BMFS) file I/O layer, and [lwIP](https://savannah.nongnu.org/projects/lwip/)-based TCP/IP networking. See `OPENISSUES.md` for what's supported and what isn't.
+A build system for compiling your own C applications to run as BareMetal apps: a [musl](https://musl.libc.org/) libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), a [BMFS](https://github.com/ReturnInfinity/BMFS) file I/O layer, a [lwIP](https://savannah.nongnu.org/projects/lwip/)-based TCP/IP networking, and [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) for TLS/SSL. See `OPENISSUES.md` for what's supported and what isn't.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads l
 
 Downloaded sources and intermediate `.o` files live under `build/`; the final `.app` is placed here in the top-level directory. It's a flat binary linked at `0xFFFF800000000000` (see `port/c.ld`), ready to load as a BareMetal app (e.g. copy it onto a BMFS disk image and load it from the BareMetal monitor or run it as a unikernel).
 
-`./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/` zip/tarball.
+`./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/`/`mbedtls-3.6.6/` zip/tarball.
 
 ## What's in here
 
@@ -59,6 +59,9 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
     unmodified; all lwIP-side port work lives in `port/lwip_port/`
     and `port/net_glue.c`/`net_shim.c` instead of patches to lwIP
     itself.
+  - `get-mbedtls.sh` -- downloads Mbed-TLS 3.3.6. Mbed-TLS is vendored
+    unmodified; all Mbed-TLS-side port work lives in `port/tls_shim.c`
+    instead of patches to Mbed-TLS itself.
 
 ## Limitations
 
