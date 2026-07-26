@@ -444,12 +444,27 @@ static long sys_set_tid_address(long addr)
 	return 1; // fake tid; there is only ever one thread
 }
 
+// exit()/_exit() call this from wherever they were invoked, deep in
+// musl's call stack -- and musl's _Exit() is _Noreturn, spinning
+// forever on the syscall rather than returning up through main() if
+// it ever came back. So instead of returning normally, unwind RSP
+// straight back to _start's entry point (crt0.c) in one shot and
+// perform its "pop rbp; ret" ourselves. That lands back in
+// BareMetal's kernel right after it `call`ed into the app, exactly
+// as if the app had returned normally -- which is what makes the
+// kernel shut down.
+extern void *__bmos_entry_sp;
+
 static long sys_exit(long code)
 {
 	(void)code;
-	b_system(SHUTDOWN, 0, 0);
-	for (;;)
-		__asm__ volatile ("hlt");
+	__asm__ volatile (
+		"movq __bmos_entry_sp(%%rip), %%rsp\n\t"
+		"popq %%rbp\n\t"
+		"ret\n\t"
+		::: "memory"
+	);
+	__builtin_unreachable();
 }
 
 // -----------------------------------------------------------------------

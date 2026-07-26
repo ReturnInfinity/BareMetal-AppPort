@@ -14,6 +14,22 @@ static int has_rdrand(void);
 #define AT_RANDOM	25
 
 /*
+ * RSP as it was when BareMetal `call`ed into _start, captured in
+ * _start's prologue and handed to _start_c as an argument rather
+ * than written straight to this global from _start: it lives in
+ * .bss, and _start_c's first act is zero_bss(), which would
+ * immediately wipe it again if it were set any earlier. exit()/
+ * _exit() never return up through the normal call chain (musl's
+ * _Exit() spins forever on the syscall instead) -- so sys_exit()
+ * (posix_shim.c) restores RSP from this and issues its own "pop
+ * rbp; ret" to unwind straight back to _start's tail in one shot,
+ * exactly as if main() had returned normally. That's what lets the
+ * app just fall out to BareMetal, which shuts down once _start
+ * returns.
+ */
+void *__bmos_entry_sp;
+
+/*
  * Ensure RSP is 16-byte aligned. SSE instructions such as
  * MOVAPS will #GP on the mis-aligned stack.
  */
@@ -22,6 +38,7 @@ __attribute__((naked)) void _start(void)
 	__asm__ volatile (
 		"pushq %%rbp\n\t"        /* save rbp (callee-saved)     */
 		"movq %%rsp, %%rbp\n\t"  /* remember original RSP       */
+		"movq %%rbp, %%rdi\n\t"  /* ...and pass it to _start_c  */
 		"andq $-16, %%rsp\n\t"   /* ensure 16-byte alignment    */
 		"call _start_c\n\t"      /* CALL so RSP is 8-mod-16 inside _start_c */
 		"movq %%rbp, %%rsp\n\t"  /* restore original RSP        */
@@ -31,9 +48,11 @@ __attribute__((naked)) void _start(void)
 	);
 }
 
-int _start_c(void)
+int _start_c(void *entry_sp)
 {
 	zero_bss();
+
+	__bmos_entry_sp = entry_sp;	/* safe now that .bss is zeroed */
 
 	static unsigned char randbuf[16];
 	fill_random(randbuf);
