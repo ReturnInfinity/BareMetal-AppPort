@@ -172,6 +172,7 @@ done
 # (that's how mbedTLS's own Makefile/CMake builds it too), so a module
 # our baremetal_mbedtls_config.h leaves disabled just compiles down to an empty
 # translation unit -- no curated file list to keep in sync by hand.
+echo "Building mbedtls..."
 MBEDTLS_OBJS=""
 for src in "$MBEDTLS_DIR"/library/*.c; do
 	obj="$BUILD_DIR/mbedtls_$(basename "$src" .c).o"
@@ -179,6 +180,7 @@ for src in "$MBEDTLS_DIR"/library/*.c; do
 	MBEDTLS_OBJS="$MBEDTLS_OBJS $obj"
 done
 
+echo "Linking..."
 ld -T "$PORT/c.ld" -o "$APP_NAME" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" \
 	"$BUILD_DIR/bmfs.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" \
