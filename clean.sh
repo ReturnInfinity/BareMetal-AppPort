@@ -1,6 +1,7 @@
 #!/bin/bash
 # Remove all build artifacts (.o, .a, .app) from this directory,
-# and the extracted source folders (musl-*, lwip-*) from build/.
+# and the extracted source folders (musl-*, lwip-*, mbedtls-*,
+# lwext4-*) from build/.
 set -e
 
 cd "$(dirname "$0")"

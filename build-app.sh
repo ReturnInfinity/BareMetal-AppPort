@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-# Build a BareMetal app against the musl/lwIP/mbedTLS port in this directory.
+# Build a BareMetal app against the musl/lwIP/mbedTLS/lwext4 port in this directory.
 #
 # Usage: ./build-app.sh yourapp.c [otherfile.c ...]
 # The output is named after the first source file given, with a .app
@@ -36,6 +36,10 @@ LWIP_PORT="port/lwip_port"
 MBEDTLS_DIR="$BUILD_DIR/mbedtls-3.6.6"
 MBEDTLS_INC="$MBEDTLS_DIR/include"
 MBEDTLS_PORT="port/mbedtls_port"
+
+LWEXT4_DIR="$BUILD_DIR/lwext4-58bcf89"
+LWEXT4_INC="$LWEXT4_DIR/include"
+LWEXT4_PORT="port/lwext4_port"
 
 PORT="port"
 
@@ -73,6 +77,11 @@ fi
 
 if [ ! -d "$MBEDTLS_DIR" ]; then
 	echo "error: $MBEDTLS_DIR is missing -- run ./setup.sh first." >&2
+	exit 1
+fi
+
+if [ ! -d "$LWEXT4_DIR" ]; then
+	echo "error: $LWEXT4_DIR is missing -- run ./setup.sh first." >&2
 	exit 1
 fi
 
@@ -119,6 +128,16 @@ LWIP_CFLAGS="$CFLAGS -I $LWIP_INC -I $LWIP_PORT"
 # can't win against the "current file's own directory" search step.
 MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\""
 
+# lwext4 headers pull in musl's the same way, plus lwext4's own
+# include/ tree. -DCONFIG_USE_DEFAULT_CFG=0 makes lwext4's own
+# include/ext4_config.h pull in "generated/ext4_config.h" (a
+# quote-form include, found here via the -I $LWEXT4_PORT below --
+# see port/lwext4_port/generated/ext4_config.h for what's changed and
+# why: EXT2-only feature set, no journal/extents/xattr, musl's
+# errno.h/fcntl.h codes instead of lwext4's own). See port/ext4_shim.c
+# and port/lwext4_port/blockdev_baremetal.c.
+LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -I $PORT -DCONFIG_USE_DEFAULT_CFG=0"
+
 # Build musl's libc.a, and the merged header sysroot posix_shim.c/
 # app sources compile against.
 echo "Building musl..."
@@ -127,7 +146,8 @@ run_quiet make -C "$MUSL_DIR" install-headers DESTDIR="$(pwd)/$MUSL_DIR/sysroot"
 
 gcc $CFLAGS -o "$BUILD_DIR/crt0.o" "$PORT/crt0.c"
 gcc $CFLAGS -o "$BUILD_DIR/posix_shim.o" "$PORT/posix_shim.c"
-gcc $CFLAGS -o "$BUILD_DIR/bmfs.o" "$PORT/bmfs.c"
+gcc $LWEXT4_CFLAGS -o "$BUILD_DIR/ext4_shim.o" "$PORT/ext4_shim.c"
+gcc $LWEXT4_CFLAGS -o "$BUILD_DIR/blockdev_baremetal.o" "$LWEXT4_PORT/blockdev_baremetal.c"
 NET_GLUE_CFLAGS="$LWIP_CFLAGS"
 if [ "$BAREMETAL_DEBUG" = "TRUE" ]; then
 	NET_GLUE_CFLAGS="$NET_GLUE_CFLAGS -DBAREMETAL_DEBUG=1"
@@ -180,10 +200,26 @@ for src in "$MBEDTLS_DIR"/library/*.c; do
 	MBEDTLS_OBJS="$MBEDTLS_OBJS $obj"
 done
 
+# Like mbedTLS above (and unlike the hand-picked LWIP_SRCS list):
+# every src/*.c file in lwext4 is compiled unconditionally, whether or
+# not the feature it implements (journaling, extents, xattrs) is
+# enabled in our config -- disabled features either compile down to
+# an empty translation unit (ext4_extent.c, ext4_xattr.c: internally
+# guarded by "#if CONFIG_..._ENABLE") or simply go unused (their code
+# is still linked in, just never called).
+echo "Building lwext4..."
+LWEXT4_OBJS=""
+for src in "$LWEXT4_DIR"/src/*.c; do
+	obj="$BUILD_DIR/lwext4_$(basename "$src" .c).o"
+	gcc $LWEXT4_CFLAGS -o "$obj" "$src"
+	LWEXT4_OBJS="$LWEXT4_OBJS $obj"
+done
+
 echo "Linking..."
 ld -T "$PORT/c.ld" -o "$APP_NAME" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" \
-	"$BUILD_DIR/bmfs.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
+	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" \
+	"$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $LWEXT4_OBJS "$MUSL_LIB" "$LIBGCC"
 
 echo "Built $APP_NAME"

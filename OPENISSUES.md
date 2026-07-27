@@ -1,8 +1,8 @@
 # Open Issues
 
-Known gaps and limitations in the musl libc port (`app/`), BMFS file
-I/O, and lwIP-based networking. Most of these are deliberate scope
-cuts made while getting each phase working end to end, not bugs —
+Known gaps and limitations in the musl libc port (`app/`), lwext4-based
+EXT2 file I/O, and lwIP-based networking. Most of these are deliberate
+scope cuts made while getting each phase working end to end, not bugs —
 they're listed here so they're easy to find again when someone hits
 one.
 
@@ -44,14 +44,18 @@ Not implemented (all fall through to `-ENOSYS`):
   `fill_random()` using `rdrand`/`rdtsc`, but that path isn't exposed
   as a syscall).
 - `poll`/`select`/`epoll_*` — no way to multiplex across multiple fds
-  (stdin, a BMFS file, a socket) in one blocking call. Combined with
+  (stdin, an EXT2 file, a socket) in one blocking call. Combined with
   every blocking socket/file op in this port already being a
   synchronous spin-loop internally, this means a program can't
   currently wait on "whichever of these fds is ready first."
 - `pipe`/`pipe2`/`dup`/`dup2`/`dup3` — no in-process fd duplication or
   pipes between fds.
 - `getcwd`/`chdir`/`mkdir`/`rmdir`/`chmod`/`chown`/`umask` — no
-  concept of a working directory or permissions (BMFS has neither).
+  concept of a working directory or permissions on this port, even
+  though lwext4 itself supports real directories and a mode/owner per
+  inode (see `ext4_dir_mk()`, `ext4_mode_set()`, `ext4_owner_set()` in
+  lwext4's `ext4.h`) — `ext4_shim.c` just doesn't expose any of that
+  yet, only `open`/`unlink`/`stat` on existing paths.
 
 ## Heap (`posix_shim.c`)
 
@@ -67,29 +71,48 @@ Not implemented (all fall through to `-ENOSYS`):
   smaller `brk()`-backed allocations would otherwise have used, with
   no way to trade space back.
 
-## BMFS file I/O (`bmfs.c`)
+## EXT2 file I/O (`ext4_shim.c`, `lwext4_port/`)
 
-- **Flat namespace only — no subdirectories.** Paths are just a
-  filename with at most one leading `/` stripped; anything with an
-  embedded `/` is rejected with `-ENOENT`.
-- **Fixed 2MiB reservation per file, set at creation, never grown.**
-  Writing past a file's `reserved_blocks` capacity fails with
-  `-ENOSPC` even if the disk has free space elsewhere — there's no
-  mechanism to extend an existing file's allocation.
-- **Directory table changes only flush to disk on `close()`.** If a
-  program exits (or the VM shuts down) without closing a modified fd,
-  the new size / new directory entry is lost even though data blocks
-  may have already been written.
-- **No timestamps.** `bmfs_fstat_fd()`/`bmfs_fstatat()` always report
-  zeroed atime/mtime/ctime — no clock source is wired into file
-  metadata (unlike TCP/heap code, which do use
-  `b_system(TIMECOUNTER)`).
-- **No `access()`/`chmod()`/permission bits.** Every file reports mode
-  `0644` regardless of anything; there's no enforcement either way.
-- **No directory listing.** `opendir`/`readdir`-equivalent enumeration
-  of what's on disk isn't implemented — only look-up-by-name.
-- **Small fixed open-file table** (`BMFS_MAX_OPEN` = 8 concurrent
+- **No cwd concept.** A path with no leading `/` is just prefixed with
+  one (`ext4_shim_path()`) rather than resolved against any real
+  working directory — there's no `chdir()`, and `openat()`'s `dirfd`
+  is always ignored (`AT_FDCWD`-only, see `posix_shim.c`).
+- **No directory creation/listing exposed.** lwext4 itself supports
+  real directories, but `ext4_shim.c` only wraps
+  `open`/`read`/`write`/`close`/`lseek`/`stat`/`unlink` — no
+  `mkdir`/`rmdir`/`opendir`/`readdir` equivalent, so a file can only be
+  created in a directory that already exists on the image.
+- **`stat`/`lstat` never resolve symlinks — nor do they differ.** An
+  EXT2 image can contain real symlinks, but `ext4_shim_fstatat()` just
+  reports the raw inode at the given path; `lstat()` and `stat()`
+  behave identically (neither follows one to its target), and nothing
+  in this port ever opens a symlink's target transparently either.
+- **No `access()`/`chmod()`/permission enforcement.** `open()`'s `mode`
+  argument is ignored entirely; whatever mode bits are already on an
+  inode (or lwext4's own default for newly-created files) are reported
+  as-is, but nothing checks them against anything.
+- **No timestamps set by this port.** No clock source is wired into
+  file metadata (unlike TCP/heap code, which do use
+  `b_system(TIMECOUNTER)`) — atime/mtime/ctime come back as whatever
+  lwext4 itself defaulted them to (typically zero, since it has no
+  clock either), not real times.
+- **Small fixed open-file table** (`EXT4_SHIM_MAX_OPEN` = 8 concurrent
   files across the whole process).
+- **Block device capacity is a hard-coded upper bound, not the real
+  disk size.** There's no `b_system()` call to ask the kernel how big
+  the backing drive actually is, so `blockdev_baremetal.c` just
+  declares a generous ceiling (`BAREMETAL_BLK_COUNT`, currently 2 GiB)
+  for lwext4's own bounds-checking; it needs raising by hand if a
+  larger EXT2 image is ever used.
+- **Superblock free-space counters only flush on process exit.**
+  lwext4 keeps `free_blocks_count`/`free_inodes_count` accurate in
+  memory but only writes them back to disk on `ext4_umount()`, not on
+  every individual file op — `posix_shim.c`'s `sys_exit()` calls
+  `ext4_shim_sync()` to cover this for the normal exit path, but a
+  hard crash or power-loss mid-run would still leave those two
+  superblock fields stale (harmless and auto-fixed by `e2fsck`, but
+  worth knowing about if `e2fsck` ever reports "Free
+  blocks/inodes count wrong" after a non-graceful shutdown).
 
 ## Networking (`net_glue.c`, `net_shim.c`, `dns_shim.c`)
 
@@ -103,7 +126,7 @@ Not implemented (all fall through to `-ENOSYS`):
   static `struct hostent` -- not thread-safe, but this port has no
   threads), backed by lwIP's `dns_gethostbyname()` rather than musl's
   own resolver: musl's reads `/etc/resolv.conf`, which nothing writes
-  on this port's BMFS image, so it'd fall back to querying
+  on this port's EXT2 image, so it'd fall back to querying
   `127.0.0.1` instead of the DNS servers `net_glue.c` actually
   configures (the fc `ip=` param's optional `dns0-ip`/`dns1-ip`
   fields, DHCP's DNS option, or -- if neither provides one -- a

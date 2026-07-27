@@ -1,6 +1,6 @@
 # BareMetal AppPort
 
-A build system for compiling your own C applications to run as BareMetal apps: a [musl](https://musl.libc.org/) libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), a [BMFS](https://github.com/ReturnInfinity/BMFS) file I/O layer, a [lwIP](https://savannah.nongnu.org/projects/lwip/)-based TCP/IP networking, and [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) for TLS/SSL. See `OPENISSUES.md` for what's supported and what isn't.
+A build system for compiling your own C applications to run as BareMetal apps: a [musl](https://musl.libc.org/) libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), an [lwext4](https://github.com/gkostka/lwext4)-backed POSIX file I/O layer (the disk holds a plain EXT2 filesystem), a [lwIP](https://savannah.nongnu.org/projects/lwip/)-based TCP/IP networking, and [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) for TLS/SSL. See `OPENISSUES.md` for what's supported and what isn't.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ Run once, from this directory:
 ./setup.sh
 ```
 
-This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0 (used as-is, unmodified), creating `build/musl-1.2.6/` and `build/lwip-2.2.0/`. Both are pinned versions -- the patch and the `port/lwip_port/` glue are written against these exact releases. (`setup.sh` just runs `scripts/get-musl.sh` and `scripts/get-lwip.sh` in turn, if you want to re-run one on its own.)
+This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0, Mbed-TLS 3.6.6, and lwext4 (all three used as-is, unmodified), creating `build/musl-1.2.6/`, `build/lwip-2.2.0/`, `build/mbedtls-3.6.6/`, and `build/lwext4-58bcf89/`. All are pinned versions/commits -- the patch and the `port/lwip_port/`, `port/mbedtls_port/`, and `port/lwext4_port/` glue are written against these exact releases. (`setup.sh` just runs `scripts/get-musl.sh`, `scripts/get-lwip.sh`, `scripts/get-mbedtls.sh`, and `scripts/get-lwext4.sh` in turn, if you want to re-run one on its own.)
 
 ## Building an app
 
@@ -22,13 +22,13 @@ This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads l
 ./build-app.sh myapp.c     # builds your own app -> myapp.app
 ```
 
-Downloaded sources and intermediate `.o` files live under `build/`; the final `.app` is placed here in the top-level directory. It's a flat binary linked at `0xFFFF800000000000` (see `port/c.ld`), ready to load as a BareMetal app (e.g. copy it onto a BMFS disk image and load it from the BareMetal monitor or run it as a unikernel).
+Downloaded sources and intermediate `.o` files live under `build/`; the final `.app` is placed here in the top-level directory. It's a flat binary linked at `0xFFFF800000000000` (see `port/c.ld`), ready to load as a BareMetal app (e.g. copy it onto an EXT2-formatted disk image and load it from the BareMetal monitor or run it as a unikernel).
 
 `./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/`/`mbedtls-3.6.6/` zip/tarball.
 
 ## What's in here
 
-- `setup.sh` -- fetches musl and lwIP (see Setup above).
+- `setup.sh` -- fetches musl, lwIP, Mbed-TLS, and lwext4 (see Setup above).
 - `build-app.sh` -- builds an app (see Building an app above).
 - `clean.sh` -- removes build artifacts.
 - `helloc.c` -- minimal demo app (musl `printf`, argc/argv/envp).
@@ -39,8 +39,10 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
   - `posix_shim.c`/`.h` -- the syscall dispatcher musl's patched
     `syscall_arch.h` calls into, plus the heap (`brk`/`mmap`) backing
     it.
-  - `bmfs.c`/`.h` -- POSIX file I/O (`open`/`read`/`write`/`stat`/...)
-    on top of BMFS, the on-disk format BareMetal uses.
+  - `ext4_shim.c`/`.h`, `lwext4_port/` -- POSIX file I/O
+    (`open`/`read`/`write`/`stat`/...) on top of lwext4, mounting the
+    disk as a plain EXT2 filesystem; `lwext4_port/blockdev_baremetal.c`
+    is the block device glue over `b_nvs_read`/`b_nvs_write`.
   - `net_glue.c`/`.h`, `net_shim.c`/`.h`, `lwip_port/` -- a blocking
     BSD-socket-shaped layer over lwIP's raw callback API, plus the
     Ethernet netif driver and port config.
@@ -62,7 +64,12 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
   - `get-mbedtls.sh` -- downloads Mbed-TLS 3.3.6. Mbed-TLS is vendored
     unmodified; all Mbed-TLS-side port work lives in `port/tls_shim.c`
     instead of patches to Mbed-TLS itself.
+  - `get-lwext4.sh` -- downloads a pinned lwext4 commit (its last
+    tagged release predates this port's setup by several years of
+    fixes). lwext4 is vendored unmodified; all lwext4-side port work
+    lives in `port/lwext4_port/` and `port/ext4_shim.c` instead of
+    patches to lwext4 itself.
 
 ## Limitations
 
-This is not a general-purpose POSIX environment: no `fork`/`exec`, no threads (yet), no signals (yet?), flat BMFS namespace (no subdirectories), TCP/UDP only (no raw sockets exposed), 30s timeout on blocking socket calls. See `OPENISSUES.md` for the full list and the reasoning behind each cut.
+This is not a general-purpose POSIX environment: no `fork`/`exec`, no threads (yet), no signals (yet?), no cwd concept (relative paths resolve against the filesystem root -- see `ext4_shim.c`), TCP/UDP only (no raw sockets exposed), 30s timeout on blocking socket calls. See `OPENISSUES.md` for the full list and the reasoning behind each cut.

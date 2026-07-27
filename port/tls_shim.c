@@ -25,8 +25,9 @@
 // smaller per-connection mbedtls_ssl_context varies. TLS_MAX_CONN is 2
 // rather than 1 solely so a failed/lingering connection can't wedge the
 // only slot; nothing in this port actually opens TLS connections
-// concurrently (see net_shim.c's SOCK_MAX/BMFS_MAX_OPEN for the same
-// small-fixed-table style elsewhere in this port).
+// concurrently (see net_shim.c's SOCK_MAX/ext4_shim.c's
+// EXT4_SHIM_MAX_OPEN for the same small-fixed-table style elsewhere
+// in this port).
 // =============================================================================
 
 #include <string.h>
