@@ -50,12 +50,12 @@ Not implemented (all fall through to `-ENOSYS`):
   currently wait on "whichever of these fds is ready first."
 - `pipe`/`pipe2`/`dup`/`dup2`/`dup3` — no in-process fd duplication or
   pipes between fds.
-- `getcwd`/`chdir`/`mkdir`/`rmdir`/`chmod`/`chown`/`umask` — no
-  concept of a working directory or permissions on this port, even
-  though lwext4 itself supports real directories and a mode/owner per
-  inode (see `ext4_dir_mk()`, `ext4_mode_set()`, `ext4_owner_set()` in
-  lwext4's `ext4.h`) — `ext4_shim.c` just doesn't expose any of that
-  yet, only `open`/`unlink`/`stat` on existing paths.
+- `chmod`/`chown`/`umask` — no concept of permissions or ownership on
+  this port, even though lwext4 itself supports a mode/owner per inode
+  (see `ext4_mode_set()`/`ext4_owner_set()` in lwext4's `ext4.h`) —
+  see the EXT2 section below on why that's a bigger gap than a missing
+  syscall. (`getcwd`/`chdir`/`mkdir`/`rmdir` *are* wired up now, via
+  `ext4_shim.c`.)
 
 ## Heap (`posix_shim.c`)
 
@@ -73,31 +73,14 @@ Not implemented (all fall through to `-ENOSYS`):
 
 ## EXT2 file I/O (`ext4_shim.c`, `lwext4_port/`)
 
-- **No cwd concept.** A path with no leading `/` is just prefixed with
-  one (`ext4_shim_path()`) rather than resolved against any real
-  working directory — there's no `chdir()`, and `openat()`'s `dirfd`
-  is always ignored (`AT_FDCWD`-only, see `posix_shim.c`).
-- **No directory creation/listing exposed.** lwext4 itself supports
-  real directories, but `ext4_shim.c` only wraps
-  `open`/`read`/`write`/`close`/`lseek`/`stat`/`unlink` — no
-  `mkdir`/`rmdir`/`opendir`/`readdir` equivalent, so a file can only be
-  created in a directory that already exists on the image.
-- **`stat`/`lstat` never resolve symlinks — nor do they differ.** An
-  EXT2 image can contain real symlinks, but `ext4_shim_fstatat()` just
-  reports the raw inode at the given path; `lstat()` and `stat()`
-  behave identically (neither follows one to its target), and nothing
-  in this port ever opens a symlink's target transparently either.
 - **No `access()`/`chmod()`/permission enforcement.** `open()`'s `mode`
   argument is ignored entirely; whatever mode bits are already on an
   inode (or lwext4's own default for newly-created files) are reported
-  as-is, but nothing checks them against anything.
-- **No timestamps set by this port.** No clock source is wired into
-  file metadata (unlike TCP/heap code, which do use
-  `b_system(TIMECOUNTER)`) — atime/mtime/ctime come back as whatever
-  lwext4 itself defaulted them to (typically zero, since it has no
-  clock either), not real times.
-- **Small fixed open-file table** (`EXT4_SHIM_MAX_OPEN` = 8 concurrent
-  files across the whole process).
+  as-is, but nothing checks them against anything. `chmod()` itself
+  could be wired up via lwext4's `ext4_mode_set()`, but real
+  enforcement needs a uid/gid model this port has none of anywhere
+  (matches the "no process model" cuts above) — not just a missing
+  syscall.
 - **Block device capacity is a hard-coded upper bound, not the real
   disk size.** There's no `b_system()` call to ask the kernel how big
   the backing drive actually is, so `blockdev_baremetal.c` just

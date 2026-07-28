@@ -334,25 +334,78 @@ static long sys_lseek(long fd, long offset, long whence)
 	return -ESPIPE; // std fds 0-2 are streams, not seekable
 }
 
-static long sys_open(const char *path, long flags, long mode)
+static long sys_open(long dirfd, const char *path, long flags, long mode)
 {
-	return ext4_shim_open(path, (int)flags, (int)mode);
+	return ext4_shim_open(dirfd, path, (int)flags, (int)mode);
 }
 
-static long sys_unlink(const char *path)
+static long sys_unlink(long dirfd, const char *path)
 {
-	return ext4_shim_unlink(path);
+	return ext4_shim_unlink(dirfd, path);
+}
+
+static long sys_mkdir(long dirfd, const char *path)
+{
+	return ext4_shim_mkdir(dirfd, path);
+}
+
+static long sys_rmdir(long dirfd, const char *path)
+{
+	return ext4_shim_rmdir(dirfd, path);
+}
+
+// rmdir() has its own direct syscall number on this arch (see
+// arch/x86_64/bits/syscall.h.in), but unlinkat(..., AT_REMOVEDIR) is
+// how a program calling the *at() form removes a directory instead of
+// a file -- musl's own rmdir() never issues this, only an explicit
+// unlinkat() call would.
+static long sys_unlinkat(long dirfd, const char *path, long flags)
+{
+	if (flags & AT_REMOVEDIR)
+		return ext4_shim_rmdir(dirfd, path);
+	return ext4_shim_unlink(dirfd, path);
+}
+
+static long sys_chdir(const char *path)
+{
+	return ext4_shim_chdir(path);
+}
+
+static long sys_fchdir(long fd)
+{
+	return ext4_shim_fchdir(fd);
+}
+
+static long sys_getcwd(char *buf, size_t size)
+{
+	return ext4_shim_getcwd(buf, size);
+}
+
+static long sys_getdents(long fd, void *buf, size_t len)
+{
+	if (!ext4_shim_is_fd(fd))
+		return -EBADF;
+	return ext4_shim_getdents(fd, buf, (size_t)len);
 }
 
 // x86_64 musl's stat()/lstat()/fstatat() all funnel through fstatat()
-// (aliased to SYS_newfstatat -- see ext4_shim_fstatat()). dirfd/flags
-// are ignored -- there's no cwd concept on this port (see
-// ext4_shim.c's ext4_shim_path()), so there's no meaningful "relative
-// to this directory fd" to honor.
+// (aliased to SYS_newfstatat -- see ext4_shim_fstatat()). follow
+// resolves a trailing symlink to its target (stat()'s behavior)
+// rather than reporting the link itself (lstat()'s behavior).
 static long sys_fstatat(long dirfd, long path, long kstbuf, long flags)
 {
-	(void)dirfd; (void)flags;
-	return ext4_shim_fstatat((const char *)path, (void *)kstbuf);
+	int follow = !(flags & AT_SYMLINK_NOFOLLOW);
+	return ext4_shim_fstatat(dirfd, (const char *)path, (void *)kstbuf, follow);
+}
+
+static long sys_symlink(const char *target, long dirfd, const char *path)
+{
+	return ext4_shim_symlink(target, dirfd, path);
+}
+
+static long sys_readlink(long dirfd, const char *path, char *buf, size_t bufsize)
+{
+	return ext4_shim_readlink(dirfd, path, buf, bufsize);
 }
 
 // musl's __stdout_write only checks the return code of this ioctl
@@ -492,20 +545,33 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_fstat:                 return sys_fstat(a1, a2);
 	case SYS_lseek:                  return sys_lseek(a1, a2, a3);
 	case SYS_ioctl:                    return sys_ioctl(a1, a2, a3);
-	case SYS_open:                      return sys_open((const char *)a1, a2, a3);
-	case SYS_openat:                      return sys_open((const char *)a2, a3, a4); // AT_FDCWD-only: no cwd concept on this port, a1 (dirfd) is ignored
-	case SYS_unlink:                        return sys_unlink((const char *)a1);
+	case SYS_open:                      return sys_open(AT_FDCWD, (const char *)a1, a2, a3);
+	case SYS_openat:                      return sys_open(a1, (const char *)a2, a3, a4);
+	case SYS_unlink:                        return sys_unlink(AT_FDCWD, (const char *)a1);
+	case SYS_unlinkat:                        return sys_unlinkat(a1, (const char *)a2, a3);
+	case SYS_mkdir:                             return sys_mkdir(AT_FDCWD, (const char *)a1);
+	case SYS_mkdirat:                             return sys_mkdir(a1, (const char *)a2);
+	case SYS_rmdir:                                return sys_rmdir(AT_FDCWD, (const char *)a1);
+	case SYS_chdir:                                  return sys_chdir((const char *)a1);
+	case SYS_fchdir:                                  return sys_fchdir(a1);
+	case SYS_getcwd:                                    return sys_getcwd((char *)a1, (size_t)a2);
+	// musl's readdir() on this arch actually issues SYS_getdents64,
+	// not the legacy SYS_getdents its own dirent.h still declares --
+	// both land here since ext4_shim_getdents() fills musl's own
+	// struct dirent layout either way (see its comment).
+	case SYS_getdents:
+	case SYS_getdents64:
+		return sys_getdents(a1, (void *)a2, a3);
+	case SYS_symlink:                                       return sys_symlink((const char *)a1, AT_FDCWD, (const char *)a2);
+	case SYS_readlink:                                        return sys_readlink(AT_FDCWD, (const char *)a1, (char *)a2, (size_t)a3);
 	// musl's __fstatat() takes the SYS_stat/SYS_lstat fast path for
 	// plain stat(path)/lstat(path) (fd==AT_FDCWD, flag in {0,
 	// AT_SYMLINK_NOFOLLOW}) and only falls through to the general
-	// SYS_fstatat (aliased from SYS_newfstatat) case otherwise. An EXT2
-	// image can contain real symlinks, but ext4_shim_fstatat() just
-	// reports the raw inode at the given path without ever resolving
-	// one -- so lstat() and stat() behave identically here (neither
-	// follows a symlink to its target).
+	// SYS_fstatat (aliased from SYS_newfstatat) case otherwise.
 	case SYS_stat:
+		return ext4_shim_fstatat(AT_FDCWD, (const char *)a1, (void *)a2, 1);
 	case SYS_lstat:
-		return ext4_shim_fstatat((const char *)a1, (void *)a2);
+		return ext4_shim_fstatat(AT_FDCWD, (const char *)a1, (void *)a2, 0);
 	case SYS_newfstatat:                     return sys_fstatat(a1, a2, a3, a4);
 	case SYS_brk:                             return sys_brk(a1);
 	case SYS_mmap:                             return sys_mmap(a1, a2, a3, a4, a5, a6);

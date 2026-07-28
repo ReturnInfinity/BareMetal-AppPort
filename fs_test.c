@@ -1,6 +1,8 @@
-// fs_test.c -- exercises open/write/read/lseek/fstat/stat/unlink against
-// the EXT2 image mounted by ext4_shim.c. Proves the musl -> posix_shim ->
-// ext4_shim -> lwext4 file I/O path works end to end.
+// fs_test.c -- exercises open/write/read/lseek/fstat/stat/unlink,
+// chdir/getcwd, mkdir/opendir/readdir/rmdir, symlink/readlink, and
+// timestamps against the EXT2 image mounted by ext4_shim.c. Proves the
+// musl -> posix_shim -> ext4_shim -> lwext4 file I/O path works end to
+// end.
 // build with build-app.sh
 //
 // This is also a valid *nix program of course (run it against a scratch
@@ -11,6 +13,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <errno.h>
 
 #define TEST_PATH "/fs_test.txt"
@@ -113,8 +116,9 @@ int main(void)
 		return 1;
 	}
 
-	// Relative path -- no cwd concept on this port, so this should
-	// land at the filesystem root, same as an absolute path.
+	// Relative path -- cwd defaults to "/", so this should land at
+	// the filesystem root just like an absolute path (chdir() itself
+	// is exercised separately below).
 	fd = open(TEST_PATH_RELATIVE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd < 0) {
 		printf("open() of a relative path failed: %s\n", strerror(errno));
@@ -151,6 +155,148 @@ int main(void)
 		close(fd);
 		return 1;
 	}
+
+	// Timestamps -- boot-relative but no longer always zero.
+	fd = open(TEST_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	write(fd, msg, strlen(msg));
+	close(fd);
+	if (stat(TEST_PATH, &st) < 0) {
+		printf("stat() after recreate failed: %s\n", strerror(errno));
+		return 1;
+	}
+	if (st.st_mtime == 0 || st.st_ctime == 0 || st.st_atime == 0) {
+		printf("timestamps are still all zero -- expected boot-relative non-zero values\n");
+		return 1;
+	}
+	unlink(TEST_PATH);
+
+	// cwd: chdir() into a fresh directory, create a file with a
+	// relative path, and confirm it landed there (not at the root).
+	const char *cwd_dir = "/cwd_test";
+	const char *cwd_rel = "rel.txt";
+	const char *cwd_abs = "/cwd_test/rel.txt";
+
+	if (mkdir(cwd_dir, 0755) < 0) {
+		printf("mkdir() failed: %s\n", strerror(errno));
+		return 1;
+	}
+	if (chdir(cwd_dir) < 0) {
+		printf("chdir() failed: %s\n", strerror(errno));
+		return 1;
+	}
+
+	char cwdbuf[256];
+	if (!getcwd(cwdbuf, sizeof(cwdbuf)) || strcmp(cwdbuf, cwd_dir) != 0) {
+		printf("getcwd() returned \"%s\", expected \"%s\"\n", cwdbuf, cwd_dir);
+		return 1;
+	}
+
+	fd = open(cwd_rel, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		printf("open() of a relative path under chdir() failed: %s\n", strerror(errno));
+		return 1;
+	}
+	write(fd, "x", 1);
+	close(fd);
+
+	if (stat(cwd_abs, &st) < 0) {
+		printf("relative path wasn't created under the chdir()'d directory\n");
+		return 1;
+	}
+
+	chdir("/");
+	unlink(cwd_abs);
+	if (rmdir(cwd_dir) < 0) {
+		printf("rmdir() failed: %s\n", strerror(errno));
+		return 1;
+	}
+
+	// mkdir/opendir/readdir/rmdir
+	const char *dir_path = "/dir_test";
+	if (mkdir(dir_path, 0755) < 0) {
+		printf("mkdir() failed: %s\n", strerror(errno));
+		return 1;
+	}
+
+	fd = open("/dir_test/a.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		printf("open() of a file under a fresh directory failed: %s\n", strerror(errno));
+		return 1;
+	}
+	write(fd, "a", 1);
+	close(fd);
+	fd = open("/dir_test/b.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		printf("open() of a second file under a fresh directory failed: %s\n", strerror(errno));
+		return 1;
+	}
+	write(fd, "b", 1);
+	close(fd);
+
+	DIR *dir = opendir(dir_path);
+	if (!dir) {
+		printf("opendir() failed: %s\n", strerror(errno));
+		return 1;
+	}
+
+	int saw_a = 0, saw_b = 0, saw_dot = 0;
+	struct dirent *de;
+	while ((de = readdir(dir)) != NULL) {
+		if (strcmp(de->d_name, "a.txt") == 0)
+			saw_a = 1;
+		else if (strcmp(de->d_name, "b.txt") == 0)
+			saw_b = 1;
+		else if (strcmp(de->d_name, ".") == 0)
+			saw_dot = 1;
+	}
+	closedir(dir);
+
+	if (!saw_a || !saw_b || !saw_dot) {
+		printf("readdir() didn't see all expected entries (a=%d b=%d dot=%d)\n",
+		       saw_a, saw_b, saw_dot);
+		return 1;
+	}
+
+	unlink("/dir_test/a.txt");
+	unlink("/dir_test/b.txt");
+	if (rmdir(dir_path) < 0) {
+		printf("rmdir() of a populated-then-emptied directory failed: %s\n", strerror(errno));
+		return 1;
+	}
+
+	// symlink: lstat() must report the link itself, stat() must
+	// follow it through to the real file's contents/size.
+	const char *link_target = "/link_target.txt";
+	const char *link_path = "/link_test";
+
+	fd = open(link_target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	write(fd, msg, strlen(msg));
+	close(fd);
+
+	if (symlink(link_target, link_path) < 0) {
+		printf("symlink() failed: %s\n", strerror(errno));
+		return 1;
+	}
+
+	if (lstat(link_path, &st) < 0 || !S_ISLNK(st.st_mode)) {
+		printf("lstat() on a symlink didn't report S_ISLNK\n");
+		return 1;
+	}
+
+	if (stat(link_path, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size != (off_t)strlen(msg)) {
+		printf("stat() on a symlink didn't follow through to the target file\n");
+		return 1;
+	}
+
+	char linkbuf[256] = {0};
+	ssize_t ln = readlink(link_path, linkbuf, sizeof(linkbuf) - 1);
+	if (ln < 0 || strcmp(linkbuf, link_target) != 0) {
+		printf("readlink() returned \"%s\", expected \"%s\"\n", linkbuf, link_target);
+		return 1;
+	}
+
+	unlink(link_path);
+	unlink(link_target);
 
 	printf("all filesystem tests passed\n");
 	return 0;
