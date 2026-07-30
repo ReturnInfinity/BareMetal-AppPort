@@ -18,18 +18,18 @@ mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
 if [ -d "$MBEDTLS_DIR" ]; then
-	echo "$MBEDTLS_DIR already exists -- skipping download. Remove it first if you want to re-fetch."
+	echo "$MBEDTLS_DIR already exists - skipping download. Remove it first if you want to re-fetch."
 	exit 0
 fi
 
 if [ -f "$TARBALL" ]; then
-	echo "$TARBALL already exists -- skipping download."
+	echo "$TARBALL already exists - skipping download."
 else
-	echo "Downloading ${URL}..."
+	echo "Downloading ${URL}"
 	curl -L -o "${TARBALL}" "${URL}"
 fi
 
-echo "Extracting ${TARBALL}..."
+echo "Extracting ${TARBALL}"
 tar -xjf "${TARBALL}"
 
-echo "Done. Source extracted to: ${MBEDTLS_DIR}/"
+# echo "Done. Source extracted to: ${MBEDTLS_DIR}/"

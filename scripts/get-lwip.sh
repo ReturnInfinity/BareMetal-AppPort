@@ -16,18 +16,18 @@ mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
 if [ -d "$LWIP_DIR" ]; then
-	echo "$LWIP_DIR already exists -- skipping download. Remove it first if you want to re-fetch."
+	echo "$LWIP_DIR already exists - skipping download. Remove it first if you want to re-fetch."
 	exit 0
 fi
 
 if [ -f "$ZIPFILE" ]; then
-	echo "$ZIPFILE already exists -- skipping download."
+	echo "$ZIPFILE already exists - skipping download."
 else
-	echo "Downloading ${URL}..."
+	echo "Downloading ${URL}"
 	curl -L -o "${ZIPFILE}" "${URL}"
 fi
 
-echo "Extracting ${ZIPFILE}..."
+echo "Extracting ${ZIPFILE}"
 unzip -q -o "${ZIPFILE}"
 
-echo "Done. Source extracted to: ${LWIP_DIR}/"
+# echo "Done. Source extracted to: ${LWIP_DIR}/"
