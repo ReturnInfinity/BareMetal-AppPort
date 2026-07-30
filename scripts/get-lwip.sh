@@ -24,7 +24,7 @@ if [ -f "$ZIPFILE" ]; then
 	echo "$ZIPFILE already exists - skipping download."
 else
 	echo "Downloading ${URL}"
-	curl -L -o "${ZIPFILE}" "${URL}"
+	curl -s -L -o "${ZIPFILE}" "${URL}"
 fi
 
 echo "Extracting ${ZIPFILE}"

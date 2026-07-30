@@ -24,8 +24,8 @@ fi
 if [ -f "$TARBALL" ]; then
 	echo "$TARBALL already exists - skipping download."
 else
-	echo "Downloading ${URL}..."
-	curl -L -o "${TARBALL}" "${URL}"
+	echo "Downloading ${URL}"
+	curl -s -L -o "${TARBALL}" "${URL}"
 fi
 
 echo "Extracting ${TARBALL}"
