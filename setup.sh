@@ -11,7 +11,7 @@ NORMAL="\033[0m"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo -e "This is ${BOLD}Pulling libraries${NORMAL}"
+echo -e "${BOLD}Pulling libraries${NORMAL}"
 
 "$SCRIPT_DIR/scripts/get-musl.sh"
 "$SCRIPT_DIR/scripts/get-lwip.sh"
@@ -54,7 +54,7 @@ MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\
 
 mkdir -p "$BUILD_DIR"
 
-echo -e "This is ${BOLD}Building libraries${NORMAL}"
+echo -e "${BOLD}Building libraries${NORMAL}"
 
 # Build musl's libc.a, and the merged header sysroot posix_shim.c/app
 # sources compile against.
@@ -93,4 +93,4 @@ for src in "$MBEDTLS_DIR"/library/*.c; do
 	gcc $MBEDTLS_CFLAGS -o "$obj" "$src"
 done
 
-echo -e "This is ${BOLD}Library builds complete${NORMAL}"
+echo -e "${BOLD}Library builds complete${NORMAL}"
