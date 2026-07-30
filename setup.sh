@@ -8,6 +8,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+echo -e "========\nPulling libraries\n========"
+
 "$SCRIPT_DIR/scripts/get-musl.sh"
 "$SCRIPT_DIR/scripts/get-lwip.sh"
 "$SCRIPT_DIR/scripts/get-mbedtls.sh"
@@ -49,6 +51,8 @@ MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\
 
 mkdir -p "$BUILD_DIR"
 
+echo -e "========\nBuilding libraries\n========"
+
 # Build musl's libc.a, and the merged header sysroot posix_shim.c/app
 # sources compile against.
 echo "Building musl..."
@@ -86,4 +90,4 @@ for src in "$MBEDTLS_DIR"/library/*.c; do
 	gcc $MBEDTLS_CFLAGS -o "$obj" "$src"
 done
 
-echo "Done. musl/lwIP/mbedTLS fetched and built."
+echo -e "========\nLibraries built\n========"
