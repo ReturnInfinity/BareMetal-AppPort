@@ -105,6 +105,8 @@ LWIP_CFLAGS="$CFLAGS -I $LWIP_INC -I $LWIP_PORT"
 # can't win against the "current file's own directory" search step.
 MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\""
 
+echo "Building..."
+
 gcc $CFLAGS -o "$BUILD_DIR/crt0.o" "$PORT/crt0.c"
 gcc $CFLAGS -o "$BUILD_DIR/posix_shim.o" "$PORT/posix_shim.c"
 gcc $CFLAGS -o "$BUILD_DIR/bmfs.o" "$PORT/bmfs.c"
