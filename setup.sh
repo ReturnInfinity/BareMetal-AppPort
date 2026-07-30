@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+BOLD="\033[1m"
+NORMAL="\033[0m"
+
 # Fetches and patches musl 1.2.6, lwIP 2.2.0, and mbedTLS 3.6.6 into this
 # directory, then builds musl's libc.a and the lwIP/mbedTLS object files
 # that build-app.sh links against. Run once before ./build-app.sh.
@@ -8,7 +11,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo -e "========\nPulling libraries\n========"
+echo -e "This is ${BOLD}Pulling libraries${NORMAL}"
 
 "$SCRIPT_DIR/scripts/get-musl.sh"
 "$SCRIPT_DIR/scripts/get-lwip.sh"
@@ -51,7 +54,7 @@ MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\
 
 mkdir -p "$BUILD_DIR"
 
-echo -e "========\nBuilding libraries\n========"
+echo -e "This is ${BOLD}Building libraries${NORMAL}"
 
 # Build musl's libc.a, and the merged header sysroot posix_shim.c/app
 # sources compile against.
@@ -90,4 +93,4 @@ for src in "$MBEDTLS_DIR"/library/*.c; do
 	gcc $MBEDTLS_CFLAGS -o "$obj" "$src"
 done
 
-echo -e "========\nLibraries built\n========"
+echo -e "This is ${BOLD}Library builds complete${NORMAL}"
