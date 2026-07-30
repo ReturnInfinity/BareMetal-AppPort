@@ -42,37 +42,23 @@ PORT="port"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Run a command, staying silent unless it fails -- then dump its output
-# and abort. Keeps musl/lwIP's noisy per-file build logs off the screen
-# on the (common) successful case.
-run_quiet() {
-	local log
-	log="$(mktemp)"
-	if ! "$@" >"$log" 2>&1; then
-		cat "$log"
-		rm -f "$log"
-		exit 1
-	fi
-	rm -f "$log"
-}
-
 if [ $# -eq 0 ]; then
 	echo "usage: $0 yourapp.c [otherfile.c ...]" >&2
 	exit 1
 fi
 
-if [ ! -f "$MUSL_DIR/config.mak" ]; then
-	echo "error: $MUSL_DIR is missing -- run ./setup.sh first." >&2
+if [ ! -f "$MUSL_LIB" ]; then
+	echo "error: $MUSL_LIB is missing -- run ./setup.sh first." >&2
 	exit 1
 fi
 
-if [ ! -d "$LWIP_DIR" ]; then
-	echo "error: $LWIP_DIR is missing -- run ./setup.sh first." >&2
+if ! compgen -G "$BUILD_DIR/lwip_*.o" >/dev/null; then
+	echo "error: lwIP objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
 	exit 1
 fi
 
-if [ ! -d "$MBEDTLS_DIR" ]; then
-	echo "error: $MBEDTLS_DIR is missing -- run ./setup.sh first." >&2
+if ! compgen -G "$BUILD_DIR/mbedtls_*.o" >/dev/null; then
+	echo "error: mbedTLS objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
 	exit 1
 fi
 
@@ -119,12 +105,6 @@ LWIP_CFLAGS="$CFLAGS -I $LWIP_INC -I $LWIP_PORT"
 # can't win against the "current file's own directory" search step.
 MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\""
 
-# Build musl's libc.a, and the merged header sysroot posix_shim.c/
-# app sources compile against.
-echo "Building musl..."
-run_quiet make -C "$MUSL_DIR" lib/libc.a
-run_quiet make -C "$MUSL_DIR" install-headers DESTDIR="$(pwd)/$MUSL_DIR/sysroot"
-
 gcc $CFLAGS -o "$BUILD_DIR/crt0.o" "$PORT/crt0.c"
 gcc $CFLAGS -o "$BUILD_DIR/posix_shim.o" "$PORT/posix_shim.c"
 gcc $CFLAGS -o "$BUILD_DIR/bmfs.o" "$PORT/bmfs.c"
@@ -146,37 +126,15 @@ for src in "${APP_SRCS[@]}"; do
 	APP_OBJS="$APP_OBJS $obj"
 done
 
-# lwIP core: IPv4 + Ethernet + ARP + DHCP + TCP + UDP + DNS only --
-# no IPv6, no AutoIP/IGMP/raw sockets/ACD (see
-# port/lwip_port/lwipopts.h), so their source files aren't built.
-LWIP_SRCS="
-	core/def.c core/inet_chksum.c core/init.c core/ip.c core/mem.c
-	core/memp.c core/netif.c core/pbuf.c core/stats.c core/sys.c
-	core/tcp.c core/tcp_in.c core/tcp_out.c core/timeouts.c core/udp.c
-	core/dns.c
-	core/ipv4/dhcp.c core/ipv4/etharp.c core/ipv4/icmp.c
-	core/ipv4/ip4_addr.c core/ipv4/ip4.c core/ipv4/ip4_frag.c
-	netif/ethernet.c
-"
-echo "Building lwIP..."
+# lwIP and mbedTLS object files are built once by setup.sh (checked for
+# above), not per app build -- just pick up what's already there.
 LWIP_OBJS=""
-for src in $LWIP_SRCS; do
-	obj="$BUILD_DIR/lwip_$(basename "$src" .c).o"
-	run_quiet gcc $LWIP_CFLAGS -o "$obj" "$LWIP_DIR/src/$src"
+for obj in "$BUILD_DIR"/lwip_*.o; do
 	LWIP_OBJS="$LWIP_OBJS $obj"
 done
 
-# Unlike LWIP_SRCS above, this isn't a hand-picked subset: every
-# library/*.c file in mbedTLS is individually guarded by
-# "#if defined(MBEDTLS_<ITS_OWN_MODULE>_C)" around its entire contents
-# (that's how mbedTLS's own Makefile/CMake builds it too), so a module
-# our baremetal_mbedtls_config.h leaves disabled just compiles down to an empty
-# translation unit -- no curated file list to keep in sync by hand.
-echo "Building mbedtls..."
 MBEDTLS_OBJS=""
-for src in "$MBEDTLS_DIR"/library/*.c; do
-	obj="$BUILD_DIR/mbedtls_$(basename "$src" .c).o"
-	gcc $MBEDTLS_CFLAGS -o "$obj" "$src"
+for obj in "$BUILD_DIR"/mbedtls_*.o; do
 	MBEDTLS_OBJS="$MBEDTLS_OBJS $obj"
 done
 
