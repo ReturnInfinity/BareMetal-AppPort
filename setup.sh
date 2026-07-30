@@ -58,7 +58,7 @@ echo -e "${BOLD}Building libraries${NORMAL}"
 
 # Build musl's libc.a, and the merged header sysroot posix_shim.c/app
 # sources compile against.
-echo "Building musl..."
+echo "Building musl"
 run_quiet make -C "$MUSL_DIR" lib/libc.a
 run_quiet make -C "$MUSL_DIR" install-headers DESTDIR="$(pwd)/$MUSL_DIR/sysroot"
 
@@ -74,7 +74,7 @@ LWIP_SRCS="
 	core/ipv4/ip4_addr.c core/ipv4/ip4.c core/ipv4/ip4_frag.c
 	netif/ethernet.c
 "
-echo "Building lwIP..."
+echo "Building lwIP"
 for src in $LWIP_SRCS; do
 	obj="$BUILD_DIR/lwip_$(basename "$src" .c).o"
 	run_quiet gcc $LWIP_CFLAGS -o "$obj" "$LWIP_DIR/src/$src"
@@ -87,10 +87,10 @@ done
 # our baremetal_mbedtls_config.h leaves disabled just compiles down to
 # an empty translation unit -- no curated file list to keep in sync by
 # hand.
-echo "Building mbedtls..."
+echo "Building mbedtls"
 for src in "$MBEDTLS_DIR"/library/*.c; do
 	obj="$BUILD_DIR/mbedtls_$(basename "$src" .c).o"
 	gcc $MBEDTLS_CFLAGS -o "$obj" "$src"
 done
 
-echo -e "${BOLD}Library builds complete${NORMAL}"
+# echo -e "${BOLD}Library builds complete${NORMAL}"
