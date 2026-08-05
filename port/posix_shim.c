@@ -46,9 +46,21 @@
 // no real per-page unmapping available, so munmap()'d ranges can't be
 // handed back to the OS -- instead they're kept on an address-sorted,
 // coalescing free list (see below) and reused by later mmap() calls
-// before the arena is bumped any further. brk()'s own sub-heap doesn't
-// need this: musl already reuses freed small objects internally and
-// only ever shrinks brk() from the top.
+// before the arena is bumped any further.
+//
+// brk() draws from this *same* arena too (sys_brk(), below) -- despite
+// mallocng's large allocations being mmap()-only, mallocng still calls
+// brk() itself, on its own schedule, to grow the small fixed-size pool
+// it carves its internal "struct meta" bookkeeping objects from (one
+// struct meta per allocation, including the mmap()'d ones -- see
+// alloc_meta() in mallocng's malloc.c). It remembers the break it last
+// set and later grows it by one page at a time from that remembered
+// value, with no way to know that mmap() calls for large objects have
+// meanwhile moved heap_cur far ahead of it. sys_brk() has to reject
+// (rather than honor) any such now-stale, behind-heap_cur target --
+// see its comment -- or that periodic one-page growth would rewind
+// heap_cur backward and silently reuse address space still live under
+// an earlier mmap() allocation.
 // -----------------------------------------------------------------------
 
 extern char __bss_stop[];
@@ -71,8 +83,27 @@ static long sys_brk(long addr)
 {
 	heap_init();
 
+	// heap_cur is a single bump pointer shared between brk() (this
+	// function) and mmap()'s own bump path (heap_alloc(), below) --
+	// see this section's file header. musl's mallocng calls brk()
+	// on its own schedule, independent of and interleaved with its
+	// mmap() calls for large (>=128KB) objects: it remembers the
+	// break it last set (glibc/mallocng-internal state, not queried
+	// from us again) and later grows it by exactly one page at a
+	// time from that remembered value -- with no idea that mmap()
+	// calls for large allocations in between have since moved
+	// heap_cur far ahead of it. If that stale, smaller target were
+	// honored here, it would silently rewind heap_cur backward,
+	// re-handing-out address space already live under a still-in-use
+	// mmap() allocation -- corrupting it. Real brk()/mmap() are
+	// independent address ranges on Linux, so this collision can't
+	// happen there; the fix on this shared-arena port is to simply
+	// never let brk() move the shared pointer backward -- a request
+	// at or behind the current heap_cur is treated as a no-op (and
+	// still reports the true current break), just like it would if
+	// mmap() hadn't touched the shared arena in between.
 	char *req = (char *)addr;
-	if (req >= (char *)__bss_stop && req <= heap_end)
+	if (req >= heap_cur && req <= heap_end)
 		heap_cur = req;
 
 	return (long)heap_cur;

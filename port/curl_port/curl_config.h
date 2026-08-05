@@ -196,6 +196,21 @@
 /* #undef HAVE_PIPE */
 /* #undef HAVE_PIPE2 */
 
+/* The graceful "no wakeup mechanism" degradation the comment above
+ * describes doesn't actually happen just from leaving the HAVE_*
+ * probes above undefined: lib/multihandle.h's ENABLE_WAKEUP is gated
+ * on this separate, curl-internal feature-disable macro (not any
+ * HAVE_* capability probe), and defaults to *on* unless told
+ * otherwise. Left on, Curl_multi_handle() (lib/multi.c) calls
+ * Curl_wakeup_init() (lib/socketpair.c), whose only non-eventfd/pipe
+ * implementation left standing here is a real socketpair()/loopback
+ * fallback this port has none of -- every curl_easy_perform() then
+ * fails Curl_multi_handle() and surfaces as an oddly generic
+ * CURLE_OUT_OF_MEMORY (easy.c's easy_perform(), on Curl_multi_handle()
+ * returning NULL) with no other diagnostic, for a connection that
+ * never even reached the network. */
+#define CURL_DISABLE_SOCKETPAIR 1
+
 /* No interface enumeration (single hard-coded NIC, net_glue.c) and no
  * ioctl(SIOCGIFADDR/SIOCGIFINDEX) support in posix_shim.c's sys_ioctl()
  * (TIOCGWINSZ only) -- only matters for CURLOPT_INTERFACE by name. */
