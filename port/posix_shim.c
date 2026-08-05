@@ -437,12 +437,11 @@ static long sys_ioctl(long fd, long req, long arg)
 // just never exposed to application code as a syscall (see
 // OPENISSUES.md). libcurl needs *some* working clock_gettime() for its
 // own timeout/pacing bookkeeping (Curl_now()), so CLOCK_MONOTONIC is
-// wired up here to the same source. CLOCK_REALTIME is deliberately
-// left unimplemented (-EINVAL below, same as any other unhandled
-// clk_id) rather than answering with boot-relative time mislabeled as
-// wall-clock time -- there's still no RTC/wall-clock source on this
-// port, matching MBEDTLS_HAVE_TIME being left off in
-// baremetal_mbedtls_config.h for the same reason.
+// wired up here to the same source.
+//
+// b_system(WALLCLOCK, ...) returns seconds since the Unix epoch (read
+// from the RTC at boot); there is no sub-second component wired up,
+// so tv_nsec is always 0. CLOCK_REALTIME is backed by that.
 // -----------------------------------------------------------------------
 
 static long sys_clock_gettime(long clk_id, long ts_addr)
@@ -450,6 +449,11 @@ static long sys_clock_gettime(long clk_id, long ts_addr)
 	struct timespec *ts = (struct timespec *)ts_addr;
 
 	switch (clk_id) {
+	case CLOCK_REALTIME:
+	case CLOCK_REALTIME_COARSE:
+		ts->tv_sec = (long)b_system(WALLCLOCK, 0, 0);
+		ts->tv_nsec = 0;
+		return 0;
 	case CLOCK_MONOTONIC:
 	case CLOCK_MONOTONIC_RAW:
 	case CLOCK_MONOTONIC_COARSE: {

@@ -222,8 +222,15 @@
 /* ---------------------------------------------------------------------
  * Time -- see posix_shim.c's "Time" section. CLOCK_MONOTONIC (backed by
  * b_system(TIMECOUNTER, ...), the same source lwIP's sys_now() already
- * uses) is real; CLOCK_REALTIME/gettimeofday()/time() are not -- there
- * is still no wall-clock/RTC source on this port (OPENISSUES.md).
+ * uses) is real, and so is CLOCK_REALTIME, backed by
+ * b_system(WALLCLOCK, ...) (seconds since the Unix epoch, read from
+ * the RTC at boot -- no sub-second component; see clock.c for a
+ * standalone test of both). curl itself still prefers
+ * CLOCK_GETTIME_MONOTONIC for its own pacing (Curl_now()).
+ * HAVE_GETTIMEOFDAY is left off below since it's untested with this
+ * curl build -- gettimeofday() itself works fine (it's musl's
+ * clock_gettime(CLOCK_REALTIME, ...) wrapper), this just hasn't been
+ * verified against curl's own consumers of that macro.
  * --------------------------------------------------------------------- */
 
 #define HAVE_CLOCK_GETTIME_MONOTONIC 1
@@ -232,10 +239,8 @@
 /* #undef HAVE_ALARM */
 
 /* gmtime_r()/localtime_r() are real, working musl library functions
- * (no syscall involved) -- just never fed a meaningful wall-clock
- * time_t here. Harmless to leave enabled: only reached parsing dates
- * out of HTTP response headers (e.g. a "Date:"/"Last-Modified:" the
- * *server* sent), never to learn what time it "is" locally. */
+ * (no syscall involved), now fed a real wall-clock time_t (via
+ * CLOCK_REALTIME above) rather than boot-relative time. */
 #define HAVE_GMTIME_R 1
 #define HAVE_LOCALTIME_R 1
 

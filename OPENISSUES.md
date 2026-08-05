@@ -33,16 +33,18 @@ one.
 ## Missing common syscalls
 
 Not implemented (all fall through to `-ENOSYS`):
-- `gettimeofday`/`nanosleep`/`clock_nanosleep`, and `clock_gettime` for
-  any `clk_id` other than `CLOCK_MONOTONIC` — no wall-clock time
-  exposed to programs, only elapsed time since boot. `CLOCK_MONOTONIC`
-  itself *is* implemented (`posix_shim.c`), backed by the same
-  `b_system(TIMECOUNTER)` (nanoseconds since boot) the heap/TLS/lwIP
-  code already used internally — added for libcurl's benefit (see
-  `port/curl_port/curl_config.h`), but usable by any program that just
-  needs to measure elapsed time, not learn the actual date/time. A
-  program that calls `time()`, wants the wall-clock date, or does
-  `sleep()` will still fail or misbehave.
+- `nanosleep`/`clock_nanosleep` — no way to block for a relative
+  duration; `sleep()`/`usleep()` will fail or misbehave.
+- `clock_gettime` supports `CLOCK_MONOTONIC`/`CLOCK_MONOTONIC_RAW`/
+  `CLOCK_MONOTONIC_COARSE` (`posix_shim.c`), backed by
+  `b_system(TIMECOUNTER)` (nanoseconds since boot, the same source the
+  heap/TLS/lwIP code already used internally), and `CLOCK_REALTIME`/
+  `CLOCK_REALTIME_COARSE`, backed by `b_system(WALLCLOCK)` (seconds
+  since the Unix epoch, read from the RTC at boot — no sub-second
+  component). `time()` and `gettimeofday()` both go through musl's
+  `clock_gettime(CLOCK_REALTIME, ...)` so they work too (see
+  `clock.c`). Other `clk_id`s (e.g. `CLOCK_PROCESS_CPUTIME_ID`) still
+  return `-EINVAL`.
 - `getrandom` — nothing backs `/dev/urandom`-equivalent randomness for
   application code (musl's own internal entropy needs, e.g. the stack
   canary and mallocng's hardening secret, are seeded via `crt0.c`'s

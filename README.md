@@ -32,6 +32,9 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
 - `build-app.sh` -- builds an app (see Building an app above).
 - `clean.sh` -- removes build artifacts.
 - `hello.c` -- minimal demo app (musl `printf`, argc/argv/envp).
+- `clock.c` -- prints the current wall-clock time (via `time()` and a
+  direct `b_system(WALLCLOCK, ...)` call) and time elapsed since boot
+  (`clock_gettime(CLOCK_MONOTONIC, ...)`).
 - `crawler.c`/`https_crawler.c` -- a small HTTP(S) web crawler, speaking
   raw HTTP by hand over `port/net_shim.c`'s sockets and TLS by hand
   over `port/tls_shim.c`'s mbedTLS wrapper.
