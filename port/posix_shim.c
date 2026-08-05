@@ -401,6 +401,16 @@ static long sys_open(const char *path, long flags, long mode)
 	return bmfs_open(path, (int)flags, (int)mode);
 }
 
+// Added for SQLite's VFS (port/sqlite_port/sqlite_vfs.c), the first
+// port/*.c caller that needs it -- journal finalization shrinks a
+// file's logical size without touching its data.
+static long sys_ftruncate(long fd, long length)
+{
+	if (bmfs_is_fd(fd))
+		return bmfs_truncate(fd, (size_t)length);
+	return -EBADF;
+}
+
 static long sys_unlink(const char *path)
 {
 	return bmfs_unlink(path);
@@ -670,6 +680,7 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_open:                      return sys_open((const char *)a1, a2, a3);
 	case SYS_openat:                      return sys_open((const char *)a2, a3, a4); // AT_FDCWD-only: BMFS is flat, a1 (dirfd) is ignored
 	case SYS_unlink:                        return sys_unlink((const char *)a1);
+	case SYS_ftruncate:                       return sys_ftruncate(a1, a2);
 	// musl's __fstatat() takes the SYS_stat/SYS_lstat fast path for
 	// plain stat(path)/lstat(path) (fd==AT_FDCWD, flag in {0,
 	// AT_SYMLINK_NOFOLLOW}) and only falls through to the general

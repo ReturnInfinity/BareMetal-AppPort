@@ -42,6 +42,10 @@ CURL_INC="$CURL_DIR/include"
 CURL_LIB="$CURL_DIR/lib"
 CURL_PORT="port/curl_port"
 
+SQLITE_DIR="$BUILD_DIR/sqlite-3.46.1"
+SQLITE_INC="$SQLITE_DIR"
+SQLITE_PORT="port/sqlite_port"
+
 PORT="port"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,6 +73,11 @@ fi
 
 if ! compgen -G "$BUILD_DIR/curl_*.o" >/dev/null; then
 	echo "error: curl objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
+	exit 1
+fi
+
+if [ ! -f "$BUILD_DIR/sqlite_sqlite3.o" ]; then
+	echo "error: $BUILD_DIR/sqlite_sqlite3.o is missing -- run ./setup.sh first." >&2
 	exit 1
 fi
 
@@ -127,7 +136,14 @@ MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\
 # lwIP's/mbedTLS's), this is only needed again here for -DCURL_STATICLIB
 # and -I $CURL_INC, which any *app* using libcurl (e.g. curltest.c)
 # also needs for its own #include <curl/curl.h>.
-APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC"
+#
+# -I $SQLITE_INC is the equivalent for sqlite3.h -- SQLITE_INC points
+# straight at the amalgamation directory (sqlite3.h sits next to
+# sqlite3.c there, no separate include/ subtree the way curl/mbedTLS
+# have). No -D flags needed here: SQLITE_CUSTOM_INCLUDE/SQLITE_OS_OTHER
+# etc. (see setup.sh's SQLITE_CFLAGS comment) only matter to sqlite3.c
+# itself, not to the plain public sqlite3.h an app #include's.
+APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC"
 
 echo "Building..."
 
@@ -143,6 +159,7 @@ gcc $LWIP_CFLAGS -o "$BUILD_DIR/net_shim.o" "$PORT/net_shim.c"
 gcc $LWIP_CFLAGS -o "$BUILD_DIR/dns_shim.o" "$PORT/dns_shim.c"
 gcc $MBEDTLS_CFLAGS -o "$BUILD_DIR/tls_shim.o" "$PORT/tls_shim.c"
 gcc $MBEDTLS_CFLAGS -o "$BUILD_DIR/entropy_hardware_poll.o" "$MBEDTLS_PORT/entropy_hardware_poll.c"
+gcc $CFLAGS -I "$SQLITE_INC" -o "$BUILD_DIR/sqlite_vfs.o" "$SQLITE_PORT/sqlite_vfs.c"
 gcc $CFLAGS -o "$BUILD_DIR/libBareMetal.o" "$PORT/libBareMetal.c"
 
 APP_OBJS=""
@@ -169,6 +186,14 @@ for obj in "$BUILD_DIR"/curl_*.o; do
 	CURL_OBJS="$CURL_OBJS $obj"
 done
 
+# Unlike LWIP_OBJS/MBEDTLS_OBJS/CURL_OBJS above, this isn't a glob:
+# sqlite3.c is one file, so setup.sh only ever produces the one
+# sqlite_sqlite3.o here -- a "sqlite_*.o" glob would also pick up this
+# script's own sqlite_vfs.o (built just above, from port/sqlite_port/,
+# already named separately into the ld command below), double-linking
+# it into a "multiple definition" error.
+SQLITE_OBJS="$BUILD_DIR/sqlite_sqlite3.o"
+
 echo "Linking..."
 
 # Two stages, not a direct-to-binary `ld -T c.ld` link: c.ld's
@@ -194,7 +219,8 @@ echo "Linking..."
 ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -o "$BUILD_DIR/$APP_NAME.elf" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" \
 	"$BUILD_DIR/bmfs.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/sqlite_vfs.o" \
+	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
 echo "Built $APP_NAME"

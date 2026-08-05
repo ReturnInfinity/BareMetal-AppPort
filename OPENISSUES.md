@@ -101,6 +101,12 @@ Not implemented (all fall through to `-ENOSYS`):
   `0644` regardless of anything; there's no enforcement either way.
 - **No directory listing.** `opendir`/`readdir`-equivalent enumeration
   of what's on disk isn't implemented — only look-up-by-name.
+- **`ftruncate()` only shrinks, and doesn't zero-fill on grow.**
+  Added for SQLite's VFS (`port/sqlite_port/`, see its own section
+  below) to finalize/shrink journal files. Growing is accepted too
+  (bounded by the file's fixed reservation, same as a write), but
+  unlike a real `ftruncate()` the newly-included bytes are left as
+  whatever was already sitting in those blocks rather than zeroed.
 - **Small fixed open-file table** (`BMFS_MAX_OPEN` = 8 concurrent
   files across the whole process).
 
@@ -180,6 +186,52 @@ same lines as everything else here:
   crypto calls for RNG/hashing against any mbedTLS >= 3.2.0, with no
   legacy-API fallback; see that file's `MBEDTLS_PSA_CRYPTO_C` comment
   for why enabling it doesn't otherwise change how TLS itself runs.
+
+## SQLite (`port/sqlite_port/`)
+
+SQLite 3.46.1 is vendored unmodified as its own amalgamation
+(`scripts/get-sqlite.sh`); `SQLITE_OS_OTHER=1`
+(`port/sqlite_port/sqlite_baremetal_config.h`) skips SQLite's own
+`os_unix.c` entirely in favor of a small hand-written VFS
+(`port/sqlite_port/sqlite_vfs.c`, see its own file header for the
+full reasoning) built directly over `posix_shim.c`/`bmfs.c`:
+
+- **No WAL.** `SQLITE_OMIT_WAL` plus an `iVersion 1` `sqlite3_io_methods`
+  (no `xShmMap`/`xShmLock`/`xShmBarrier`/`xShmUnmap` slots at all) --
+  WAL's shared-memory negotiation between connections is meaningless
+  with exactly one process, ever, on this port. The default rollback-
+  journal mode is unaffected and is what every app gets unless it asks
+  for WAL explicitly (which will simply fail).
+- **No mmap.** `SQLITE_MAX_MMAP_SIZE`/`SQLITE_DEFAULT_MMAP_SIZE` are both
+  0 -- `posix_shim.c`'s `mmap()` is a bump allocator over the same fixed
+  heap arena `brk()` draws from, with `munmap()` a no-op (see this
+  file's "Heap" section); an mmap'd file view would just be heap this
+  port can't get back.
+- **Locking is a pure no-op that always succeeds/reports uncontended.**
+  Same reasoning as `posix_shim.c`'s `fcntl()` stub: there is never a
+  second connection, in this process or any other, for a lock to
+  conflict with.
+- **No load extension** (`SQLITE_OMIT_LOAD_EXTENSION`) -- no dynamic
+  linking on this port at all (see "General" below).
+- **No `'localtime'`/`'utc'` datetime() modifiers** (`SQLITE_OMIT_LOCALTIME`)
+  -- no timezone database on this port, and `b_system(WALLCLOCK)` (this
+  port's only wall-clock source) is already UTC-only.
+- **`PRAGMA temp_store` is pinned to memory** (`SQLITE_TEMP_STORE=3`) --
+  ordinary TEMP tables/indices and the transient sorters/statement
+  journals `ORDER BY`/`GROUP BY`/`CREATE INDEX` etc. use never touch
+  disk, regardless of what a program requests. The one on-disk temp
+  file this doesn't cover -- a multi-database (`ATTACH`) transaction's
+  master journal -- is still handled (`sqlite_vfs.c`'s `bmfsOpen()`
+  invents a name via the same hardware RNG `port/mbedtls_port/
+  entropy_hardware_poll.c` uses for mbedTLS), just untested by
+  `sqltest.c`, which only ever has one database open.
+- **Single-threaded only** (`SQLITE_THREADSAFE=0`), matching this port
+  throughout.
+- **BMFS's 31-byte filename cap** (see this file's "BMFS file I/O"
+  section) applies to every file SQLite opens, including ones it names
+  itself -- a journal is the main database's name plus `-journal`, so a
+  long database filename can push that combination past what BMFS can
+  hold, failing with `SQLITE_CANTOPEN`. Keep database filenames short.
 
 ## General
 

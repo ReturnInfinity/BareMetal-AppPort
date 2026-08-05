@@ -15,6 +15,15 @@ long bmfs_lseek(long fd, long offset, int whence);
 long bmfs_fstat_fd(long fd, void *stbuf);
 long bmfs_unlink(const char *path);
 
+// Sets a file's logical size (SQLite's VFS layer -- see
+// port/sqlite_port/ -- uses this to finalize/shrink journal files).
+// Only ever asked to shrink in practice (growth happens through
+// bmfs_write() instead), so unlike a real ftruncate() this doesn't
+// zero-fill on grow; it's still accepted (bounded by the file's fixed
+// reservation) rather than rejected outright, since nothing about
+// that case needs to fail.
+long bmfs_truncate(long fd, size_t length);
+
 // Fills a Linux struct kstat (see bmfs.c) for path -- used to back
 // the fstatat() syscall (aliased from SYS_newfstatat), which is what
 // x86_64 musl's stat()/lstat()/fstatat() actually issue.

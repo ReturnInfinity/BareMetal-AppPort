@@ -296,6 +296,26 @@ long bmfs_write(long fd, const void *buf, size_t len)
 	return n;
 }
 
+// See bmfs.h's comment: shrink (the common case -- journal
+// finalization) just moves f->size back; grow is accepted too as long
+// as it fits the file's existing reserved_blocks, but -- unlike
+// bmfs_pwrite() -- doesn't touch the newly-included bytes at all, so
+// they read back as whatever was already sitting in those blocks
+// rather than zeroes.
+long bmfs_truncate(long fd, size_t length)
+{
+	struct bmfs_file *f = &files[fd - BMFS_FD_BASE];
+	u64 cap = f->reserved_blocks * BMFS_BLOCK_BYTES;
+
+	if ((u64)length > cap)
+		return -ENOSPC;
+
+	f->size = (u64)length;
+	f->dirty = 1;
+
+	return 0;
+}
+
 long bmfs_close(long fd)
 {
 	struct bmfs_file *f = &files[fd - BMFS_FD_BASE];

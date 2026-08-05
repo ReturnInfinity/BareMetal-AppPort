@@ -17,6 +17,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-lwip.sh"
 "$SCRIPT_DIR/scripts/get-mbedtls.sh"
 "$SCRIPT_DIR/scripts/get-curl.sh"
+"$SCRIPT_DIR/scripts/get-sqlite.sh"
 
 BUILD_DIR="build"
 
@@ -35,6 +36,9 @@ CURL_DIR="$BUILD_DIR/curl-8.21.0"
 CURL_INC="$CURL_DIR/include"
 CURL_LIB="$CURL_DIR/lib"
 CURL_PORT="port/curl_port"
+
+SQLITE_DIR="$BUILD_DIR/sqlite-3.46.1"
+SQLITE_PORT="port/sqlite_port"
 
 # Run a command, staying silent unless it fails -- then dump its output
 # and abort. Keeps musl/lwIP's noisy per-file build logs off the screen
@@ -80,6 +84,19 @@ MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\
 # path/config define are repeated here because vtls/mbedtls.c talks to
 # mbedTLS directly, not through tls_shim.c.
 CURL_CFLAGS="$CFLAGS -DHAVE_CONFIG_H -DBUILDING_LIBCURL -DCURL_STATICLIB -I $CURL_PORT -I $CURL_INC -I $CURL_LIB -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\""
+
+# -DSQLITE_CUSTOM_INCLUDE points sqlite3.c's own early-include hook at
+# port/sqlite_port/sqlite_baremetal_config.h (see that file's header
+# for what it sets and why -- SQLITE_OS_OTHER=1 chief among them,
+# which is also why there's no "-I $SQLITE_PORT"-driven mbedTLS-style
+# vtls integration here: unlike curl, sqlite3.c itself never needs
+# anything else from this port -- port/sqlite_port/sqlite_vfs.c, built
+# per-app in build-app.sh like tls_shim.c/net_shim.c, is what actually
+# talks to posix_shim.c/bmfs.c). -DNDEBUG disables assert(): this
+# port's abort() has nowhere clean to unwind to (no signal delivery --
+# see OPENISSUES.md), and NDEBUG is SQLite's own documented stance for
+# a release build anyway.
+SQLITE_CFLAGS="$CFLAGS -I $SQLITE_PORT -DSQLITE_CUSTOM_INCLUDE=sqlite_baremetal_config.h -DNDEBUG"
 
 mkdir -p "$BUILD_DIR"
 
@@ -149,5 +166,15 @@ for src in "$CURL_DIR"/lib/*.c "$CURL_DIR"/lib/curlx/*.c "$CURL_DIR"/lib/vauth/*
 	obj="$BUILD_DIR/curl_$(basename "$src" .c).o"
 	gcc $CURL_CFLAGS -o "$obj" "$src"
 done
+
+# SQLite's amalgamation: one file, sqlite3.c, containing the whole
+# library (core, VDBE, all the SQL functions/pragmas the default build
+# includes, everything) -- no curated file list needed, unlike lwIP's
+# LWIP_SRCS above. port/sqlite_port/sqlite_vfs.c (the VFS this amalgam
+# calls into via SQLITE_OS_OTHER -- see SQLITE_CFLAGS's comment) is
+# built per-app in build-app.sh instead, alongside this port's other
+# own glue (tls_shim.c, net_shim.c, ...), not here.
+echo "Building sqlite"
+run_quiet gcc $SQLITE_CFLAGS -o "$BUILD_DIR/sqlite_sqlite3.o" "$SQLITE_DIR/sqlite3.c"
 
 # echo -e "${BOLD}Library builds complete${NORMAL}"
