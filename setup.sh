@@ -52,9 +52,18 @@ run_quiet() {
 
 # Same freestanding/no-PIC/large-code-model flags build-app.sh uses for
 # the app and port shims -- see that script's CFLAGS comment. musl/
-# lwIP/mbedTLS objects link directly into the same flat BareMetal
+# lwIP/mbedTLS/curl objects link directly into the same flat BareMetal
 # binary, so they're built against this target too.
-CFLAGS="-c -m64 -nostdlib -nostartfiles -nodefaultlibs -ffreestanding -fno-pic -fno-pie -mcmodel=large -falign-functions=16 -fomit-frame-pointer -mno-red-zone -fno-builtin -fno-stack-protector -nostdinc -isystem $MUSL_INC"
+#
+# -ffunction-sections/-fdata-sections put each function/global in its
+# own linker section instead of one blob per translation unit, so
+# build-app.sh's final `ld --gc-sections` can drop whatever a given
+# app doesn't actually call -- lwIP/mbedTLS/curl are linked into every
+# app regardless of use (see build-app.sh), so most apps only reach a
+# small fraction of what setup.sh builds here. musl's own libc.a
+# already builds this way (see port/musl_port/musl-1.2.6-config.mak's
+# CFLAGS_AUTO); this makes lwIP/mbedTLS/curl match it.
+CFLAGS="-c -m64 -nostdlib -nostartfiles -nodefaultlibs -ffreestanding -fno-pic -fno-pie -mcmodel=large -falign-functions=16 -fomit-frame-pointer -mno-red-zone -fno-builtin -fno-stack-protector -ffunction-sections -fdata-sections -nostdinc -isystem $MUSL_INC"
 LWIP_CFLAGS="$CFLAGS -I $LWIP_INC -I $LWIP_PORT"
 MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\""
 

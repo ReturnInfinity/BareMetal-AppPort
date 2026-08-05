@@ -84,7 +84,14 @@ APP_NAME="$(basename "${APP_SRCS[0]}" .c).app"
 # address assumptions both break under that, hence -fno-pic -fno-pie
 # -mcmodel=large. See port/posix_shim.c and port/crt0.c for the
 # syscall/startup side of the port.
-CFLAGS="-c -m64 -nostdlib -nostartfiles -nodefaultlibs -ffreestanding -fno-pic -fno-pie -mcmodel=large -falign-functions=16 -fomit-frame-pointer -mno-red-zone -fno-builtin -fno-stack-protector -nostdinc -isystem $MUSL_INC"
+#
+# -ffunction-sections/-fdata-sections pair with -Wl,--gc-sections below
+# (see setup.sh's matching CFLAGS comment) -- lwIP/mbedTLS/curl are
+# linked into every app regardless of use, so without these an app
+# using none of libcurl still paid for all of it. Applied here too
+# (not just in setup.sh) since crt0.o/posix_shim.o/the app's own
+# sources/etc. are compiled fresh by *this* script every build.
+CFLAGS="-c -m64 -nostdlib -nostartfiles -nodefaultlibs -ffreestanding -fno-pic -fno-pie -mcmodel=large -falign-functions=16 -fomit-frame-pointer -mno-red-zone -fno-builtin -fno-stack-protector -ffunction-sections -fdata-sections -nostdinc -isystem $MUSL_INC"
 
 # lwIP headers pull in musl's (via -isystem above) for size_t/
 # stdint/etc., plus its own lwip/ and netif/ trees, plus our port's
@@ -163,9 +170,31 @@ for obj in "$BUILD_DIR"/curl_*.o; do
 done
 
 echo "Linking..."
-ld -T "$PORT/c.ld" -o "$APP_NAME" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" \
+
+# Two stages, not a direct-to-binary `ld -T c.ld` link: c.ld's
+# OUTPUT_FORMAT(binary) turns out to silently defeat --gc-sections --
+# confirmed by comparing this same link with -oformat elf64-x86-64
+# swapped in: identical inputs, but the binary-output link keeps every
+# section (lwIP/mbedTLS/curl included, whether the app calls into them
+# or not) while the ELF-output link correctly drops what's unreachable
+# from _start. Rather than lose --gc-sections (see its CFLAGS comment
+# above for why it matters -- lwIP/mbedTLS/curl are linked into every
+# app regardless of use), link normally to an ELF intermediate first
+# (where --gc-sections works as documented), then flatten *that*
+# (already fully collected) to the raw binary c.ld's OUTPUT_FORMAT line
+# would otherwise have produced directly. `objcopy -O binary` only
+# copies allocated (SHF_ALLOC) sections in address order and leaves
+# .bss as file-less NOBITS either way, so this changes nothing about
+# the resulting layout -- __bss_start/__bss_stop/__image_base and
+# everything crt0.c/posix_shim.c compute from them are unaffected.
+# --no-warn-rwx-segments: c.ld deliberately maps .text/.rodata/.data/
+# .bss into one combined region with no permission split (ring-0, no
+# paging/protection to enforce one anyway -- see posix_shim.c's heap
+# comment) -- expected here, not a mistake ld should flag.
+ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -o "$BUILD_DIR/$APP_NAME.elf" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" \
 	"$BUILD_DIR/bmfs.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" \
 	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS "$MUSL_LIB" "$LIBGCC"
+objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
 echo "Built $APP_NAME"

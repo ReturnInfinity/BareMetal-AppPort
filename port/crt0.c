@@ -1,10 +1,14 @@
+#include "libBareMetal.h"
+
 extern int main(int argc, char **argv, char **envp);
 extern int __libc_start_main(int (*)(int, char **, char **), int, char **,
                               void (*)(), void (*)(), void (*)());
 
 extern char __bss_start;
 extern char __bss_stop;
+extern char __image_base[];
 
+static int image_fits_in_ram(void);
 static void zero_bss(void);
 static void fill_random(unsigned char buf[16]);
 static int has_rdrand(void);
@@ -50,6 +54,27 @@ __attribute__((naked)) void _start(void)
 
 int _start_c(void *entry_sp)
 {
+	/*
+	 * zero_bss() below writes every byte from __bss_start through
+	 * __bss_stop -- the whole app image's footprint (.text+.rodata+
+	 * .data+.bss, see c.ld), not just "the app's own code" -- and all
+	 * of it has to be real, mapped memory for that loop to land in.
+	 * BareMetal maps exactly b_system(FREE_MEMORY, ...) MiB of RAM for
+	 * this app starting at __image_base (the same bound
+	 * posix_shim.c's heap_init() later treats as the ceiling on
+	 * brk()/mmap()); if __bss_stop falls past that -- easy to hit on
+	 * a small VM now that lwIP+mbedTLS+curl are statically linked into
+	 * every app regardless of whether it uses them (see build-app.sh)
+	 * -- zero_bss() would silently write straight past the mapped
+	 * window into unmapped memory. That's a bare page fault deep
+	 * inside crt0.c, before main() (or even __libc_start_main()) ever
+	 * runs, with nothing to say why. Checking first, before anything
+	 * touches memory it doesn't own, turns that into a clear message
+	 * on the console instead.
+	 */
+	if (!image_fits_in_ram())
+		return 1;
+
 	zero_bss();
 
 	__bmos_entry_sp = entry_sp;	/* safe now that .bss is zeroed */
@@ -78,6 +103,58 @@ int _start_c(void *entry_sp)
 	};
 
 	return __libc_start_main(main, 0, (char **)init_stack, 0, 0, 0);
+}
+
+/* Renders v in decimal into the tail of buf (which must be at least
+ * 20 bytes -- enough for a u64's worst case), returning a pointer to
+ * the first digit written. No libc yet at this point in startup (this
+ * runs before __libc_start_main()), hence hand-rolled. */
+static char *u64_to_dec(u64 v, char *buf_end)
+{
+	char *p = buf_end;
+	*--p = '\0';
+	do {
+		*--p = '0' + (char)(v % 10);
+		v /= 10;
+	} while (v);
+	return p;
+}
+
+static void out_str(char **p, const char *s)
+{
+	while (*s)
+		*(*p)++ = *s++;
+}
+
+static int image_fits_in_ram(void)
+{
+	u64 need_bytes = (u64)&__bss_stop - (u64)__image_base;
+	u64 have_mib = b_system(FREE_MEMORY, 0, 0);
+	u64 need_mib = (need_bytes + 1024 * 1024 - 1) / (1024 * 1024); /* round up */
+
+	if (need_mib <= have_mib)
+		return 1;
+
+	/* Stack-local, deliberately not static: this runs before
+	 * zero_bss() -- and *because* the image doesn't fit in RAM, static
+	 * storage (anywhere in .bss, not just past the ceiling) isn't
+	 * provably safe to touch yet. The stack itself is a separate,
+	 * always-valid region BareMetal sets up independently of the
+	 * image's own mapped window (entry_sp is already a valid low
+	 * address by the time _start_c runs), so it's the only storage
+	 * this function can trust before the check below has passed. */
+	char msg[192];
+	char numbuf[20];
+	char *p = msg;
+
+	out_str(&p, "crt0: app image needs ~");
+	out_str(&p, u64_to_dec(need_mib, numbuf + sizeof(numbuf)));
+	out_str(&p, " MiB of RAM but this VM only has ");
+	out_str(&p, u64_to_dec(have_mib, numbuf + sizeof(numbuf)));
+	out_str(&p, " MiB -- give the VM more memory.\n");
+
+	b_output(msg, (u64)(p - msg));
+	return 0;
 }
 
 static void zero_bss(void)
