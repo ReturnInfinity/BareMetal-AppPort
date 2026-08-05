@@ -34,6 +34,7 @@ u64 b_system(u64 function, u64 var1, u64 var2);
 // Index for b_config calls
 #define TIMECOUNTER		0x00
 #define FREE_MEMORY		0x01
+#define WALLCLOCK		0x02
 #define SMP_ID			0x10
 #define SMP_NUMCORES		0x11
 #define SMP_SET			0x12
