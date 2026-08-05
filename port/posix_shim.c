@@ -84,11 +84,39 @@ static void *heap_alloc(size_t n)
 {
 	heap_init();
 
+	// mmap() (the only caller of heap_alloc() -- see sys_mmap() below)
+	// is contractually required to return page-aligned addresses.
+	// musl's allocator (mallocng) depends on that: it's mmap()-only,
+	// never brk()-based, and its "meta group" bookkeeping does
+	// alignment-based pointer arithmetic on every mmap() return that
+	// silently miscomputes if the base isn't actually page-aligned --
+	// not a crash, just increasingly wrong internal accounting that
+	// can eventually surface as a spurious malloc() failure ("out of
+	// memory" from something like curltest.c's curl_easy_perform(),
+	// which allocates far more, and far more repeatedly, than any
+	// other app here ever has) long before the arena is really
+	// exhausted. heap_cur only starts life at __bss_stop
+	// (heap_init()), an arbitrary linker-computed address with no
+	// alignment guarantee beyond c.ld's ALIGN(16) -- nowhere near
+	// mmap()'s page-alignment contract -- so it's rounded up here
+	// before ever being handed out. n itself is already a page
+	// multiple (sys_mmap() rounds it before calling in), so once this
+	// aligns the first call's start, heap_cur (= p + n) stays
+	// page-aligned on every call after.
+	char *p = (char *)(((u64)heap_cur + 4095) & ~(u64)4095);
+
 	// Done as a u64 subtraction/comparison, not "p + n < p" pointer
 	// arithmetic: overflowing a pointer is undefined behavior, so a
 	// compiler is entitled to assume it never happens and fold that
 	// comparison away - which silently defeats the overflow check.
-	char *p = heap_cur;
+	// The alignment bump above can itself push p past heap_end, which
+	// would otherwise underflow this subtraction into a huge bogus
+	// "remaining" instead of correctly reporting exhaustion.
+	if ((u64)p > (u64)heap_end) {
+		static const char msg[] = "posix_shim: out of memory\n";
+		b_output(msg, sizeof(msg) - 1);
+		return 0;
+	}
 	u64 remaining = (u64)heap_end - (u64)p;
 	if (n > remaining) {
 		static const char msg[] = "posix_shim: out of memory\n";
