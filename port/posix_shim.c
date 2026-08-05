@@ -16,9 +16,12 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/select.h>
+#include <poll.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <time.h>
 
 #include "libBareMetal.h"
 #include "posix_shim.h"
@@ -367,6 +370,41 @@ static long sys_ioctl(long fd, long req, long arg)
 }
 
 // -----------------------------------------------------------------------
+// Time
+//
+// b_system(TIMECOUNTER, ...) (nanoseconds since boot -- see
+// libBareMetal.h) is already this port's internal clock source for
+// lwIP's sys_now() (net_glue.c), the heap/TLS RNG seed, etc. -- it was
+// just never exposed to application code as a syscall (see
+// OPENISSUES.md). libcurl needs *some* working clock_gettime() for its
+// own timeout/pacing bookkeeping (Curl_now()), so CLOCK_MONOTONIC is
+// wired up here to the same source. CLOCK_REALTIME is deliberately
+// left unimplemented (-EINVAL below, same as any other unhandled
+// clk_id) rather than answering with boot-relative time mislabeled as
+// wall-clock time -- there's still no RTC/wall-clock source on this
+// port, matching MBEDTLS_HAVE_TIME being left off in
+// baremetal_mbedtls_config.h for the same reason.
+// -----------------------------------------------------------------------
+
+static long sys_clock_gettime(long clk_id, long ts_addr)
+{
+	struct timespec *ts = (struct timespec *)ts_addr;
+
+	switch (clk_id) {
+	case CLOCK_MONOTONIC:
+	case CLOCK_MONOTONIC_RAW:
+	case CLOCK_MONOTONIC_COARSE: {
+		u64 ns = b_system(TIMECOUNTER, 0, 0);
+		ts->tv_sec = (long)(ns / 1000000000ULL);
+		ts->tv_nsec = (long)(ns % 1000000000ULL);
+		return 0;
+	}
+	default:
+		return -EINVAL;
+	}
+}
+
+// -----------------------------------------------------------------------
 // Networking (sockets) -- see net_shim.c/net_glue.c. IPv4 TCP/UDP only.
 // -----------------------------------------------------------------------
 
@@ -404,6 +442,90 @@ static long sys_sendto(long fd, long buf, long len, long flags, long addr, long 
 static long sys_recvfrom(long fd, long buf, long len, long flags, long addr, long addrlenp)
 {
 	return net_shim_recvfrom(fd, (void *)buf, (size_t)len, flags, (void *)addr, (socklen_t *)addrlenp);
+}
+
+// -----------------------------------------------------------------------
+// select()/poll()
+//
+// Every blocking I/O call in this port (bmfs_read/write, net_shim_send/
+// recv) already blocks internally for real (net_shim's up-to-30s
+// timeout) -- there is no non-blocking mode for a caller to actually
+// need readiness-multiplexing for (see OPENISSUES.md). So rather than
+// leaving these as -ENOSYS (which would break libcurl's easy-interface
+// transfer loop -- lib/select.c's Curl_socket_check() -- and anything
+// else that unconditionally calls select()/poll() before a read/write
+// as a matter of course), both are shimmed as an immediate "yes,
+// whatever you asked about is ready" instead of a real wait: every
+// fd this port recognizes (std fd 0-2, a BMFS fd, a socket fd) is
+// reported ready for whatever of read/write the caller asked about,
+// with the real blocking then happening for real inside the read()/
+// write()/recv()/send() call that follows. This is honest about not
+// being a real multiplexer (a caller juggling several fds to learn
+// *which one* has data first won't get that -- it'll get "ready" for
+// all of them and then block for real on whichever it tries), but is
+// exactly the semantics this port's single-blocking-connection-at-a-
+// time callers (libcurl's easy interface included) actually drive.
+// -----------------------------------------------------------------------
+
+static int fd_is_valid(long fd)
+{
+	return fd == 0 || fd == 1 || fd == 2 || bmfs_is_fd(fd) || net_shim_is_fd(fd);
+}
+
+static long sys_select(long nfds, long readfds_addr, long writefds_addr, long exceptfds_addr, long timeout_addr)
+{
+	fd_set *rfds = (fd_set *)readfds_addr;
+	fd_set *wfds = (fd_set *)writefds_addr;
+	fd_set *efds = (fd_set *)exceptfds_addr;
+	(void)timeout_addr;
+
+	if (nfds < 0 || nfds > FD_SETSIZE)
+		return -EINVAL;
+
+	long ready = 0;
+	for (long fd = 0; fd < nfds; fd++) {
+		int wanted = (rfds && FD_ISSET(fd, rfds)) || (wfds && FD_ISSET(fd, wfds));
+		if (!wanted)
+			continue;
+		if (!fd_is_valid(fd)) {
+			if (rfds)
+				FD_CLR(fd, rfds);
+			if (wfds)
+				FD_CLR(fd, wfds);
+			continue;
+		}
+		ready++;
+	}
+	if (efds)
+		FD_ZERO(efds);
+
+	return ready;
+}
+
+static long sys_poll(long fds_addr, long nfds, long timeout)
+{
+	(void)timeout;
+	struct pollfd *fds = (struct pollfd *)fds_addr;
+	long ready = 0;
+
+	for (long i = 0; i < nfds; i++) {
+		fds[i].revents = 0;
+
+		if (fds[i].fd < 0)
+			continue; // negative fd: POSIX says ignore this entry
+
+		if (!fd_is_valid(fds[i].fd)) {
+			fds[i].revents = POLLNVAL;
+			ready++;
+			continue;
+		}
+
+		fds[i].revents = fds[i].events & (POLLIN | POLLOUT);
+		if (fds[i].revents)
+			ready++;
+	}
+
+	return ready;
 }
 
 // -----------------------------------------------------------------------
@@ -494,6 +616,7 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_lstat:
 		return bmfs_fstatat((const char *)a1, (void *)a2);
 	case SYS_newfstatat:                     return sys_fstatat(a1, a2, a3, a4);
+	case SYS_clock_gettime:                    return sys_clock_gettime(a1, a2);
 	case SYS_brk:                             return sys_brk(a1);
 	case SYS_mmap:                             return sys_mmap(a1, a2, a3, a4, a5, a6);
 	case SYS_munmap:                            return sys_munmap(a1, a2);
@@ -511,6 +634,14 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_connect:          return sys_connect(a1, a2, a3);
 	case SYS_sendto:            return sys_sendto(a1, a2, a3, a4, a5, a6);
 	case SYS_recvfrom:           return sys_recvfrom(a1, a2, a3, a4, a5, a6);
+
+	// x86-64 musl's select()/poll() library functions issue these two
+	// syscalls directly (SYS_select/SYS_poll both exist on x86-64,
+	// unlike some other archs where they're synthesized from
+	// pselect6/ppoll) -- see the "select()/poll()" section above.
+	case SYS_select:      return sys_select(a1, a2, a3, a4, a5);
+	case SYS_poll:         return sys_poll(a1, a2, a3);
+
 	// No options are actually honored (e.g. SO_REUSEADDR, SO_RCVTIMEO);
 	// accept and ignore rather than fail callers that merely set them
 	// defensively.

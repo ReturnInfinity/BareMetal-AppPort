@@ -37,6 +37,11 @@ MBEDTLS_DIR="$BUILD_DIR/mbedtls-3.6.6"
 MBEDTLS_INC="$MBEDTLS_DIR/include"
 MBEDTLS_PORT="port/mbedtls_port"
 
+CURL_DIR="$BUILD_DIR/curl-8.21.0"
+CURL_INC="$CURL_DIR/include"
+CURL_LIB="$CURL_DIR/lib"
+CURL_PORT="port/curl_port"
+
 PORT="port"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +64,11 @@ fi
 
 if ! compgen -G "$BUILD_DIR/mbedtls_*.o" >/dev/null; then
 	echo "error: mbedTLS objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
+	exit 1
+fi
+
+if ! compgen -G "$BUILD_DIR/curl_*.o" >/dev/null; then
+	echo "error: curl objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
 	exit 1
 fi
 
@@ -105,6 +115,13 @@ LWIP_CFLAGS="$CFLAGS -I $LWIP_INC -I $LWIP_PORT"
 # can't win against the "current file's own directory" search step.
 MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\""
 
+# See setup.sh's matching CURL_CFLAGS comment for what each flag here
+# is for -- curl's own lib/*.c objects are prebuilt by setup.sh (like
+# lwIP's/mbedTLS's), this is only needed again here for -DCURL_STATICLIB
+# and -I $CURL_INC, which any *app* using libcurl (e.g. curltest.c)
+# also needs for its own #include <curl/curl.h>.
+APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC"
+
 echo "Building..."
 
 gcc $CFLAGS -o "$BUILD_DIR/crt0.o" "$PORT/crt0.c"
@@ -124,7 +141,7 @@ gcc $CFLAGS -o "$BUILD_DIR/libBareMetal.o" "$PORT/libBareMetal.c"
 APP_OBJS=""
 for src in "${APP_SRCS[@]}"; do
 	obj="$BUILD_DIR/$(basename "$src" .c).o"
-	gcc $CFLAGS -o "$obj" "$src"
+	gcc $APP_CFLAGS -o "$obj" "$src"
 	APP_OBJS="$APP_OBJS $obj"
 done
 
@@ -140,10 +157,15 @@ for obj in "$BUILD_DIR"/mbedtls_*.o; do
 	MBEDTLS_OBJS="$MBEDTLS_OBJS $obj"
 done
 
+CURL_OBJS=""
+for obj in "$BUILD_DIR"/curl_*.o; do
+	CURL_OBJS="$CURL_OBJS $obj"
+done
+
 echo "Linking..."
 ld -T "$PORT/c.ld" -o "$APP_NAME" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" \
 	"$BUILD_DIR/bmfs.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS "$MUSL_LIB" "$LIBGCC"
 
 echo "Built $APP_NAME"

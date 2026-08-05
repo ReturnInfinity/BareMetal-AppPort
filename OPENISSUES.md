@@ -33,23 +33,34 @@ one.
 ## Missing common syscalls
 
 Not implemented (all fall through to `-ENOSYS`):
-- `clock_gettime`/`gettimeofday`/`nanosleep`/`clock_nanosleep` — no
-  wall-clock time exposed to programs yet, only `b_system(TIMECOUNTER)`
-  (nanoseconds since boot) used internally by the heap/TLS/lwIP code.
-  Any program that calls `time()`, benchmarks itself, or does
-  `sleep()` will fail or misbehave.
+- `gettimeofday`/`nanosleep`/`clock_nanosleep`, and `clock_gettime` for
+  any `clk_id` other than `CLOCK_MONOTONIC` — no wall-clock time
+  exposed to programs, only elapsed time since boot. `CLOCK_MONOTONIC`
+  itself *is* implemented (`posix_shim.c`), backed by the same
+  `b_system(TIMECOUNTER)` (nanoseconds since boot) the heap/TLS/lwIP
+  code already used internally — added for libcurl's benefit (see
+  `port/curl_port/curl_config.h`), but usable by any program that just
+  needs to measure elapsed time, not learn the actual date/time. A
+  program that calls `time()`, wants the wall-clock date, or does
+  `sleep()` will still fail or misbehave.
 - `getrandom` — nothing backs `/dev/urandom`-equivalent randomness for
   application code (musl's own internal entropy needs, e.g. the stack
   canary and mallocng's hardening secret, are seeded via `crt0.c`'s
   `fill_random()` using `rdrand`/`rdtsc`, but that path isn't exposed
   as a syscall).
-- `poll`/`select`/`epoll_*` — no way to multiplex across multiple fds
-  (stdin, a BMFS file, a socket) in one blocking call. Combined with
-  every blocking socket/file op in this port already being a
-  synchronous spin-loop internally, this means a program can't
-  currently wait on "whichever of these fds is ready first."
-- `pipe`/`pipe2`/`dup`/`dup2`/`dup3` — no in-process fd duplication or
-  pipes between fds.
+- `epoll_*` — no way to multiplex across multiple fds and learn
+  *which* is ready first. `poll`/`select` themselves are implemented
+  (`posix_shim.c`), but not as a real wait: every fd this port
+  recognizes is reported ready immediately for whatever of read/write
+  the caller asked about, with the real blocking then happening for
+  real inside whichever `read()`/`write()`/`recv()`/`send()` follows
+  (every one of those already blocks synchronously up to its own
+  timeout regardless). Good enough for libcurl's easy-interface
+  transfer loop (the reason these exist at all) and anything else
+  driving one blocking connection at a time; a program juggling
+  several fds to learn which one has data first won't get that.
+- `pipe`/`pipe2`/`dup`/`dup2`/`dup3`/`socketpair` — no in-process fd
+  duplication, pipes, or `AF_UNIX` socket pairs between fds.
 - `getcwd`/`chdir`/`mkdir`/`rmdir`/`chmod`/`chown`/`umask` — no
   concept of a working directory or permissions (BMFS has neither).
 
@@ -129,6 +140,44 @@ Not implemented (all fall through to `-ENOSYS`):
   isn't a shim limitation so much as a note that multi-NIC support
   would need kernel-side work first.
 - **Fixed socket table** (`SOCK_MAX` = 16 concurrent sockets).
+
+## libcurl (`port/curl_port/`)
+
+curl 8.21.0 is vendored unmodified (`scripts/get-curl.sh`); the config
+this port builds it with (`port/curl_port/curl_config.h`, see its own
+file header for how each choice was derived) narrows it down along the
+same lines as everything else here:
+
+- **HTTP and HTTPS only.** No FTP/FILE/TELNET/TFTP/RTSP/DICT/GOPHER/
+  LDAP(S)/POP3/IMAP/SMTP/MQTT/WebSockets/IPFS -- all disabled at
+  compile time (`CURL_DISABLE_*`).
+- **No certificate verification**, same stance and same reason as
+  `tls_shim.c` (see its file header): `CURLOPT_SSL_VERIFYPEER`/
+  `VERIFYHOST` are off in `curltest.c`. No CA store is vendored, and
+  there's still no clock to check a certificate's validity period
+  against even if one were.
+- **No proxy support** (`CURL_DISABLE_PROXY`) and **no alt-svc/HSTS/
+  netrc** (all file- or wall-clock-expiry-based, neither of which fits
+  this port well -- see `curl_config.h`).
+- **Resolves via `gethostbyname()` only**, same as `crawler.c`/
+  `https_crawler.c`/`tls_shim.c` -- `HAVE_GETADDRINFO` is deliberately
+  left undefined even though musl itself links a real `getaddrinfo()`,
+  for the same reason `dns_shim.c` shadows `gethostbyname()` in the
+  first place (nothing writes `/etc/resolv.conf` on this port's BMFS
+  image). IPv4 only, matching lwIP's `LWIP_IPV6=0`.
+- **No threading** (`HAVE_THREADS_POSIX` undefined) -- matches this
+  port being single-threaded throughout; `curl_multi_wakeup()` (for
+  interrupting a wait from another thread) is consequently a no-op,
+  irrelevant to the single easy-handle, single-threaded usage this
+  port's apps actually do.
+- **TLS via mbedTLS only** (`USE_MBEDTLS`) -- the same vendored copy
+  `tls_shim.c` uses, reached through curl's own `vtls/mbedtls.c`
+  instead of `tls_shim.c` itself. This pulled `MBEDTLS_PSA_CRYPTO_C`
+  back on in `port/mbedtls_port/baremetal_mbedtls_config.h` (off
+  before this) -- curl 8.21.0's mbedTLS backend hard-requires PSA
+  crypto calls for RNG/hashing against any mbedTLS >= 3.2.0, with no
+  legacy-API fallback; see that file's `MBEDTLS_PSA_CRYPTO_C` comment
+  for why enabling it doesn't otherwise change how TLS itself runs.
 
 ## General
 

@@ -3371,13 +3371,25 @@
  *               is enabled in PSA (unless it's fully accelerated, see
  *               docs/driver-only-builds.md about that).
  *
- * BareMetal-AppPort: disabled -- keeps the build on the legacy crypto API
- * (smaller, and this is what MBEDTLS_SSL_PROTO_TLS1_2 uses without
- * MBEDTLS_USE_PSA_CRYPTO, which is also off by default). Also lets
- * MBEDTLS_SSL_PROTO_TLS1_3 and MBEDTLS_LMS_C stay disabled above without
- * check_config.h complaining about a stray dependency.
+ * BareMetal-AppPort: enabled -- not for TLS itself (MBEDTLS_USE_PSA_CRYPTO
+ * stays off below, so the TLS 1.2 handshake/record layer still runs on
+ * the legacy crypto API, same as tls_shim.c always has), but because
+ * curl 8.21.0's own vtls/mbedtls.c (port/curl_port/curl_config.h's
+ * USE_MBEDTLS) unconditionally calls psa_generate_random()/
+ * psa_crypto_init() for its RNG, and its bundled lib/md5.c/lib/sha256.c
+ * (Digest auth, etc.) call psa_hash_setup()/update()/finish() instead
+ * of the legacy mbedtls_md5_*()/mbedtls_sha256_*() API, for any mbedTLS
+ * >= 3.2.0 (this port vendors 3.6.6) -- not optional, curl's build
+ * doesn't have a legacy-API fallback path for a modern mbedTLS. With
+ * MBEDTLS_PSA_CRYPTO_CONFIG left disabled (below), PSA's default
+ * algorithm set is derived automatically from whichever legacy
+ * MBEDTLS_xxx_C modules are already enabled in this file -- no separate
+ * psa/crypto_config.h algorithm list to maintain. Requirements (CTR_DRBG
+ * + ENTROPY) are already satisfied above; MBEDTLS_THREADING_C isn't
+ * needed since this port is single-threaded (see OPENISSUES.md), so
+ * only ever one caller ever exists to make psa_xxx() calls anyway.
  */
-//#define MBEDTLS_PSA_CRYPTO_C
+#define MBEDTLS_PSA_CRYPTO_C
 
 /**
  * \def MBEDTLS_PSA_CRYPTO_SE_C
