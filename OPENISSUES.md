@@ -33,8 +33,6 @@ one.
 ## Missing common syscalls
 
 Not implemented (all fall through to `-ENOSYS`):
-- `nanosleep`/`clock_nanosleep` — no way to block for a relative
-  duration; `sleep()`/`usleep()` will fail or misbehave.
 - `clock_gettime` supports `CLOCK_MONOTONIC`/`CLOCK_MONOTONIC_RAW`/
   `CLOCK_MONOTONIC_COARSE` (`posix_shim.c`), backed by
   `b_system(TIMECOUNTER)` (nanoseconds since boot, the same source the
@@ -45,6 +43,19 @@ Not implemented (all fall through to `-ENOSYS`):
   `clock_gettime(CLOCK_REALTIME, ...)` so they work too (see
   `clock.c`). Other `clk_id`s (e.g. `CLOCK_PROCESS_CPUTIME_ID`) still
   return `-EINVAL`.
+- `nanosleep`/`clock_nanosleep` are implemented (`posix_shim.c`), but as
+  a plain busy-wait spin on `b_system(TIMECOUNTER)` — there's no
+  scheduler/interrupt-driven blocking on this port for it to hook into.
+  `net_poll()` is called on every spin iteration so lwIP's
+  timers/retransmits keep getting serviced instead of stalling for the
+  whole sleep. Since there's no signal delivery on this port (see
+  below), a sleep can never legitimately be interrupted early, so
+  `rem`/`remain` is always left zeroed rather than tracking real
+  remaining time. `clock_nanosleep`'s `TIMER_ABSTIME` deadline is exact
+  for `CLOCK_MONOTONIC` (its timeline *is* `TIMECOUNTER`), but there's
+  no wall-clock↔`TIMECOUNTER` conversion wired up yet, so a
+  `CLOCK_REALTIME` absolute deadline is treated the same way for
+  now — fine for "sleep until roughly now plus a bit", wrong otherwise.
 - `getrandom` — nothing backs `/dev/urandom`-equivalent randomness for
   application code (musl's own internal entropy needs, e.g. the stack
   canary and mallocng's hardening secret, are seeded via `crt0.c`'s
