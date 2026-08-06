@@ -27,6 +27,7 @@
 #include "posix_shim.h"
 #include "bmfs.h"
 #include "net_shim.h"
+#include "net_glue.h"
 
 // -----------------------------------------------------------------------
 // Heap (brk / anonymous mmap)
@@ -477,6 +478,77 @@ static long sys_clock_gettime(long clk_id, long ts_addr)
 	}
 }
 
+// nanosleep()/clock_nanosleep() -- there's no scheduler/interrupt-driven
+// blocking on this port (see the "select()/poll()" comment below), so
+// this just spins on b_system(TIMECOUNTER, ...) -- the same ns-since-boot
+// source sys_clock_gettime() above already uses for CLOCK_MONOTONIC --
+// until the requested time is reached, calling net_poll() on every
+// iteration so lwIP's timers/retransmits keep getting serviced during
+// the sleep instead of stalling for its whole duration.
+//
+// No signal delivery exists on this port (see OPENISSUES.md), so a
+// sleep can never legitimately be interrupted early -- *rem is always
+// left zeroed rather than tracking a real remaining time.
+static long sleep_until_ns(u64 target_ns, long rem_addr)
+{
+	while (b_system(TIMECOUNTER, 0, 0) < target_ns)
+		net_poll();
+
+	if (rem_addr) {
+		struct timespec *rem = (struct timespec *)rem_addr;
+		rem->tv_sec = 0;
+		rem->tv_nsec = 0;
+	}
+	return 0;
+}
+
+static long sys_nanosleep(long req_addr, long rem_addr)
+{
+	const struct timespec *req = (const struct timespec *)req_addr;
+
+	if (req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec >= 1000000000L)
+		return -EINVAL;
+
+	u64 dur_ns = (u64)req->tv_sec * 1000000000ULL + (u64)req->tv_nsec;
+	u64 now_ns = b_system(TIMECOUNTER, 0, 0);
+	return sleep_until_ns(now_ns + dur_ns, rem_addr);
+}
+
+static long sys_clock_nanosleep(long clk_id, long flags, long req_addr, long rem_addr)
+{
+	const struct timespec *req = (const struct timespec *)req_addr;
+
+	switch (clk_id) {
+	case CLOCK_REALTIME:
+	case CLOCK_REALTIME_COARSE:
+	case CLOCK_MONOTONIC:
+	case CLOCK_MONOTONIC_RAW:
+	case CLOCK_MONOTONIC_COARSE:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec >= 1000000000L)
+		return -EINVAL;
+
+	u64 req_ns = (u64)req->tv_sec * 1000000000ULL + (u64)req->tv_nsec;
+
+	if (flags & TIMER_ABSTIME) {
+		// Absolute deadline. CLOCK_MONOTONIC's timeline *is*
+		// TIMECOUNTER (see sys_clock_gettime() above), so req_ns
+		// is already a TIMECOUNTER target for that clock. There's
+		// no wall-clock/TIMECOUNTER conversion wired up here yet,
+		// so a CLOCK_REALTIME absolute deadline is treated the
+		// same way for now -- good enough for the common case of
+		// sleeping until "now + a bit", off otherwise.
+		return sleep_until_ns(req_ns, rem_addr);
+	}
+
+	u64 now_ns = b_system(TIMECOUNTER, 0, 0);
+	return sleep_until_ns(now_ns + req_ns, rem_addr);
+}
+
 // -----------------------------------------------------------------------
 // Networking (sockets) -- see net_shim.c/net_glue.c. IPv4 TCP/UDP only.
 // -----------------------------------------------------------------------
@@ -691,6 +763,8 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 		return bmfs_fstatat((const char *)a1, (void *)a2);
 	case SYS_newfstatat:                     return sys_fstatat(a1, a2, a3, a4);
 	case SYS_clock_gettime:                    return sys_clock_gettime(a1, a2);
+	case SYS_nanosleep:                       return sys_nanosleep(a1, a2);
+	case SYS_clock_nanosleep:                return sys_clock_nanosleep(a1, a2, a3, a4);
 	case SYS_brk:                             return sys_brk(a1);
 	case SYS_mmap:                             return sys_mmap(a1, a2, a3, a4, a5, a6);
 	case SYS_munmap:                            return sys_munmap(a1, a2);

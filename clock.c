@@ -9,6 +9,7 @@
 
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "port/libBareMetal.h"
 
@@ -31,6 +32,13 @@ int main(void)
 	u64 wallclock = b_system(WALLCLOCK, 0, 0);
 	printf("b_system(WALLCLOCK, 0, 0):      %llu seconds since epoch\n",
 	       (unsigned long long)wallclock);
+
+	// Exercises nanosleep() (via musl's sleep()) -- see posix_shim.c's
+	// sys_nanosleep().
+	for (int i = 1; i <= 5; i++) {
+		sleep(1);
+		printf("%d\n", i);
+	}
 
 	return 0;
 }
