@@ -23,13 +23,13 @@ if [ -d "$MBEDTLS_DIR" ]; then
 fi
 
 if [ -f "$TARBALL" ]; then
-	echo "$TARBALL already exists - skipping download."
+	echo "- $TARBALL already exists - skipping download."
 else
-	echo "Downloading ${URL}"
+	echo "- Downloading ${URL}"
 	curl -s -L -o "${TARBALL}" "${URL}"
 fi
 
-echo "Extracting ${TARBALL}"
+echo "- Extracting ${TARBALL}"
 tar -xjf "${TARBALL}"
 
 # echo "Done. Source extracted to: ${MBEDTLS_DIR}/"

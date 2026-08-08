@@ -22,19 +22,19 @@ if [ -d "$MUSL_DIR" ]; then
 fi
 
 if [ -f "$TARBALL" ]; then
-	echo "$TARBALL already exists - skipping download."
+	echo "- $TARBALL already exists - skipping download."
 else
-	echo "Downloading ${URL}"
+	echo "- Downloading ${URL}"
 	curl -s -L -o "${TARBALL}" "${URL}"
 fi
 
-echo "Extracting ${TARBALL}"
+echo "- Extracting ${TARBALL}"
 tar -xzf "${TARBALL}"
 
-echo "Applying BareMetal port patch"
+echo "- Applying BareMetal port patch"
 patch --quiet -p1 -d "$MUSL_DIR" < "$PATCH_DIR/musl-1.2.6-baremetal.patch"
 
-echo "Installing pre-generated config.mak"
+echo "- Installing pre-generated config.mak"
 cp "$PATCH_DIR/musl-1.2.6-config.mak" "$MUSL_DIR/config.mak"
 
 # echo "Done. Source fetched and patched to: ${MUSL_DIR}/"

@@ -26,13 +26,13 @@ if [ -d "$SQLITE_DIR" ]; then
 fi
 
 if [ -f "$ZIPFILE" ]; then
-	echo "$ZIPFILE already exists - skipping download."
+	echo "- $ZIPFILE already exists - skipping download."
 else
-	echo "Downloading ${URL}"
+	echo "- Downloading ${URL}"
 	curl -s -L -o "${ZIPFILE}" "${URL}"
 fi
 
-echo "Extracting ${ZIPFILE}"
+echo "- Extracting ${ZIPFILE}"
 unzip -q -o "${ZIPFILE}"
 mv "sqlite-amalgamation-${AMALGAMATION}" "$SQLITE_DIR"
 

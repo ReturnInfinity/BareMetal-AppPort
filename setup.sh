@@ -104,7 +104,7 @@ echo -e "${BOLD}Building libraries${NORMAL}"
 
 # Build musl's libc.a, and the merged header sysroot posix_shim.c/app
 # sources compile against.
-echo "Building musl"
+echo "- Building musl"
 run_quiet make -C "$MUSL_DIR" lib/libc.a
 run_quiet make -C "$MUSL_DIR" install-headers DESTDIR="$(pwd)/$MUSL_DIR/sysroot"
 
@@ -120,7 +120,7 @@ LWIP_SRCS="
 	core/ipv4/ip4_addr.c core/ipv4/ip4.c core/ipv4/ip4_frag.c
 	netif/ethernet.c
 "
-echo "Building lwIP"
+echo "- Building lwIP"
 for src in $LWIP_SRCS; do
 	obj="$BUILD_DIR/lwip_$(basename "$src" .c).o"
 	run_quiet gcc $LWIP_CFLAGS -o "$obj" "$LWIP_DIR/src/$src"
@@ -133,7 +133,7 @@ done
 # our baremetal_mbedtls_config.h leaves disabled just compiles down to
 # an empty translation unit -- no curated file list to keep in sync by
 # hand.
-echo "Building mbedtls"
+echo "- Building mbedtls"
 for src in "$MBEDTLS_DIR"/library/*.c; do
 	obj="$BUILD_DIR/mbedtls_$(basename "$src" .c).o"
 	gcc $MBEDTLS_CFLAGS -o "$obj" "$src"
@@ -161,7 +161,7 @@ done
 # */" fallback stub for exactly this configuration -- the other
 # vquic/*.c files (cf-ngtcp2*.c, cf-quiche.c, ...) still compile down
 # to nothing, same as everywhere else in this list.
-echo "Building curl"
+echo "- Building curl"
 for src in "$CURL_DIR"/lib/*.c "$CURL_DIR"/lib/curlx/*.c "$CURL_DIR"/lib/vauth/*.c "$CURL_DIR"/lib/vtls/*.c "$CURL_DIR"/lib/vquic/*.c; do
 	obj="$BUILD_DIR/curl_$(basename "$src" .c).o"
 	gcc $CURL_CFLAGS -o "$obj" "$src"
@@ -174,7 +174,7 @@ done
 # calls into via SQLITE_OS_OTHER -- see SQLITE_CFLAGS's comment) is
 # built per-app in build-app.sh instead, alongside this port's other
 # own glue (tls_shim.c, net_shim.c, ...), not here.
-echo "Building sqlite"
+echo "- Building sqlite"
 run_quiet gcc $SQLITE_CFLAGS -o "$BUILD_DIR/sqlite_sqlite3.o" "$SQLITE_DIR/sqlite3.c"
 
 # echo -e "${BOLD}Library builds complete${NORMAL}"

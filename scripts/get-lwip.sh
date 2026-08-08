@@ -21,13 +21,13 @@ if [ -d "$LWIP_DIR" ]; then
 fi
 
 if [ -f "$ZIPFILE" ]; then
-	echo "$ZIPFILE already exists - skipping download."
+	echo "- $ZIPFILE already exists - skipping download."
 else
-	echo "Downloading ${URL}"
+	echo "- Downloading ${URL}"
 	curl -s -L -o "${ZIPFILE}" "${URL}"
 fi
 
-echo "Extracting ${ZIPFILE}"
+echo "- Extracting ${ZIPFILE}"
 unzip -q -o "${ZIPFILE}"
 
 # echo "Done. Source extracted to: ${LWIP_DIR}/"
