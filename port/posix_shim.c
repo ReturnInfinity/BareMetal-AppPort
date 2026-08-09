@@ -478,21 +478,28 @@ static long sys_clock_gettime(long clk_id, long ts_addr)
 	}
 }
 
-// nanosleep()/clock_nanosleep() -- there's no scheduler/interrupt-driven
-// blocking on this port (see the "select()/poll()" comment below), so
-// this just spins on b_system(TIMECOUNTER, ...) -- the same ns-since-boot
-// source sys_clock_gettime() above already uses for CLOCK_MONOTONIC --
-// until the requested time is reached, calling net_poll() on every
-// iteration so lwIP's timers/retransmits keep getting serviced during
-// the sleep instead of stalling for its whole duration.
+// nanosleep()/clock_nanosleep() -- there's no scheduler on this port for
+// a blocking sleep to yield to, but b_system(SLEEP, ns, 0) (see
+// libBareMetal.h) now HLTs the CPU until the APIC timer fires ns
+// nanoseconds out instead of spinning, so this chains that in
+// NET_POLL_INTERVAL_NS-sized chunks -- net_poll() is still called
+// between chunks so lwIP's timers/retransmits keep getting serviced
+// during a long sleep instead of stalling for its whole duration.
 //
 // No signal delivery exists on this port (see OPENISSUES.md), so a
 // sleep can never legitimately be interrupted early -- *rem is always
 // left zeroed rather than tracking a real remaining time.
+#define NET_POLL_INTERVAL_NS 10000000ULL // 10ms
+
 static long sleep_until_ns(u64 target_ns, long rem_addr)
 {
-	while (b_system(TIMECOUNTER, 0, 0) < target_ns)
+	u64 now_ns;
+
+	while ((now_ns = b_system(TIMECOUNTER, 0, 0)) < target_ns) {
+		u64 remaining_ns = target_ns - now_ns;
+		b_system(SLEEP, remaining_ns < NET_POLL_INTERVAL_NS ? remaining_ns : NET_POLL_INTERVAL_NS, 0);
 		net_poll();
+	}
 
 	if (rem_addr) {
 		struct timespec *rem = (struct timespec *)rem_addr;

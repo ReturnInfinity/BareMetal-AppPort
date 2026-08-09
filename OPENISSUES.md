@@ -43,14 +43,14 @@ Not implemented (all fall through to `-ENOSYS`):
   `clock_gettime(CLOCK_REALTIME, ...)` so they work too (see
   `clock.c`). Other `clk_id`s (e.g. `CLOCK_PROCESS_CPUTIME_ID`) still
   return `-EINVAL`.
-- `nanosleep`/`clock_nanosleep` are implemented (`posix_shim.c`), but as
-  a plain busy-wait spin on `b_system(TIMECOUNTER)` — there's no
-  scheduler/interrupt-driven blocking on this port for it to hook into.
-  `net_poll()` is called on every spin iteration so lwIP's
-  timers/retransmits keep getting serviced instead of stalling for the
-  whole sleep. Since there's no signal delivery on this port (see
-  below), a sleep can never legitimately be interrupted early, so
-  `rem`/`remain` is always left zeroed rather than tracking real
+- `nanosleep`/`clock_nanosleep` are implemented (`posix_shim.c`) on top
+  of `b_system(SLEEP, ns, 0)`, which HLTs the CPU until the APIC timer
+  fires rather than busy-spinning. The sleep is chained in
+  `NET_POLL_INTERVAL_NS` (10ms) chunks with `net_poll()` called between
+  each so lwIP's timers/retransmits keep getting serviced instead of
+  stalling for the whole sleep. Since there's no signal delivery on this
+  port (see below), a sleep can never legitimately be interrupted early,
+  so `rem`/`remain` is always left zeroed rather than tracking real
   remaining time. `clock_nanosleep`'s `TIMER_ABSTIME` deadline is exact
   for `CLOCK_MONOTONIC` (its timeline *is* `TIMECOUNTER`), but there's
   no wall-clock↔`TIMECOUNTER` conversion wired up yet, so a
