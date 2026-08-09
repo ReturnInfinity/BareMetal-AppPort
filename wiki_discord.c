@@ -1,18 +1,28 @@
 // wiki_discord.c -- fetches a random Wikipedia article's summary and
-// posts its title + first paragraph(s) to a Discord channel via an
-// incoming webhook. build with build-app.sh.
+// posts its title + link + first paragraph(s) to a Discord channel via
+// an incoming webhook, once every POST_INTERVAL_SECS, forever.
 //
 // This is also a valid *nix program of course.
 //
-// Two HTTPS requests, both through libcurl (see curltest.c for the
-// baseline demo this is built on -- same net_shim.c sockets underneath,
-// same vendored mbedTLS backend):
+// Two HTTPS requests per post, both through libcurl (see curltest.c for
+// the baseline demo this is built on -- same net_shim.c sockets
+// underneath, same vendored mbedTLS backend):
 //
 //   1. GET  https://en.wikipedia.org/api/rest_v1/page/random/summary
 //      MediaWiki's REST "page summary" endpoint for a random article;
 //      its "extract" field is already the plain-text lead section
-//      (roughly the first paragraph(s), before the first heading).
+//      (roughly the first paragraph(s), before the first heading), and
+//      its "content_urls"."desktop"."page" field is the article's
+//      regular (human-browsable) URL -- "desktop" is picked over
+//      "mobile" only because it's the first of the two to appear in the
+//      response, which is all json_extract_string() below actually goes
+//      by; both point at the same URL in practice.
 //   2. POST DISCORD_WEBHOOK_URL, a JSON {"content": "..."} body.
+//
+// A transient failure on either request (network blip, Wikipedia/
+// Discord hiccup, rate limit) is logged and retried after
+// RETRY_INTERVAL_SECS rather than ending the program -- this is meant
+// to run unattended.
 //
 // DISCORD_WEBHOOK_URL is intentionally blank below -- it's a per-server
 // secret (anyone holding it can post to that channel), not something
@@ -45,6 +55,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <curl/curl.h>
 
@@ -53,9 +64,13 @@
 
 #define USER_AGENT "BareMetal-wiki-discord/1.0 (https://github.com/ReturnInfinity/BareMetal-App)"
 
+#define POST_INTERVAL_SECS  3600 // 60 minutes between posts
+#define RETRY_INTERVAL_SECS 30  // shorter backoff after a failed fetch/post
+
 #define WIKI_BUF_SIZE     (32 * 1024)
 #define DISCORD_RESP_SIZE (4 * 1024)
 #define TITLE_BUF_SIZE    256
+#define URL_BUF_SIZE      512
 #define EXTRACT_BUF_SIZE  (8 * 1024)
 #define CONTENT_MAX       1900 // Discord hard-caps message content at 2000 UTF-8 chars; leave headroom
 #define PAYLOAD_BUF_SIZE  8192 // JSON-escaping content can expand it up to ~2x
@@ -188,7 +203,8 @@ static void json_escape_append(char *out, size_t outsz, size_t *pos, const char 
 
 int main(void)
 {
-	printf("BareMetal wiki_discord -- random Wikipedia article -> Discord webhook\n\n");
+	printf("BareMetal wiki_discord -- random Wikipedia article -> Discord webhook, "
+	       "every %d seconds\n\n", POST_INTERVAL_SECS);
 
 	if (DISCORD_WEBHOOK_URL[0] == '\0') {
 		fprintf(stderr, "error: DISCORD_WEBHOOK_URL is empty -- edit wiki_discord.c "
@@ -199,9 +215,6 @@ int main(void)
 
 	curl_global_init(CURL_GLOBAL_DEFAULT);
 
-	static char wiki_buf[WIKI_BUF_SIZE];
-	struct membuf wiki_mb = { wiki_buf, sizeof(wiki_buf), 0 };
-
 	CURL *h = curl_easy_init();
 	if (!h) {
 		fprintf(stderr, "curl_easy_init() failed\n");
@@ -209,101 +222,113 @@ int main(void)
 		return 1;
 	}
 
-	printf("GET %s\n", WIKI_SUMMARY_URL);
-	curl_common_opts(h);
-	curl_easy_setopt(h, CURLOPT_URL, WIKI_SUMMARY_URL);
-	curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
-	curl_easy_setopt(h, CURLOPT_WRITEDATA, &wiki_mb);
-
-	CURLcode res = curl_easy_perform(h);
-	long status = 0;
-	curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
-
-	if (res != CURLE_OK || status != 200) {
-		fprintf(stderr, "fetch failed: %s (HTTP %ld)\n",
-			curl_easy_strerror(res), status);
-		curl_easy_cleanup(h);
-		curl_global_cleanup();
-		return 1;
-	}
-	printf("status: %ld, %zu byte(s)\n\n", status, wiki_mb.len);
-
-	static char title[TITLE_BUF_SIZE];
-	static char extract[EXTRACT_BUF_SIZE];
-	json_extract_string(wiki_buf, "title", title, sizeof(title));
-	int have_extract = json_extract_string(wiki_buf, "extract", extract, sizeof(extract));
-
-	if (title[0] == '\0' || !have_extract || extract[0] == '\0') {
-		fprintf(stderr, "couldn't find a title/extract in the response "
-				"(unexpected page type, or a malformed response)\n");
-		curl_easy_cleanup(h);
-		curl_global_cleanup();
-		return 1;
-	}
-
-	printf("article: %s\n\n%s\n\n", title, extract);
-
-	// Plain-text message body, truncated to fit Discord's content
-	// limit before JSON-escaping (escaping can only grow it further).
-	static char body[TITLE_BUF_SIZE + EXTRACT_BUF_SIZE + 16];
-	int blen = snprintf(body, sizeof(body), "**%s**\n\n%s", title, extract);
-	if (blen < 0)
-		blen = 0;
-	if ((size_t)blen >= sizeof(body))
-		blen = sizeof(body) - 1;
-
-	int truncated = (size_t)blen > CONTENT_MAX - 3;
-	truncate_utf8(body, truncated ? CONTENT_MAX - 3 : CONTENT_MAX);
-	if (truncated)
-		strcat(body, "...");
-
-	static char payload[PAYLOAD_BUF_SIZE];
-	size_t pos = 0;
-	snprintf(payload, sizeof(payload), "{\"content\":\"");
-	pos = strlen(payload);
-	json_escape_append(payload, sizeof(payload), &pos, body);
-	if (pos + 2 < sizeof(payload)) {
-		payload[pos++] = '"';
-		payload[pos++] = '}';
-		payload[pos] = '\0';
-	}
-
-	static char discord_resp[DISCORD_RESP_SIZE];
-	struct membuf discord_mb = { discord_resp, sizeof(discord_resp), 0 };
-
 	// ?wait=true makes Discord respond with the created message (and a
 	// real error body on failure) instead of a bare 204 No Content.
 	static char post_url[600];
 	snprintf(post_url, sizeof(post_url), "%s?wait=true", DISCORD_WEBHOOK_URL);
 
-	curl_easy_reset(h);
-	curl_common_opts(h);
-	curl_easy_setopt(h, CURLOPT_URL, post_url);
-	curl_easy_setopt(h, CURLOPT_POST, 1L);
-	curl_easy_setopt(h, CURLOPT_POSTFIELDS, payload);
-	curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE, (long)pos);
-	curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
-	curl_easy_setopt(h, CURLOPT_WRITEDATA, &discord_mb);
+	static char wiki_buf[WIKI_BUF_SIZE];
+	static char title[TITLE_BUF_SIZE];
+	static char url[URL_BUF_SIZE];
+	static char extract[EXTRACT_BUF_SIZE];
+	static char body[TITLE_BUF_SIZE + URL_BUF_SIZE + EXTRACT_BUF_SIZE + 16];
+	static char payload[PAYLOAD_BUF_SIZE];
+	static char discord_resp[DISCORD_RESP_SIZE];
 
-	struct curl_slist *headers = NULL;
-	headers = curl_slist_append(headers, "Content-Type: application/json");
-	curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
+	for (;;) {
+		struct membuf wiki_mb = { wiki_buf, sizeof(wiki_buf), 0 };
 
-	printf("POST %s (%zu byte payload)\n", DISCORD_WEBHOOK_URL, pos);
-	res = curl_easy_perform(h);
-	status = 0;
-	curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
+		printf("GET %s\n", WIKI_SUMMARY_URL);
+		curl_easy_reset(h);
+		curl_common_opts(h);
+		curl_easy_setopt(h, CURLOPT_URL, WIKI_SUMMARY_URL);
+		curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
+		curl_easy_setopt(h, CURLOPT_WRITEDATA, &wiki_mb);
 
-	int ok = (res == CURLE_OK && status >= 200 && status < 300);
-	printf("status: %ld%s\n", status, ok ? " (posted)" : " (failed)");
-	if (discord_mb.len)
-		printf("response: %.*s\n", (int)discord_mb.len, discord_resp);
-	if (res != CURLE_OK)
-		fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+		CURLcode res = curl_easy_perform(h);
+		long status = 0;
+		curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
 
-	curl_slist_free_all(headers);
+		if (res != CURLE_OK || status != 200) {
+			fprintf(stderr, "fetch failed: %s (HTTP %ld), retrying in %ds\n",
+				curl_easy_strerror(res), status, RETRY_INTERVAL_SECS);
+			sleep(RETRY_INTERVAL_SECS);
+			continue;
+		}
+		printf("status: %ld, %zu byte(s)\n\n", status, wiki_mb.len);
+
+		json_extract_string(wiki_buf, "title", title, sizeof(title));
+		json_extract_string(wiki_buf, "page", url, sizeof(url));
+		int have_extract = json_extract_string(wiki_buf, "extract", extract, sizeof(extract));
+
+		if (title[0] == '\0' || url[0] == '\0' || !have_extract || extract[0] == '\0') {
+			fprintf(stderr, "couldn't find a title/page url/extract in the response "
+					"(unexpected page type, or a malformed response), retrying "
+					"in %ds\n", RETRY_INTERVAL_SECS);
+			sleep(RETRY_INTERVAL_SECS);
+			continue;
+		}
+
+		printf("article: %s\n%s\n\n%s\n\n", title, url, extract);
+
+		// Plain-text message body, truncated to fit Discord's content
+		// limit before JSON-escaping (escaping can only grow it further).
+		int blen = snprintf(body, sizeof(body), "**%s**\n%s\n\n%s", title, url, extract);
+		if (blen < 0)
+			blen = 0;
+		if ((size_t)blen >= sizeof(body))
+			blen = sizeof(body) - 1;
+
+		int truncated = (size_t)blen > CONTENT_MAX - 3;
+		truncate_utf8(body, truncated ? CONTENT_MAX - 3 : CONTENT_MAX);
+		if (truncated)
+			strcat(body, "...");
+
+		size_t pos = 0;
+		snprintf(payload, sizeof(payload), "{\"content\":\"");
+		pos = strlen(payload);
+		json_escape_append(payload, sizeof(payload), &pos, body);
+		if (pos + 2 < sizeof(payload)) {
+			payload[pos++] = '"';
+			payload[pos++] = '}';
+			payload[pos] = '\0';
+		}
+
+		struct membuf discord_mb = { discord_resp, sizeof(discord_resp), 0 };
+
+		curl_easy_reset(h);
+		curl_common_opts(h);
+		curl_easy_setopt(h, CURLOPT_URL, post_url);
+		curl_easy_setopt(h, CURLOPT_POST, 1L);
+		curl_easy_setopt(h, CURLOPT_POSTFIELDS, payload);
+		curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE, (long)pos);
+		curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
+		curl_easy_setopt(h, CURLOPT_WRITEDATA, &discord_mb);
+
+		struct curl_slist *headers = NULL;
+		headers = curl_slist_append(headers, "Content-Type: application/json");
+		curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
+
+		printf("POST %s (%zu byte payload)\n", DISCORD_WEBHOOK_URL, pos);
+		res = curl_easy_perform(h);
+		status = 0;
+		curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
+		curl_slist_free_all(headers);
+
+		int ok = (res == CURLE_OK && status >= 200 && status < 300);
+		printf("status: %ld%s\n", status, ok ? " (posted)" : " (failed)");
+		if (discord_mb.len)
+			printf("response: %.*s\n", (int)discord_mb.len, discord_resp);
+		if (res != CURLE_OK)
+			fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+
+		int wait_secs = ok ? POST_INTERVAL_SECS : RETRY_INTERVAL_SECS;
+		printf("sleeping %ds\n\n", wait_secs);
+		sleep((unsigned)wait_secs);
+	}
+
 	curl_easy_cleanup(h);
 	curl_global_cleanup();
 
-	return ok ? 0 : 1;
+	return 0;
 }
