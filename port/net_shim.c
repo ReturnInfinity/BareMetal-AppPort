@@ -31,6 +31,7 @@
 #include "lwip/udp.h"
 #include "lwip/sys.h"
 
+#include "libBareMetal.h"
 #include "net_glue.h"
 #include "net_shim.h"
 
@@ -39,6 +40,15 @@
 #define ACCEPTQ_MAX           8
 #define UDP_RXQ_MAX            8
 #define NET_BLOCK_TIMEOUT_MS  30000
+
+// Each blocking loop below calls net_poll() to drain the NIC/service
+// lwIP's timers, then -- if still not ready -- HLTs for one interval
+// via b_system(SLEEP, ...) rather than immediately looping back to
+// net_poll() again. Without this a blocking accept()/connect()/recv()/
+// send() with nothing to do (e.g. an idle listening server) spins at
+// 100% CPU for up to NET_BLOCK_TIMEOUT_MS on every call. Matches the
+// same HLT-based wait posix_shim.c's nanosleep() already uses.
+#define NET_POLL_INTERVAL_NS  10000000ULL // 10ms
 
 enum { SK_FREE = 0, SK_CLOSED, SK_CONNECTING, SK_CONNECTED, SK_LISTENING, SK_ERROR };
 
@@ -277,8 +287,11 @@ long net_shim_accept(long fd, void *addr, socklen_t *addrlenp)
 		if (s->state != SK_LISTENING)
 			return -EINVAL;
 		net_poll();
+		if (s->acceptq_count != 0)
+			break;
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -EAGAIN;
+		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 	}
 
 	int slot = s->acceptq[s->acceptq_head];
@@ -333,8 +346,11 @@ long net_shim_connect(long fd, const void *addr, long addrlen)
 	u32_t start = sys_now();
 	while (s->state == SK_CONNECTING) {
 		net_poll();
+		if (s->state != SK_CONNECTING)
+			break;
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -ETIMEDOUT;
+		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 	}
 
 	return s->state == SK_CONNECTED ? 0 : -ECONNREFUSED;
@@ -391,8 +407,11 @@ static long udp_wait_rx(struct bsock *s)
 	u32_t start = sys_now();
 	while (s->udpq_count == 0) {
 		net_poll();
+		if (s->udpq_count != 0)
+			break;
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -ETIMEDOUT;
+		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 	}
 	return 0;
 }
@@ -421,8 +440,11 @@ long net_shim_recv(long fd, void *buf, size_t len, long flags)
 		if (s->state == SK_ERROR)
 			return -ECONNRESET;
 		net_poll();
+		if (s->rx_head || s->eof || s->state == SK_ERROR)
+			continue;
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -ETIMEDOUT;
+		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 	}
 }
 
@@ -522,6 +544,7 @@ long net_shim_send(long fd, const void *buf, size_t len, long flags)
 		net_poll();
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -ETIMEDOUT;
+		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 	}
 }
 
