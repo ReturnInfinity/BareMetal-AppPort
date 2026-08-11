@@ -46,6 +46,10 @@ SQLITE_DIR="$BUILD_DIR/sqlite-3.46.1"
 SQLITE_INC="$SQLITE_DIR"
 SQLITE_PORT="port/sqlite_port"
 
+SODIUM_DIR="$BUILD_DIR/libsodium-1.0.22/src/libsodium"
+SODIUM_INC="$SODIUM_DIR/include"
+SODIUM_PORT="port/libsodium_port"
+
 PORT="port"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,6 +82,11 @@ fi
 
 if [ ! -f "$BUILD_DIR/sqlite_sqlite3.o" ]; then
 	echo "error: $BUILD_DIR/sqlite_sqlite3.o is missing -- run ./setup.sh first." >&2
+	exit 1
+fi
+
+if ! compgen -G "$BUILD_DIR/sodium_*.o" >/dev/null; then
+	echo "error: libsodium objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
 	exit 1
 fi
 
@@ -143,7 +152,13 @@ MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\
 # have). No -D flags needed here: SQLITE_CUSTOM_INCLUDE/SQLITE_OS_OTHER
 # etc. (see setup.sh's SQLITE_CFLAGS comment) only matter to sqlite3.c
 # itself, not to the plain public sqlite3.h an app #include's.
-APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC"
+#
+# -I $SODIUM_INC is the equivalent for <sodium.h> (it in turn quote-
+# includes "sodium/version.h" etc, resolved relative to its own
+# directory -- see setup.sh's SODIUM_CFLAGS comment). -DSODIUM_STATIC
+# matches setup.sh's SODIUM_CFLAGS -- an app's own #include <sodium.h>
+# needs the same define export.h does its SODIUM_EXPORT expansion on.
+APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC"
 
 echo "Building..."
 
@@ -160,6 +175,7 @@ gcc $LWIP_CFLAGS -o "$BUILD_DIR/dns_shim.o" "$PORT/dns_shim.c"
 gcc $MBEDTLS_CFLAGS -o "$BUILD_DIR/tls_shim.o" "$PORT/tls_shim.c"
 gcc $MBEDTLS_CFLAGS -o "$BUILD_DIR/entropy_hardware_poll.o" "$MBEDTLS_PORT/entropy_hardware_poll.c"
 gcc $CFLAGS -I "$SQLITE_INC" -o "$BUILD_DIR/sqlite_vfs.o" "$SQLITE_PORT/sqlite_vfs.c"
+gcc $CFLAGS -I "$SODIUM_INC" -I "$SODIUM_INC/sodium" -o "$BUILD_DIR/randombytes_baremetal.o" "$SODIUM_PORT/randombytes_baremetal.c"
 gcc $CFLAGS -o "$BUILD_DIR/libBareMetal.o" "$PORT/libBareMetal.c"
 
 APP_OBJS=""
@@ -194,6 +210,13 @@ done
 # it into a "multiple definition" error.
 SQLITE_OBJS="$BUILD_DIR/sqlite_sqlite3.o"
 
+# Like LWIP_OBJS/MBEDTLS_OBJS/CURL_OBJS above: the libsodium_*.o files are
+# built once by setup.sh, just picked up here.
+SODIUM_OBJS=""
+for obj in "$BUILD_DIR"/sodium_*.o; do
+	SODIUM_OBJS="$SODIUM_OBJS $obj"
+done
+
 echo "Linking..."
 
 # Two stages, not a direct-to-binary `ld -T c.ld` link: c.ld's
@@ -219,8 +242,8 @@ echo "Linking..."
 ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -o "$BUILD_DIR/$APP_NAME.elf" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" \
 	"$BUILD_DIR/bmfs.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" \
-	"$BUILD_DIR/sqlite_vfs.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" \
+	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
 echo "Built $APP_NAME"

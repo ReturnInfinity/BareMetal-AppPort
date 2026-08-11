@@ -18,6 +18,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-mbedtls.sh"
 "$SCRIPT_DIR/scripts/get-curl.sh"
 "$SCRIPT_DIR/scripts/get-sqlite.sh"
+"$SCRIPT_DIR/scripts/get-libsodium.sh"
 
 BUILD_DIR="build"
 
@@ -39,6 +40,10 @@ CURL_PORT="port/curl_port"
 
 SQLITE_DIR="$BUILD_DIR/sqlite-3.46.1"
 SQLITE_PORT="port/sqlite_port"
+
+SODIUM_DIR="$BUILD_DIR/libsodium-1.0.22/src/libsodium"
+SODIUM_INC="$SODIUM_DIR/include"
+SODIUM_PORT="port/libsodium_port"
 
 # Run a command, staying silent unless it fails -- then dump its output
 # and abort. Keeps musl/lwIP's noisy per-file build logs off the screen
@@ -97,6 +102,21 @@ CURL_CFLAGS="$CFLAGS -DHAVE_CONFIG_H -DBUILDING_LIBCURL -DCURL_STATICLIB -I $CUR
 # see OPENISSUES.md), and NDEBUG is SQLite's own documented stance for
 # a release build anyway.
 SQLITE_CFLAGS="$CFLAGS -I $SQLITE_PORT -DSQLITE_CUSTOM_INCLUDE=sqlite_baremetal_config.h -DNDEBUG"
+
+# -I $SODIUM_INC/sodium matches libsodium's own src/libsodium/Makefile.am
+# (libsodium_la_CPPFLAGS: "-I$(srcdir)/include/sodium") -- every internal
+# .c file quote-includes its own public/private headers ("private/common.h",
+# "crypto_stream_chacha20.h", "utils.h", ...) as if compiled from
+# include/sodium/ itself. -DSODIUM_STATIC makes export.h's SODIUM_EXPORT
+# expand to nothing instead of __attribute__((visibility("default")));
+# this is a flat static link with no .so, so there's nothing for a
+# visibility attribute to buy here. -DCONFIGURED=1 is libsodium's own
+# documented escape hatch (see include/sodium/private/common.h) for
+# exactly this situation -- a hand-built, non-./configure compile --
+# silencing its "undocumented method" #warning; no actual config.h is
+# generated or needed (see setup.sh's "Building libsodium" comment below
+# for why not).
+SODIUM_CFLAGS="$CFLAGS -DSODIUM_STATIC -DCONFIGURED=1 -I $SODIUM_INC -I $SODIUM_INC/sodium"
 
 mkdir -p "$BUILD_DIR"
 
@@ -176,5 +196,37 @@ done
 # own glue (tls_shim.c, net_shim.c, ...), not here.
 echo "- Building sqlite"
 run_quiet gcc $SQLITE_CFLAGS -o "$BUILD_DIR/sqlite_sqlite3.o" "$SQLITE_DIR/sqlite3.c"
+
+# Like mbedTLS/curl above: libsodium's own src/libsodium/Makefile.am
+# unconditionally lists *every* implementation file for every primitive in
+# libsodium_la_SOURCES -- portable "ref"/"donna"/"soft" C alongside SSE2/
+# SSSE3/AVX2/AVX512/AES-NI/ARMv8-crypto variants -- and every one of the
+# latter wraps its entire body in "#if defined(HAVE_AVX2INTRIN_H) && ..."
+# (verified against libsodium 1.0.22's actual source), where the
+# HAVE_*INTRIN_H/HAVE_TI_MODE/HAVE_AMD64_ASM/HAVE_AVX_ASM macros are
+# ordinarily set by libsodium's own ./configure probing the host
+# compiler. This port never runs that configure (no config.h is
+# generated -- SODIUM_CFLAGS above passes none of those macros), so
+# every SIMD/asm variant compiles down to an empty translation unit and
+# each primitive's own runtime dispatcher (e.g. crypto_stream_chacha20's
+# stream_chacha20.c) is left with only its ref/portable implementation to
+# select -- the same fallback path libsodium itself takes on a compiler
+# lacking those intrinsics, not a hand-trimmed subset. The only files
+# skipped outright are randombytes/sysrandom/* and randombytes/internal/*:
+# unlike the SIMD variants above, those aren't gated by compiler-capability
+# macros -- they unconditionally want /dev/urandom, getrandom(), or
+# getentropy(), none of which exist here (see OPENISSUES.md) -- so
+# port/libsodium_port/randombytes_baremetal.c (built per-app in
+# build-app.sh, like tls_shim.c/sqlite_vfs.c) stands in for them instead,
+# the same way port/mbedtls_port/entropy_hardware_poll.c stands in for
+# mbedTLS's platform entropy source: RDRAND, with an RDTSC fallback.
+echo "- Building libsodium"
+SODIUM_SRCS=$(find "$SODIUM_DIR" -name '*.c' \
+	! -path '*/randombytes/sysrandom/*' \
+	! -path '*/randombytes/internal/*')
+for src in $SODIUM_SRCS; do
+	obj="$BUILD_DIR/sodium_$(basename "$src" .c).o"
+	gcc $SODIUM_CFLAGS -o "$obj" "$src"
+done
 
 # echo -e "${BOLD}Library builds complete${NORMAL}"
