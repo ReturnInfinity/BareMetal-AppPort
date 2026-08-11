@@ -15,11 +15,12 @@ VERSION="1.0.22"
 LIBRARY_VERSION_MAJOR="26"
 LIBRARY_VERSION_MINOR="4"
 SODIUM_DIR="libsodium-${VERSION}"
+URL="https://github.com/jedisct1/libsodium/archive/refs/tags/${VERSION}-RELEASE.zip"
+ZIPFILE="libsodium-${VERSION}-RELEASE.zip"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$DIST_DIR/build"
-REPO_ROOT="$(dirname "$DIST_DIR")"
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
@@ -28,25 +29,16 @@ if [ -d "$SODIUM_DIR" ]; then
 	exit 0
 fi
 
-# Prefer an already-extracted checkout sitting at the repo root (this is
-# how it arrived here: unzipped from the official 1.0.22-RELEASE source
-# archive) over re-downloading it.
-if [ -d "$REPO_ROOT/libsodium" ]; then
-	echo "- Using $REPO_ROOT/libsodium"
-	cp -r "$REPO_ROOT/libsodium" "$SODIUM_DIR"
-elif [ -f "$REPO_ROOT/libsodium-${VERSION}-RELEASE.zip" ]; then
-	echo "- Extracting $REPO_ROOT/libsodium-${VERSION}-RELEASE.zip"
-	unzip -q -o "$REPO_ROOT/libsodium-${VERSION}-RELEASE.zip"
-	mv "libsodium-${VERSION}-RELEASE" "$SODIUM_DIR"
+if [ -f "$ZIPFILE" ]; then
+	echo "- $ZIPFILE already exists - skipping download."
 else
-	URL="https://github.com/jedisct1/libsodium/archive/refs/tags/${VERSION}-RELEASE.zip"
-	ZIPFILE="libsodium-${VERSION}-RELEASE.zip"
 	echo "- Downloading ${URL}"
 	curl -s -L -o "${ZIPFILE}" "${URL}"
-	echo "- Extracting ${ZIPFILE}"
-	unzip -q -o "${ZIPFILE}"
-	mv "libsodium-${VERSION}-RELEASE" "$SODIUM_DIR"
 fi
+
+echo "- Extracting ${ZIPFILE}"
+unzip -q -o "${ZIPFILE}"
+mv "libsodium-${VERSION}-RELEASE" "$SODIUM_DIR"
 
 # Hand-generate version.h from version.h.in (see this script's header
 # comment) -- SODIUM_LIBRARY_MINIMAL_DEF is left blank, matching a
