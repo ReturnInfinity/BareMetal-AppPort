@@ -236,6 +236,15 @@ long ext4_shim_read(long fd, void *buf, size_t len)
 	if (sf->is_dir)
 		return -EISDIR;
 
+	// A read positioned at or past EOF is just 0 bytes/EOF in POSIX
+	// terms -- ext4_shim_lseek() allows fpos to land past fsize (see
+	// its own comment), but ext4_fread() computes
+	// `file->fsize - file->fpos` as an unsigned subtraction and would
+	// underflow to a huge value here rather than clamping to 0, so
+	// this has to be caught before calling into it.
+	if (sf->f.fpos >= sf->f.fsize)
+		return 0;
+
 	size_t rcnt = 0;
 	int r = ext4_fread(&sf->f, buf, len, &rcnt);
 	if (r != EOK)
@@ -305,6 +314,31 @@ long ext4_shim_lseek(long fd, long offset, int whence)
 			return 0;
 		}
 		return -EINVAL;
+	}
+
+	// ext4_fseek() rejects (EINVAL) any SEEK_SET/SEEK_CUR/SEEK_END
+	// target that lands past the file's current size -- unlike real
+	// POSIX lseek(), which allows seeking past EOF freely (a read
+	// through the gap comes back short/empty, a write there sparsely
+	// extends the file). Callers rely on that POSIX behavior (e.g.
+	// SQLite's pager probes for a file-change signature at a fixed
+	// offset even in a brand-new, still-empty database -- see
+	// sqlite_port/sqlite_vfs.c's ext2Read()), so compute the target
+	// ourselves and, whenever it's past fsize, set fpos directly
+	// rather than routing through ext4_fseek(), which would reject it.
+	int64_t target;
+	switch (whence) {
+	case SEEK_SET: target = offset; break;
+	case SEEK_CUR: target = (int64_t)sf->f.fpos + offset; break;
+	case SEEK_END: target = (int64_t)sf->f.fsize + offset; break;
+	default: return -EINVAL;
+	}
+	if (target < 0)
+		return -EINVAL;
+
+	if ((uint64_t)target > sf->f.fsize) {
+		sf->f.fpos = (uint64_t)target;
+		return (long)target;
 	}
 
 	int r = ext4_fseek(&sf->f, offset, (uint32_t)whence);
