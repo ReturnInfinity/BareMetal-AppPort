@@ -25,7 +25,7 @@
 
 #include "libBareMetal.h"
 #include "posix_shim.h"
-#include "bmfs.h"
+#include "ext4_shim.h"
 #include "net_shim.h"
 #include "net_glue.h"
 
@@ -281,8 +281,8 @@ static long sys_munmap(long addr, long len)
 
 static long sys_write(long fd, long buf, long len)
 {
-	if (bmfs_is_fd(fd))
-		return bmfs_write(fd, (const void *)buf, (size_t)len);
+	if (ext4_shim_is_fd(fd))
+		return ext4_shim_write(fd, (const void *)buf, (size_t)len);
 	if (net_shim_is_fd(fd))
 		return net_shim_send(fd, (const void *)buf, (size_t)len, 0);
 	if (fd != 1 && fd != 2)
@@ -294,8 +294,8 @@ static long sys_write(long fd, long buf, long len)
 
 static long sys_read(long fd, long buf, long len)
 {
-	if (bmfs_is_fd(fd))
-		return bmfs_read(fd, (void *)buf, (size_t)len);
+	if (ext4_shim_is_fd(fd))
+		return ext4_shim_read(fd, (void *)buf, (size_t)len);
 	if (net_shim_is_fd(fd))
 		return net_shim_recv(fd, (void *)buf, (size_t)len, 0);
 	if (fd != 0)
@@ -356,8 +356,8 @@ static long sys_readv(long fd, long iov_addr, long iovcnt)
 
 static long sys_close(long fd)
 {
-	if (bmfs_is_fd(fd))
-		return bmfs_close(fd);
+	if (ext4_shim_is_fd(fd))
+		return ext4_shim_close(fd);
 	if (net_shim_is_fd(fd))
 		return net_shim_close(fd);
 	if (fd == 0 || fd == 1 || fd == 2)
@@ -366,14 +366,15 @@ static long sys_close(long fd)
 }
 
 // fd 0-2 are reported as a character device so musl's stdio treats
-// them as a tty-like stream rather than a regular file. Real BMFS
-// files are reported as a regular file (see bmfs_fstat_fd()). Sockets
-// are reported as S_IFSOCK with no further detail (nothing currently
-// inspects socket fstat() results beyond the type bits).
+// them as a tty-like stream rather than a regular file. Real EXT2
+// files are reported as a regular file or directory (see
+// ext4_shim_fstat_fd()). Sockets are reported as S_IFSOCK with no
+// further detail (nothing currently inspects socket fstat() results
+// beyond the type bits).
 static long sys_fstat(long fd, long stbuf)
 {
-	if (bmfs_is_fd(fd))
-		return bmfs_fstat_fd(fd, (void *)stbuf);
+	if (ext4_shim_is_fd(fd))
+		return ext4_shim_fstat_fd(fd, (void *)stbuf);
 	if (net_shim_is_fd(fd)) {
 		struct stat *st = (struct stat *)stbuf;
 		memset(st, 0, sizeof(*st));
@@ -392,14 +393,14 @@ static long sys_fstat(long fd, long stbuf)
 
 static long sys_lseek(long fd, long offset, long whence)
 {
-	if (bmfs_is_fd(fd))
-		return bmfs_lseek(fd, offset, (int)whence);
+	if (ext4_shim_is_fd(fd))
+		return ext4_shim_lseek(fd, offset, (int)whence);
 	return -ESPIPE; // std fds 0-2 are streams, not seekable
 }
 
-static long sys_open(const char *path, long flags, long mode)
+static long sys_open(long dirfd, const char *path, long flags, long mode)
 {
-	return bmfs_open(path, (int)flags, (int)mode);
+	return ext4_shim_open(dirfd, path, (int)flags, (int)mode);
 }
 
 // Added for SQLite's VFS (port/sqlite_port/sqlite_vfs.c), the first
@@ -407,24 +408,78 @@ static long sys_open(const char *path, long flags, long mode)
 // file's logical size without touching its data.
 static long sys_ftruncate(long fd, long length)
 {
-	if (bmfs_is_fd(fd))
-		return bmfs_truncate(fd, (size_t)length);
+	if (ext4_shim_is_fd(fd))
+		return ext4_shim_truncate(fd, (size_t)length);
 	return -EBADF;
 }
 
-static long sys_unlink(const char *path)
+static long sys_unlink(long dirfd, const char *path)
 {
-	return bmfs_unlink(path);
+	return ext4_shim_unlink(dirfd, path);
+}
+
+static long sys_mkdir(long dirfd, const char *path)
+{
+	return ext4_shim_mkdir(dirfd, path);
+}
+
+static long sys_rmdir(long dirfd, const char *path)
+{
+	return ext4_shim_rmdir(dirfd, path);
+}
+
+// rmdir() has its own direct syscall number on this arch (see
+// arch/x86_64/bits/syscall.h.in), but unlinkat(..., AT_REMOVEDIR) is
+// how a program calling the *at() form removes a directory instead of
+// a file -- musl's own rmdir() never issues this, only an explicit
+// unlinkat() call would.
+static long sys_unlinkat(long dirfd, const char *path, long flags)
+{
+	if (flags & AT_REMOVEDIR)
+		return ext4_shim_rmdir(dirfd, path);
+	return ext4_shim_unlink(dirfd, path);
+}
+
+static long sys_chdir(const char *path)
+{
+	return ext4_shim_chdir(path);
+}
+
+static long sys_fchdir(long fd)
+{
+	return ext4_shim_fchdir(fd);
+}
+
+static long sys_getcwd(char *buf, size_t size)
+{
+	return ext4_shim_getcwd(buf, size);
+}
+
+static long sys_getdents(long fd, void *buf, size_t len)
+{
+	if (!ext4_shim_is_fd(fd))
+		return -EBADF;
+	return ext4_shim_getdents(fd, buf, (size_t)len);
+}
+
+static long sys_symlink(const char *target, long dirfd, const char *path)
+{
+	return ext4_shim_symlink(target, dirfd, path);
+}
+
+static long sys_readlink(long dirfd, const char *path, char *buf, size_t bufsize)
+{
+	return ext4_shim_readlink(dirfd, path, buf, bufsize);
 }
 
 // x86_64 musl's stat()/lstat()/fstatat() all funnel through fstatat()
-// (aliased to SYS_newfstatat -- see bmfs_fstatat()). dirfd/flags are
-// ignored -- BMFS is flat, so there's no meaningful "relative to this
-// directory fd" to honor.
+// (aliased to SYS_newfstatat -- see ext4_shim_fstatat()). follow
+// resolves a trailing symlink to its target (stat()'s behavior)
+// rather than reporting the link itself (lstat()'s behavior).
 static long sys_fstatat(long dirfd, long path, long kstbuf, long flags)
 {
-	(void)dirfd; (void)flags;
-	return bmfs_fstatat((const char *)path, (void *)kstbuf);
+	int follow = !(flags & AT_SYMLINK_NOFOLLOW);
+	return ext4_shim_fstatat(dirfd, (const char *)path, (void *)kstbuf, follow);
 }
 
 // musl's __stdout_write only checks the return code of this ioctl
@@ -599,7 +654,7 @@ static long sys_recvfrom(long fd, long buf, long len, long flags, long addr, lon
 // -----------------------------------------------------------------------
 // select()/poll()
 //
-// Every blocking I/O call in this port (bmfs_read/write, net_shim_send/
+// Every blocking I/O call in this port (ext4_shim_read/write, net_shim_send/
 // recv) already blocks internally for real (net_shim's up-to-30s
 // timeout) -- there is no non-blocking mode for a caller to actually
 // need readiness-multiplexing for (see OPENISSUES.md). So rather than
@@ -608,7 +663,7 @@ static long sys_recvfrom(long fd, long buf, long len, long flags, long addr, lon
 // else that unconditionally calls select()/poll() before a read/write
 // as a matter of course), both are shimmed as an immediate "yes,
 // whatever you asked about is ready" instead of a real wait: every
-// fd this port recognizes (std fd 0-2, a BMFS fd, a socket fd) is
+// fd this port recognizes (std fd 0-2, an EXT2 fd, a socket fd) is
 // reported ready for whatever of read/write the caller asked about,
 // with the real blocking then happening for real inside the read()/
 // write()/recv()/send() call that follows. This is honest about not
@@ -621,7 +676,7 @@ static long sys_recvfrom(long fd, long buf, long len, long flags, long addr, lon
 
 static int fd_is_valid(long fd)
 {
-	return fd == 0 || fd == 1 || fd == 2 || bmfs_is_fd(fd) || net_shim_is_fd(fd);
+	return fd == 0 || fd == 1 || fd == 2 || ext4_shim_is_fd(fd) || net_shim_is_fd(fd);
 }
 
 static long sys_select(long nfds, long readfds_addr, long writefds_addr, long exceptfds_addr, long timeout_addr)
@@ -732,6 +787,15 @@ extern void *__bmos_entry_sp;
 static long sys_exit(long code)
 {
 	(void)code;
+
+	// Flushes the EXT2 superblock's free block/inode counters, which
+	// lwext4 only writes back on unmount -- see ext4_shim_sync(). Has
+	// to happen here rather than relying on the app to unmount itself:
+	// this is the one path every exit (explicit exit()/_exit() and a
+	// normal return from main(), which musl's __libc_start_main routes
+	// through the same _Exit() call) is guaranteed to go through.
+	ext4_shim_sync();
+
 	__asm__ volatile (
 		"movq __bmos_entry_sp(%%rip), %%rsp\n\t"
 		"popq %%rbp\n\t"
@@ -756,18 +820,34 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_fstat:                 return sys_fstat(a1, a2);
 	case SYS_lseek:                  return sys_lseek(a1, a2, a3);
 	case SYS_ioctl:                    return sys_ioctl(a1, a2, a3);
-	case SYS_open:                      return sys_open((const char *)a1, a2, a3);
-	case SYS_openat:                      return sys_open((const char *)a2, a3, a4); // AT_FDCWD-only: BMFS is flat, a1 (dirfd) is ignored
-	case SYS_unlink:                        return sys_unlink((const char *)a1);
-	case SYS_ftruncate:                       return sys_ftruncate(a1, a2);
+	case SYS_open:                      return sys_open(AT_FDCWD, (const char *)a1, a2, a3);
+	case SYS_openat:                      return sys_open(a1, (const char *)a2, a3, a4);
+	case SYS_unlink:                        return sys_unlink(AT_FDCWD, (const char *)a1);
+	case SYS_unlinkat:                        return sys_unlinkat(a1, (const char *)a2, a3);
+	case SYS_ftruncate:                         return sys_ftruncate(a1, a2);
+	case SYS_mkdir:                               return sys_mkdir(AT_FDCWD, (const char *)a1);
+	case SYS_mkdirat:                               return sys_mkdir(a1, (const char *)a2);
+	case SYS_rmdir:                                   return sys_rmdir(AT_FDCWD, (const char *)a1);
+	case SYS_chdir:                                     return sys_chdir((const char *)a1);
+	case SYS_fchdir:                                     return sys_fchdir(a1);
+	case SYS_getcwd:                                       return sys_getcwd((char *)a1, (size_t)a2);
+	// musl's readdir() on this arch actually issues SYS_getdents64,
+	// not the legacy SYS_getdents its own dirent.h still declares --
+	// both land here since ext4_shim_getdents() fills musl's own
+	// struct dirent layout either way (see its comment).
+	case SYS_getdents:
+	case SYS_getdents64:
+		return sys_getdents(a1, (void *)a2, a3);
+	case SYS_symlink:                                        return sys_symlink((const char *)a1, AT_FDCWD, (const char *)a2);
+	case SYS_readlink:                                         return sys_readlink(AT_FDCWD, (const char *)a1, (char *)a2, (size_t)a3);
 	// musl's __fstatat() takes the SYS_stat/SYS_lstat fast path for
 	// plain stat(path)/lstat(path) (fd==AT_FDCWD, flag in {0,
 	// AT_SYMLINK_NOFOLLOW}) and only falls through to the general
-	// SYS_fstatat (aliased from SYS_newfstatat) case otherwise. BMFS
-	// has no symlinks, so lstat behaves identically to stat.
+	// SYS_fstatat (aliased from SYS_newfstatat) case otherwise.
 	case SYS_stat:
+		return ext4_shim_fstatat(AT_FDCWD, (const char *)a1, (void *)a2, 1);
 	case SYS_lstat:
-		return bmfs_fstatat((const char *)a1, (void *)a2);
+		return ext4_shim_fstatat(AT_FDCWD, (const char *)a1, (void *)a2, 0);
 	case SYS_newfstatat:                     return sys_fstatat(a1, a2, a3, a4);
 	case SYS_clock_gettime:                    return sys_clock_gettime(a1, a2);
 	case SYS_nanosleep:                       return sys_nanosleep(a1, a2);

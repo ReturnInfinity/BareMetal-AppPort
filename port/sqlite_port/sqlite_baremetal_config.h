@@ -14,11 +14,11 @@
  * instead expect the application to supply a VFS of its own, plus
  * sqlite3_os_init()/sqlite3_os_end(). port/sqlite_port/sqlite_vfs.c
  * is that VFS -- a small, direct implementation over this port's own
- * open/read/write/lseek/close/unlink/ftruncate (posix_shim.c/bmfs.c),
- * along the same lines as tls_shim.c/net_shim.c/dns_shim.c being
- * hand-written instead of dragging in a general-purpose POSIX
- * implementation this environment can't fully back. See that file's
- * header for what each VFS method does and why.
+ * open/read/write/lseek/close/unlink/ftruncate (posix_shim.c/
+ * ext4_shim.c), along the same lines as tls_shim.c/net_shim.c/
+ * dns_shim.c being hand-written instead of dragging in a
+ * general-purpose POSIX implementation this environment can't fully
+ * back. See that file's header for what each VFS method does and why.
  */
 
 #ifndef SQLITE_PORT_SQLITE_BAREMETAL_CONFIG_H

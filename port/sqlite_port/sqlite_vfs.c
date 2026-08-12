@@ -9,41 +9,44 @@
 //
 // Every method here is a thin, direct wrapper over the same
 // open/read/write/lseek/close/unlink/ftruncate/stat/clock_gettime
-// calls the rest of this port's apps use (posix_shim.c -> bmfs.c) --
-// not a port of os_unix.c's own logic. That's deliberate, the same
+// calls the rest of this port's apps use (posix_shim.c -> ext4_shim.c)
+// -- not a port of os_unix.c's own logic. That's deliberate, the same
 // choice this port already made for TLS/DNS/sockets (tls_shim.c,
 // dns_shim.c, net_shim.c) rather than one big shim trying to emulate
 // everything a general-purpose POSIX layer would: os_unix.c leans on
-// fcntl() advisory locking, mmap()-backed WAL shared memory,
-// /dev/urandom, and getcwd(), none of which this port has a real
-// implementation of, and coaxing correct behavior out of stubs for
-// each would be more fragile than just not calling them.
+// fcntl() advisory locking and mmap()-backed WAL shared memory, neither
+// of which this port has a real implementation of, and coaxing correct
+// behavior out of stubs for each would be more fragile than just not
+// calling them.
 //
 // What that buys, given this port's model (exactly one process,
 // exactly one thread, ever -- see OPENISSUES.md's "Process model"):
 //
-//   - Locking (bmfsLock/bmfsUnlock/bmfsCheckReservedLock) is a pure
+//   - Locking (ext2Lock/ext2Unlock/ext2CheckReservedLock) is a pure
 //     no-op that always reports success/uncontended: there is never
 //     a second connection for a lock to conflict with.
-//   - Syncing (bmfsSync) is a pure no-op: bmfs_write() (port/bmfs.c)
-//     already issues its b_nvs_write() disk I/O synchronously, one
-//     sector at a time, as data is written -- there's no write-back
-//     cache in this port for a sync to flush.
+//   - Syncing (ext2Sync) is a pure no-op: lwext4's own bcache only ever
+//     runs in write-back mode transiently, inside a single ext4.c call
+//     (ext4_fwrite(), ext4_fclose(), ...) -- it flips back to
+//     write-through, flushing every dirty block to b_nvs_write(),
+//     before that call returns. So there's never a dirty block left
+//     sitting in the cache by the time control comes back to this VFS
+//     for a sync to flush.
 //   - No WAL, no mmap -- see sqlite_baremetal_config.h's
-//     SQLITE_OMIT_WAL/SQLITE_MAX_MMAP_SIZE comments. bmfs_io_methods
+//     SQLITE_OMIT_WAL/SQLITE_MAX_MMAP_SIZE comments. ext2_io_methods
 //     below is iVersion 1 (no xShm-prefixed or xFetch/xUnfetch slots
 //     at all) to match, on top of the compile-time omission.
-//   - Randomness (bmfsRandomness) is RDRAND, the same hardware source
+//   - Randomness (ext2Randomness) is RDRAND, the same hardware source
 //     port/mbedtls_port/entropy_hardware_poll.c uses for mbedTLS (see
 //     that file's header) -- duplicated here in miniature rather than
 //     shared, to keep sqlite_port/ independent of mbedtls_port/ the
 //     same way curl_port/lwip_port/mbedtls_port don't reference each
 //     other either.
-//   - Time (bmfsCurrentTime/bmfsCurrentTimeInt64) goes through the
+//   - Time (ext2CurrentTime/ext2CurrentTimeInt64) goes through the
 //     same clock_gettime(CLOCK_REALTIME) posix_shim.c already backs
 //     with b_system(WALLCLOCK) -- whole seconds only, no sub-second
 //     component (see posix_shim.c's "Time" section).
-//   - Sleeping (bmfsSleep) spin-waits on CLOCK_MONOTONIC instead of
+//   - Sleeping (ext2Sleep) spin-waits on CLOCK_MONOTONIC instead of
 //     blocking: there's no nanosleep()/clock_nanosleep() on this port
 //     (OPENISSUES.md). In practice this is dead code here anyway --
 //     it's only ever reached from SQLite's busy-handler retry loop
@@ -52,10 +55,10 @@
 // Temp files (SQLITE_TEMP_STORE=3, set in sqlite_baremetal_config.h)
 // keeps ordinary TEMP tables/indices and the transient sorters/
 // statement journals ORDER BY, GROUP BY, CREATE INDEX etc. use
-// in-memory unconditionally, so bmfsOpen()'s zName==0 path (SQLite's
+// in-memory unconditionally, so ext2Open()'s zName==0 path (SQLite's
 // "invent your own filename" convention for a real temp file) is only
 // ever reached for a multi-database (ATTACH) transaction's master
-// journal -- rare, but handled below (a name built from bmfsRandomness
+// journal -- rare, but handled below (a name built from ext2Randomness
 // rather than left to fail), not assumed away.
 // =============================================================================
 
@@ -69,21 +72,20 @@
 
 #include "sqlite3.h"
 
-// BMFS filenames are at most 31 bytes + NUL (see port/bmfs.c) -- any
-// name this VFS builds (including the "-journal"/"etilqs_..." suffixes
-// SQLite's own pager.c appends before ever calling into this file)
-// that runs past that will simply fail to open with -ENOENT, surfaced
-// below as SQLITE_CANTOPEN. This is sized as a generous buffer cap for
-// the strings this file builds/copies, not a claim that BMFS itself
-// can hold paths this long.
+// A generous buffer cap for the strings this file builds/copies
+// (including the "-journal"/"etilqs_..." suffixes SQLite's own
+// pager.c appends before ever calling into this file) -- not a claim
+// about EXT2's own name/path limits (255 bytes per component; see
+// ext4_shim.c's EXT4_SHIM_PATH_MAX for this port's own resolved-path
+// buffer cap).
 #define MAXPATHNAME 512
 
-typedef struct BmfsFile {
+typedef struct Ext2File {
 	sqlite3_file base;
 	int fd;
 	int delete_on_close;
 	char name[MAXPATHNAME];
-} BmfsFile;
+} Ext2File;
 
 // -----------------------------------------------------------------------
 // Hardware randomness -- same RDRAND-with-RDTSC-fallback technique as
@@ -134,9 +136,9 @@ static void rdrand_bytes(void *out, size_t len)
 // (see sqlite_baremetal_config.h).
 // -----------------------------------------------------------------------
 
-static int bmfsClose(sqlite3_file *pFile)
+static int ext2Close(sqlite3_file *pFile)
 {
-	BmfsFile *p = (BmfsFile *)pFile;
+	Ext2File *p = (Ext2File *)pFile;
 
 	close(p->fd);
 	if (p->delete_on_close)
@@ -149,9 +151,9 @@ static int bmfsClose(sqlite3_file *pFile)
 // unread tail and report SQLITE_IOERR_SHORT_READ rather than treating
 // it as a hard error -- the page cache relies on this to tell "file
 // just hasn't grown to this page yet" apart from a real I/O failure.
-static int bmfsRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst)
+static int ext2Read(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst)
 {
-	BmfsFile *p = (BmfsFile *)pFile;
+	Ext2File *p = (Ext2File *)pFile;
 
 	if (lseek(p->fd, (long)iOfst, SEEK_SET) < 0)
 		return SQLITE_IOERR_READ;
@@ -174,9 +176,9 @@ static int bmfsRead(sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOf
 	return SQLITE_OK;
 }
 
-static int bmfsWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst)
+static int ext2Write(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst)
 {
-	BmfsFile *p = (BmfsFile *)pFile;
+	Ext2File *p = (Ext2File *)pFile;
 
 	if (lseek(p->fd, (long)iOfst, SEEK_SET) < 0)
 		return SQLITE_IOERR_WRITE;
@@ -192,9 +194,9 @@ static int bmfsWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_in
 	return SQLITE_OK;
 }
 
-static int bmfsTruncate(sqlite3_file *pFile, sqlite3_int64 size)
+static int ext2Truncate(sqlite3_file *pFile, sqlite3_int64 size)
 {
-	BmfsFile *p = (BmfsFile *)pFile;
+	Ext2File *p = (Ext2File *)pFile;
 
 	if (ftruncate(p->fd, (long)size) != 0)
 		return SQLITE_IOERR_TRUNCATE;
@@ -202,15 +204,15 @@ static int bmfsTruncate(sqlite3_file *pFile, sqlite3_int64 size)
 	return SQLITE_OK;
 }
 
-static int bmfsSync(sqlite3_file *pFile, int flags)
+static int ext2Sync(sqlite3_file *pFile, int flags)
 {
 	(void)pFile; (void)flags;
 	return SQLITE_OK; // see this file's header
 }
 
-static int bmfsFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize)
+static int ext2FileSize(sqlite3_file *pFile, sqlite3_int64 *pSize)
 {
-	BmfsFile *p = (BmfsFile *)pFile;
+	Ext2File *p = (Ext2File *)pFile;
 	struct stat st;
 
 	if (fstat(p->fd, &st) != 0)
@@ -220,67 +222,67 @@ static int bmfsFileSize(sqlite3_file *pFile, sqlite3_int64 *pSize)
 	return SQLITE_OK;
 }
 
-static int bmfsLock(sqlite3_file *pFile, int eLock)
+static int ext2Lock(sqlite3_file *pFile, int eLock)
 {
 	(void)pFile; (void)eLock;
 	return SQLITE_OK; // see this file's header
 }
 
-static int bmfsUnlock(sqlite3_file *pFile, int eLock)
+static int ext2Unlock(sqlite3_file *pFile, int eLock)
 {
 	(void)pFile; (void)eLock;
 	return SQLITE_OK;
 }
 
-static int bmfsCheckReservedLock(sqlite3_file *pFile, int *pResOut)
+static int ext2CheckReservedLock(sqlite3_file *pFile, int *pResOut)
 {
 	(void)pFile;
 	*pResOut = 0; // never reserved -- no other connection could hold it
 	return SQLITE_OK;
 }
 
-static int bmfsFileControl(sqlite3_file *pFile, int op, void *pArg)
+static int ext2FileControl(sqlite3_file *pFile, int op, void *pArg)
 {
 	(void)pFile; (void)op; (void)pArg;
 	return SQLITE_NOTFOUND; // no VFS-specific opcodes implemented
 }
 
-static int bmfsSectorSize(sqlite3_file *pFile)
+static int ext2SectorSize(sqlite3_file *pFile)
 {
 	(void)pFile;
-	return 4096; // BMFS_SECTOR_BYTES, see port/bmfs.c
+	return 4096; // BAREMETAL_BLK_BSIZE, see port/lwext4_port/blockdev_baremetal.c
 }
 
-static int bmfsDeviceCharacteristics(sqlite3_file *pFile)
+static int ext2DeviceCharacteristics(sqlite3_file *pFile)
 {
 	(void)pFile;
 	return 0; // no special atomic-write/safe-append guarantees claimed
 }
 
-static const sqlite3_io_methods bmfs_io_methods = {
+static const sqlite3_io_methods ext2_io_methods = {
 	1, // iVersion -- see this file's header
-	bmfsClose,
-	bmfsRead,
-	bmfsWrite,
-	bmfsTruncate,
-	bmfsSync,
-	bmfsFileSize,
-	bmfsLock,
-	bmfsUnlock,
-	bmfsCheckReservedLock,
-	bmfsFileControl,
-	bmfsSectorSize,
-	bmfsDeviceCharacteristics
+	ext2Close,
+	ext2Read,
+	ext2Write,
+	ext2Truncate,
+	ext2Sync,
+	ext2FileSize,
+	ext2Lock,
+	ext2Unlock,
+	ext2CheckReservedLock,
+	ext2FileControl,
+	ext2SectorSize,
+	ext2DeviceCharacteristics
 };
 
 // -----------------------------------------------------------------------
 // sqlite3_vfs -- top-level (not-yet-open-file) operations.
 // -----------------------------------------------------------------------
 
-static int bmfsOpen(sqlite3_vfs *pVfs, const char *zName, sqlite3_file *pFile, int flags, int *pOutFlags)
+static int ext2Open(sqlite3_vfs *pVfs, const char *zName, sqlite3_file *pFile, int flags, int *pOutFlags)
 {
 	(void)pVfs;
-	BmfsFile *p = (BmfsFile *)pFile;
+	Ext2File *p = (Ext2File *)pFile;
 	char tmp[32];
 
 	memset(p, 0, sizeof(*p));
@@ -312,7 +314,7 @@ static int bmfsOpen(sqlite3_vfs *pVfs, const char *zName, sqlite3_file *pFile, i
 	if (fd < 0)
 		return SQLITE_CANTOPEN;
 
-	p->base.pMethods = &bmfs_io_methods;
+	p->base.pMethods = &ext2_io_methods;
 	p->fd = fd;
 	p->delete_on_close = (flags & SQLITE_OPEN_DELETEONCLOSE) != 0;
 
@@ -322,17 +324,19 @@ static int bmfsOpen(sqlite3_vfs *pVfs, const char *zName, sqlite3_file *pFile, i
 	return SQLITE_OK;
 }
 
-static int bmfsDelete(sqlite3_vfs *pVfs, const char *zPath, int dirSync)
+static int ext2Delete(sqlite3_vfs *pVfs, const char *zPath, int dirSync)
 {
 	(void)pVfs; (void)dirSync;
 	unlink(zPath); // missing is fine -- see sqlite3_vfs.xDelete's contract
 	return SQLITE_OK;
 }
 
-// BMFS has no permission model at all (every file reports mode 0644
-// regardless -- see bmfs.c) -- existence is the only thing to check,
-// same answer for SQLITE_ACCESS_EXISTS/READWRITE/READ.
-static int bmfsAccess(sqlite3_vfs *pVfs, const char *zPath, int flags, int *pResOut)
+// This port has no permission enforcement at all (see ext4_shim.c's
+// header and OPENISSUES.md's "EXT2 file I/O" section -- a regular
+// file's mode always reports as 0644 regardless of what's really on
+// the inode) -- existence is the only thing to check, same answer for
+// SQLITE_ACCESS_EXISTS/READWRITE/READ.
+static int ext2Access(sqlite3_vfs *pVfs, const char *zPath, int flags, int *pResOut)
 {
 	(void)pVfs; (void)flags;
 	struct stat st;
@@ -341,9 +345,13 @@ static int bmfsAccess(sqlite3_vfs *pVfs, const char *zPath, int flags, int *pRes
 	return SQLITE_OK;
 }
 
-// BMFS is a flat namespace (see bmfs.c) -- there's no cwd, no `..`,
-// nothing for a "full" pathname to resolve beyond the name itself.
-static int bmfsFullPathname(sqlite3_vfs *pVfs, const char *zPath, int nOut, char *zOut)
+// zPath is handed back unresolved rather than actually made absolute:
+// ext4_shim.c's own open()/unlink()/stat() etc. already resolve a
+// relative path against its cwd (or reject it, for a dirfd-relative
+// call this VFS never makes) themselves, so there's nothing this
+// needs to do beyond satisfying the xFullPathname contract that
+// *something* comes back in zOut.
+static int ext2FullPathname(sqlite3_vfs *pVfs, const char *zPath, int nOut, char *zOut)
 {
 	(void)pVfs;
 	snprintf(zOut, (size_t)nOut, "%s", zPath);
@@ -354,38 +362,38 @@ static int bmfsFullPathname(sqlite3_vfs *pVfs, const char *zPath, int nOut, char
 // section) -- unreachable in practice with SQLITE_OMIT_LOAD_EXTENSION
 // set (sqlite_baremetal_config.h), stubbed here anyway since the VFS
 // struct's shape still has these slots.
-static void *bmfsDlOpen(sqlite3_vfs *pVfs, const char *zFilename)
+static void *ext2DlOpen(sqlite3_vfs *pVfs, const char *zFilename)
 {
 	(void)pVfs; (void)zFilename;
 	return 0;
 }
 
-static void bmfsDlError(sqlite3_vfs *pVfs, int nByte, char *zErrMsg)
+static void ext2DlError(sqlite3_vfs *pVfs, int nByte, char *zErrMsg)
 {
 	(void)pVfs;
 	if (nByte > 0)
 		zErrMsg[0] = 0;
 }
 
-static void (*bmfsDlSym(sqlite3_vfs *pVfs, void *pH, const char *zSym))(void)
+static void (*ext2DlSym(sqlite3_vfs *pVfs, void *pH, const char *zSym))(void)
 {
 	(void)pVfs; (void)pH; (void)zSym;
 	return 0;
 }
 
-static void bmfsDlClose(sqlite3_vfs *pVfs, void *pHandle)
+static void ext2DlClose(sqlite3_vfs *pVfs, void *pHandle)
 {
 	(void)pVfs; (void)pHandle;
 }
 
-static int bmfsRandomness(sqlite3_vfs *pVfs, int nBuf, char *zBuf)
+static int ext2Randomness(sqlite3_vfs *pVfs, int nBuf, char *zBuf)
 {
 	(void)pVfs;
 	rdrand_bytes(zBuf, (size_t)nBuf);
 	return nBuf;
 }
 
-static int bmfsSleep(sqlite3_vfs *pVfs, int microseconds)
+static int ext2Sleep(sqlite3_vfs *pVfs, int microseconds)
 {
 	(void)pVfs;
 	struct timespec start, now;
@@ -401,7 +409,7 @@ static int bmfsSleep(sqlite3_vfs *pVfs, int microseconds)
 // Julian-day-based epoch SQLite's own os_unix.c uses (the 24405875*
 // 8640000 constant is the same one unixCurrentTimeInt64() computes
 // from -- Julian day 0 relative to the Unix epoch, in milliseconds).
-static int bmfsCurrentTimeInt64(sqlite3_vfs *pVfs, sqlite3_int64 *pNow)
+static int ext2CurrentTimeInt64(sqlite3_vfs *pVfs, sqlite3_int64 *pNow)
 {
 	(void)pVfs;
 	static const sqlite3_int64 unix_epoch = 24405875LL * (sqlite3_int64)8640000;
@@ -413,17 +421,17 @@ static int bmfsCurrentTimeInt64(sqlite3_vfs *pVfs, sqlite3_int64 *pNow)
 	return SQLITE_OK;
 }
 
-static int bmfsCurrentTime(sqlite3_vfs *pVfs, double *pNow)
+static int ext2CurrentTime(sqlite3_vfs *pVfs, double *pNow)
 {
 	sqlite3_int64 i = 0;
 
-	bmfsCurrentTimeInt64(pVfs, &i);
+	ext2CurrentTimeInt64(pVfs, &i);
 	*pNow = i / 86400000.0;
 
 	return SQLITE_OK;
 }
 
-static int bmfsGetLastError(sqlite3_vfs *pVfs, int nBuf, char *zBuf)
+static int ext2GetLastError(sqlite3_vfs *pVfs, int nBuf, char *zBuf)
 {
 	(void)pVfs;
 	if (nBuf > 0)
@@ -431,26 +439,26 @@ static int bmfsGetLastError(sqlite3_vfs *pVfs, int nBuf, char *zBuf)
 	return 0;
 }
 
-static sqlite3_vfs bmfs_vfs = {
+static sqlite3_vfs ext2_vfs = {
 	2,                 // iVersion -- has xCurrentTimeInt64
-	sizeof(BmfsFile),  // szOsFile
+	sizeof(Ext2File),  // szOsFile
 	MAXPATHNAME,       // mxPathname
 	0,                 // pNext -- filled in by sqlite3_vfs_register()
-	"bmfs",            // zName
+	"ext2",            // zName
 	0,                 // pAppData
-	bmfsOpen,
-	bmfsDelete,
-	bmfsAccess,
-	bmfsFullPathname,
-	bmfsDlOpen,
-	bmfsDlError,
-	bmfsDlSym,
-	bmfsDlClose,
-	bmfsRandomness,
-	bmfsSleep,
-	bmfsCurrentTime,
-	bmfsGetLastError,
-	bmfsCurrentTimeInt64, // iVersion 2
+	ext2Open,
+	ext2Delete,
+	ext2Access,
+	ext2FullPathname,
+	ext2DlOpen,
+	ext2DlError,
+	ext2DlSym,
+	ext2DlClose,
+	ext2Randomness,
+	ext2Sleep,
+	ext2CurrentTime,
+	ext2GetLastError,
+	ext2CurrentTimeInt64, // iVersion 2
 	0,                 // xSetSystemCall  -- iVersion 3 only
 	0,                 // xGetSystemCall  -- iVersion 3 only
 	0,                 // xNextSystemCall -- iVersion 3 only
@@ -463,7 +471,7 @@ static sqlite3_vfs bmfs_vfs = {
 // application code.
 int sqlite3_os_init(void)
 {
-	return sqlite3_vfs_register(&bmfs_vfs, 1);
+	return sqlite3_vfs_register(&ext2_vfs, 1);
 }
 
 int sqlite3_os_end(void)

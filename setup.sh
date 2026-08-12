@@ -4,9 +4,10 @@ set -e
 BOLD="\033[1m"
 NORMAL="\033[0m"
 
-# Fetches and patches musl 1.2.6, lwIP 2.2.0, and mbedTLS 3.6.6 into this
-# directory, then builds musl's libc.a and the lwIP/mbedTLS object files
-# that build-app.sh links against. Run once before ./build-app.sh.
+# Fetches and patches musl 1.2.6, lwIP 2.2.0, mbedTLS 3.6.6, and lwext4
+# into this directory, then builds musl's libc.a and the lwIP/mbedTLS/
+# lwext4 object files that build-app.sh links against. Run once before
+# ./build-app.sh.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -19,6 +20,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-curl.sh"
 "$SCRIPT_DIR/scripts/get-sqlite.sh"
 "$SCRIPT_DIR/scripts/get-libsodium.sh"
+"$SCRIPT_DIR/scripts/get-lwext4.sh"
 
 BUILD_DIR="build"
 
@@ -44,6 +46,10 @@ SQLITE_PORT="port/sqlite_port"
 SODIUM_DIR="$BUILD_DIR/libsodium-1.0.22/src/libsodium"
 SODIUM_INC="$SODIUM_DIR/include"
 SODIUM_PORT="port/libsodium_port"
+
+LWEXT4_DIR="$BUILD_DIR/lwext4-58bcf89"
+LWEXT4_INC="$LWEXT4_DIR/include"
+LWEXT4_PORT="port/lwext4_port"
 
 # Run a command, staying silent unless it fails -- then dump its output
 # and abort. Keeps musl/lwIP's noisy per-file build logs off the screen
@@ -97,7 +103,7 @@ CURL_CFLAGS="$CFLAGS -DHAVE_CONFIG_H -DBUILDING_LIBCURL -DCURL_STATICLIB -I $CUR
 # vtls integration here: unlike curl, sqlite3.c itself never needs
 # anything else from this port -- port/sqlite_port/sqlite_vfs.c, built
 # per-app in build-app.sh like tls_shim.c/net_shim.c, is what actually
-# talks to posix_shim.c/bmfs.c). -DNDEBUG disables assert(): this
+# talks to posix_shim.c/ext4_shim.c). -DNDEBUG disables assert(): this
 # port's abort() has nowhere clean to unwind to (no signal delivery --
 # see OPENISSUES.md), and NDEBUG is SQLite's own documented stance for
 # a release build anyway.
@@ -117,6 +123,18 @@ SQLITE_CFLAGS="$CFLAGS -I $SQLITE_PORT -DSQLITE_CUSTOM_INCLUDE=sqlite_baremetal_
 # generated or needed (see setup.sh's "Building libsodium" comment below
 # for why not).
 SODIUM_CFLAGS="$CFLAGS -DSODIUM_STATIC -DCONFIGURED=1 -I $SODIUM_INC -I $SODIUM_INC/sodium"
+
+# lwext4 headers pull in musl's the same way, plus lwext4's own
+# include/ tree. -DCONFIG_USE_DEFAULT_CFG=0 makes lwext4's own
+# include/ext4_config.h pull in "generated/ext4_config.h" (a
+# quote-form include, found here via the -I $LWEXT4_PORT below -- see
+# port/lwext4_port/generated/ext4_config.h for what's changed and why:
+# EXT2-only feature set, no journal/extents, musl's errno.h/fcntl.h
+# codes instead of lwext4's own). Only used for lwext4's own vendored
+# sources below -- port/ext4_shim.c and port/lwext4_port/
+# blockdev_baremetal.c are our own port glue, built per-app in
+# build-app.sh instead, like tls_shim.c/sqlite_vfs.c.
+LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -DCONFIG_USE_DEFAULT_CFG=0"
 
 mkdir -p "$BUILD_DIR"
 
@@ -193,7 +211,7 @@ done
 # LWIP_SRCS above. port/sqlite_port/sqlite_vfs.c (the VFS this amalgam
 # calls into via SQLITE_OS_OTHER -- see SQLITE_CFLAGS's comment) is
 # built per-app in build-app.sh instead, alongside this port's other
-# own glue (tls_shim.c, net_shim.c, ...), not here.
+# own glue (tls_shim.c, net_shim.c, ext4_shim.c, ...), not here.
 echo "- Building sqlite"
 run_quiet gcc $SQLITE_CFLAGS -o "$BUILD_DIR/sqlite_sqlite3.o" "$SQLITE_DIR/sqlite3.c"
 
@@ -227,6 +245,19 @@ SODIUM_SRCS=$(find "$SODIUM_DIR" -name '*.c' \
 for src in $SODIUM_SRCS; do
 	obj="$BUILD_DIR/sodium_$(basename "$src" .c).o"
 	gcc $SODIUM_CFLAGS -o "$obj" "$src"
+done
+
+# Like mbedTLS/curl/libsodium above: every src/*.c file in lwext4 is
+# compiled unconditionally, whether or not the feature it implements
+# (journaling, extents, xattrs) is enabled in our EXT2-only config
+# (port/lwext4_port/generated/ext4_config.h) -- a disabled feature's
+# file either compiles down to an empty translation unit (internally
+# guarded by its own "#if CONFIG_..._ENABLE") or simply goes unused
+# (still linked in, just never called), same posture as the others.
+echo "- Building lwext4"
+for src in "$LWEXT4_DIR"/src/*.c; do
+	obj="$BUILD_DIR/lwext4_$(basename "$src" .c).o"
+	gcc $LWEXT4_CFLAGS -o "$obj" "$src"
 done
 
 # echo -e "${BOLD}Library builds complete${NORMAL}"

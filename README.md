@@ -1,6 +1,6 @@
 # BareMetal AppPort
 
-A build system for compiling your own C applications to run as BareMetal apps: a [musl](https://musl.libc.org/) libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), a [BMFS](https://github.com/ReturnInfinity/BMFS) file I/O layer, a [lwIP](https://savannah.nongnu.org/projects/lwip/)-based TCP/IP networking, [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) for TLS/SSL, [curl](https://curl.se/)/libcurl (HTTP/HTTPS only) on top of all of it, and [SQLite](https://sqlite.org/) on top of BMFS via its own small VFS. See `OPENISSUES.md` for what's supported and what isn't.
+A build system for compiling your own C applications to run as BareMetal apps: a [musl](https://musl.libc.org/) libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), an EXT2 file I/O layer via [lwext4](https://github.com/gkostka/lwext4), a [lwIP](https://savannah.nongnu.org/projects/lwip/)-based TCP/IP networking, [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) for TLS/SSL, [curl](https://curl.se/)/libcurl (HTTP/HTTPS only) on top of all of it, and [SQLite](https://sqlite.org/) on top of EXT2 via its own small VFS. See `OPENISSUES.md` for what's supported and what isn't.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ Run once, from this directory:
 ./setup.sh
 ```
 
-This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0, Mbed TLS 3.6.6, curl 8.21.0, and the SQLite 3.46.1 amalgamation (all four used as-is, unmodified), creating `build/musl-1.2.6/`, `build/lwip-2.2.0/`, `build/mbedtls-3.6.6/`, `build/curl-8.21.0/`, and `build/sqlite-3.46.1/`. All are pinned versions -- the patch and the `port/lwip_port/`/`port/mbedtls_port/`/`port/curl_port/`/`port/sqlite_port/` glue are written against these exact releases. (`setup.sh` just runs `scripts/get-musl.sh`, `scripts/get-lwip.sh`, `scripts/get-mbedtls.sh`, `scripts/get-curl.sh`, and `scripts/get-sqlite.sh` in turn, if you want to re-run one on its own.)
+This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0, Mbed TLS 3.6.6, curl 8.21.0, the SQLite 3.46.1 amalgamation, and a pinned lwext4 commit (all used as-is, unmodified), creating `build/musl-1.2.6/`, `build/lwip-2.2.0/`, `build/mbedtls-3.6.6/`, `build/curl-8.21.0/`, `build/sqlite-3.46.1/`, and `build/lwext4-58bcf89/`. All are pinned versions -- the patch and the `port/lwip_port/`/`port/mbedtls_port/`/`port/curl_port/`/`port/sqlite_port/`/`port/lwext4_port/` glue are written against these exact releases. (`setup.sh` just runs `scripts/get-musl.sh`, `scripts/get-lwip.sh`, `scripts/get-mbedtls.sh`, `scripts/get-curl.sh`, `scripts/get-sqlite.sh`, and `scripts/get-lwext4.sh` in turn, if you want to re-run one on its own.)
 
 ## Building an app
 
@@ -22,13 +22,13 @@ This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads l
 ./build-app.sh myapp.c     # builds your own app -> myapp.app
 ```
 
-Downloaded sources and intermediate `.o` files live under `build/`; the final `.app` is placed here in the top-level directory. It's a flat binary linked at `0xFFFF800000000000` (see `port/c.ld`), ready to load as a BareMetal app (e.g. copy it onto a BMFS disk image and load it from the BareMetal monitor or run it as a unikernel).
+Downloaded sources and intermediate `.o` files live under `build/`; the final `.app` is placed here in the top-level directory. It's a flat binary linked at `0xFFFF800000000000` (see `port/c.ld`), ready to load as a BareMetal app (e.g. copy it onto a disk image formatted with a plain EXT2 filesystem -- `mkfs.ext2` -- and load it from the BareMetal monitor or run it as a unikernel).
 
-`./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/`/`mbedtls-3.6.6/`/`curl-8.21.0/`/`sqlite-3.46.1/` zip/tarball.
+`./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/`/`mbedtls-3.6.6/`/`curl-8.21.0/`/`sqlite-3.46.1/`/`lwext4-58bcf89/` zip/tarball.
 
 ## What's in here
 
-- `setup.sh` -- fetches musl, lwIP, Mbed TLS, and curl (see Setup above).
+- `setup.sh` -- fetches musl, lwIP, Mbed TLS, curl, and lwext4 (see Setup above).
 - `build-app.sh` -- builds an app (see Building an app above).
 - `clean.sh` -- removes build artifacts.
 - `hello.c` -- minimal demo app (musl `printf`, argc/argv/envp).
@@ -42,9 +42,13 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
   HTTPS GET) -- the same sockets and the same vendored mbedTLS as
   above, but reached through curl's own APIs instead.
 - `sqltest.c` -- a minimal demo of SQLite: creates a table on a real
-  BMFS-backed database file, inserts rows across two transactions, and
+  EXT2-backed database file, inserts rows across two transactions, and
   queries them back -- exercising `port/sqlite_port/sqlite_vfs.c`'s
   read/write/journal handling end to end.
+- `fs_test.c` -- exercises `port/ext4_shim.c`'s POSIX file I/O
+  end to end: create/read/write/lseek/fstat/stat/unlink, `chdir`/
+  `getcwd`, `mkdir`/`opendir`/`readdir`/`rmdir`, and `symlink`/
+  `readlink`, all against the EXT2 image lwext4 mounts.
 - `port/` -- the port glue every app links against:
   - `crt0.c`, `c.ld` -- startup and linker script for the flat-binary,
     ring-0, fixed-address BareMetal environment (no ELF loader, no
@@ -52,8 +56,12 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
   - `posix_shim.c`/`.h` -- the syscall dispatcher musl's patched
     `syscall_arch.h` calls into, plus the heap (`brk`/`mmap`) backing
     it.
-  - `bmfs.c`/`.h` -- POSIX file I/O (`open`/`read`/`write`/`stat`/...)
-    on top of BMFS, the on-disk format BareMetal uses.
+  - `ext4_shim.c`/`.h` -- POSIX file I/O (`open`/`read`/`write`/`stat`/
+    `mkdir`/`readdir`/`symlink`/`chdir`/...) on top of a real EXT2
+    filesystem, mounted and served through lwext4.
+  - `lwext4_port/` -- lwext4's block device glue over
+    `b_nvs_read`/`b_nvs_write`, plus the EXT2-only feature config
+    (`generated/ext4_config.h`).
   - `net_glue.c`/`.h`, `net_shim.c`/`.h`, `lwip_port/` -- a blocking
     BSD-socket-shaped layer over lwIP's raw callback API, plus the
     Ethernet netif driver and port config.
@@ -71,7 +79,7 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
     single-threaded, no WAL/mmap/load-extension -- see its own file
     header) and the small `sqlite3_vfs` implementation it requires in
     place of SQLite's own `os_unix.c`, built directly over
-    `posix_shim.c`/`bmfs.c` the same way `tls_shim.c`/`net_shim.c` are
+    `posix_shim.c`/`ext4_shim.c` the same way `tls_shim.c`/`net_shim.c` are
     (see `sqlite_vfs.c`'s own header and `OPENISSUES.md`'s "SQLite"
     section for the reasoning behind each choice).
   - `libBareMetal.c`/`.h`/`.asm` -- the low-level calls into the
@@ -99,7 +107,11 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
     (`sqlite3.c`/`sqlite3.h`). Vendored unmodified as well; all
     SQLite-side port work lives in `port/sqlite_port/` instead of
     patches to `sqlite3.c` itself.
+  - `get-lwext4.sh` -- downloads a pinned lwext4 commit (its last
+    tagged release predates six years of upstream fixes). Vendored
+    unmodified; all lwext4-side port work lives in `port/ext4_shim.c`
+    and `port/lwext4_port/` instead of patches to lwext4 itself.
 
 ## Limitations
 
-This is not a general-purpose POSIX environment: no `fork`/`exec`, no threads (yet), no signals (yet?), flat BMFS namespace (no subdirectories), TCP/UDP only (no raw sockets exposed), 30s timeout on blocking socket calls. See `OPENISSUES.md` for the full list and the reasoning behind each cut.
+This is not a general-purpose POSIX environment: no `fork`/`exec`, no threads (yet), no signals (yet?), TCP/UDP only (no raw sockets exposed), 30s timeout on blocking socket calls. See `OPENISSUES.md` for the full list and the reasoning behind each cut.
