@@ -54,14 +54,18 @@
 #define CURL_DISABLE_DOH 1
 
 /* alt-svc/HSTS cache persistence is file-based and keyed off real
- * wall-clock expiry timestamps, neither of which this port has (BMFS
- * has no subdirectories for a cache path to matter and there's no
- * clock but CLOCK_MONOTONIC -- see posix_shim.c). */
+ * wall-clock expiry timestamps. CLOCK_REALTIME exists now
+ * (b_system(WALLCLOCK), see posix_shim.c) and EXT2 (via lwext4) now
+ * supports real subdirectories, but this hasn't been revisited since
+ * the switch away from BMFS -- left disabled rather than enabling it
+ * untested. */
 #define CURL_DISABLE_ALTSVC 1
 #define CURL_DISABLE_HSTS 1
 
-/* .netrc lookup wants a $HOME to search and BMFS's flat namespace
- * (see OPENISSUES.md) has no directory structure for one to live in. */
+/* .netrc lookup wants a $HOME environment variable to search under --
+ * crt0.c fabricates an empty envp (see OPENISSUES.md's "Process
+ * model" section), so there's no $HOME to find regardless of what the
+ * filesystem underneath supports. */
 #define CURL_DISABLE_NETRC 1
 
 /* No proxy support wired into net_shim.c/dns_shim.c -- this port talks
@@ -95,7 +99,7 @@
 
 /* musl *does* link a real getaddrinfo()/freeaddrinfo() (unlike
  * gethostbyname(), dns_shim.c doesn't shadow it) -- but musl's
- * getaddrinfo() reads /etc/resolv.conf, which nothing on this BMFS
+ * getaddrinfo() reads /etc/resolv.conf, which nothing on this EXT2
  * image writes, so (exactly like dns_shim.c's own file-header comment
  * explains for why it shadows gethostbyname() at all) it would just
  * fall back to querying 127.0.0.1, which nothing answers. Leaving
@@ -245,7 +249,7 @@
 #define HAVE_LOCALTIME_R 1
 
 /* ---------------------------------------------------------------------
- * Everything else not implemented by posix_shim.c/bmfs.c -- see
+ * Everything else not implemented by posix_shim.c/ext4_shim.c -- see
  * OPENISSUES.md for the underlying reasons (grouped as: no permissions/
  * users, no process introspection, no rlimits, no xattr, no tty).
  * --------------------------------------------------------------------- */

@@ -1,8 +1,8 @@
 # Open Issues
 
-Known gaps and limitations in the musl libc port (`app/`), BMFS file
-I/O, and lwIP-based networking. Most of these are deliberate scope
-cuts made while getting each phase working end to end, not bugs —
+Known gaps and limitations in the musl libc port (`app/`), lwext4-based
+EXT2 file I/O, and lwIP-based networking. Most of these are deliberate
+scope cuts made while getting each phase working end to end, not bugs —
 they're listed here so they're easy to find again when someone hits
 one.
 
@@ -74,8 +74,12 @@ Not implemented (all fall through to `-ENOSYS`):
   several fds to learn which one has data first won't get that.
 - `pipe`/`pipe2`/`dup`/`dup2`/`dup3`/`socketpair` — no in-process fd
   duplication, pipes, or `AF_UNIX` socket pairs between fds.
-- `getcwd`/`chdir`/`mkdir`/`rmdir`/`chmod`/`chown`/`umask` — no
-  concept of a working directory or permissions (BMFS has neither).
+- `chmod`/`chown`/`umask` — no concept of permissions or ownership on
+  this port, even though lwext4 itself supports a mode/owner per inode
+  (see `ext4_mode_set()`/`ext4_owner_set()` in lwext4's `ext4.h`) —
+  see the EXT2 section below on why that's a bigger gap than a missing
+  syscall. (`getcwd`/`chdir`/`mkdir`/`rmdir` *are* wired up now, via
+  `ext4_shim.c`.)
 
 ## Heap (`posix_shim.c`)
 
@@ -91,35 +95,43 @@ Not implemented (all fall through to `-ENOSYS`):
   smaller `brk()`-backed allocations would otherwise have used, with
   no way to trade space back.
 
-## BMFS file I/O (`bmfs.c`)
+## EXT2 file I/O (`ext4_shim.c`, `lwext4_port/`)
 
-- **Flat namespace only — no subdirectories.** Paths are just a
-  filename with at most one leading `/` stripped; anything with an
-  embedded `/` is rejected with `-ENOENT`.
-- **Fixed 2MiB reservation per file, set at creation, never grown.**
-  Writing past a file's `reserved_blocks` capacity fails with
-  `-ENOSPC` even if the disk has free space elsewhere — there's no
-  mechanism to extend an existing file's allocation.
-- **Directory table changes only flush to disk on `close()`.** If a
-  program exits (or the VM shuts down) without closing a modified fd,
-  the new size / new directory entry is lost even though data blocks
-  may have already been written.
-- **No timestamps.** `bmfs_fstat_fd()`/`bmfs_fstatat()` always report
-  zeroed atime/mtime/ctime — no clock source is wired into file
-  metadata (unlike TCP/heap code, which do use
-  `b_system(TIMECOUNTER)`).
-- **No `access()`/`chmod()`/permission bits.** Every file reports mode
-  `0644` regardless of anything; there's no enforcement either way.
-- **No directory listing.** `opendir`/`readdir`-equivalent enumeration
-  of what's on disk isn't implemented — only look-up-by-name.
-- **`ftruncate()` only shrinks, and doesn't zero-fill on grow.**
-  Added for SQLite's VFS (`port/sqlite_port/`, see its own section
-  below) to finalize/shrink journal files. Growing is accepted too
-  (bounded by the file's fixed reservation, same as a write), but
-  unlike a real `ftruncate()` the newly-included bytes are left as
-  whatever was already sitting in those blocks rather than zeroed.
-- **Small fixed open-file table** (`BMFS_MAX_OPEN` = 8 concurrent
-  files across the whole process).
+- **No `access()`/`chmod()`/permission enforcement.** `open()`'s `mode`
+  argument is ignored entirely; whatever mode bits are already on an
+  inode (or lwext4's own default for newly-created files) are reported
+  as-is, but nothing checks them against anything. `chmod()` itself
+  could be wired up via lwext4's `ext4_mode_set()`, but real
+  enforcement needs a uid/gid model this port has none of anywhere
+  (matches the "no process model" cuts above) — not just a missing
+  syscall.
+- **Block device capacity is a hard-coded upper bound, not the real
+  disk size.** There's no `b_system()` call to ask the kernel how big
+  the backing drive actually is, so `blockdev_baremetal.c` just
+  declares a generous ceiling (`BAREMETAL_BLK_COUNT`, currently 2 GiB)
+  for lwext4's own bounds-checking; it needs raising by hand if a
+  larger EXT2 image is ever used.
+- **Superblock free-space counters only flush on process exit.**
+  lwext4 keeps `free_blocks_count`/`free_inodes_count` accurate in
+  memory but only writes them back to disk on `ext4_umount()`, not on
+  every individual file op — `posix_shim.c`'s `sys_exit()` calls
+  `ext4_shim_sync()` to cover this for the normal exit path, but a
+  hard crash or power-loss mid-run would still leave those two
+  superblock fields stale (harmless and auto-fixed by `e2fsck`, but
+  worth knowing about if `e2fsck` ever reports "Free
+  blocks/inodes count wrong" after a non-graceful shutdown).
+- **Boot-relative timestamps, not wall-clock.** atime/mtime/ctime come
+  from `b_system(TIMECOUNTER)` plus a fixed epoch anchor (see
+  `ext4_shim.c`'s `EXT4_SHIM_EPOCH_BASE`), not a real RTC-backed clock
+  — always non-zero and monotonically increasing with uptime, but not
+  meaningful as a real calendar date.
+- **`telldir()`/`seekdir()` aren't meaningfully supported.** lwext4's
+  directory iterator only supports rewind-to-0, not arbitrary seek/
+  tell positions, so `ext4_shim_getdents()` always reports `d_off` as
+  0 — only the common `opendir()`/`readdir()`/`closedir()` sequence
+  works.
+- **Small fixed open-file table** (`EXT4_SHIM_MAX_OPEN` = 32 concurrent
+  files/directories across the whole process).
 
 ## Networking (`net_glue.c`, `net_shim.c`, `dns_shim.c`)
 
@@ -133,7 +145,7 @@ Not implemented (all fall through to `-ENOSYS`):
   static `struct hostent` -- not thread-safe, but this port has no
   threads), backed by lwIP's `dns_gethostbyname()` rather than musl's
   own resolver: musl's reads `/etc/resolv.conf`, which nothing writes
-  on this port's BMFS image, so it'd fall back to querying
+  on this port's EXT2 image, so it'd fall back to querying
   `127.0.0.1` instead of the DNS servers `net_glue.c` actually
   configures (the fc `ip=` param's optional `dns0-ip`/`dns1-ip`
   fields, DHCP's DNS option, or -- if neither provides one -- a
@@ -182,7 +194,7 @@ same lines as everything else here:
   `https_crawler.c`/`tls_shim.c` -- `HAVE_GETADDRINFO` is deliberately
   left undefined even though musl itself links a real `getaddrinfo()`,
   for the same reason `dns_shim.c` shadows `gethostbyname()` in the
-  first place (nothing writes `/etc/resolv.conf` on this port's BMFS
+  first place (nothing writes `/etc/resolv.conf` on this port's EXT2
   image). IPv4 only, matching lwIP's `LWIP_IPV6=0`.
 - **No threading** (`HAVE_THREADS_POSIX` undefined) -- matches this
   port being single-threaded throughout; `curl_multi_wakeup()` (for
@@ -205,7 +217,7 @@ SQLite 3.46.1 is vendored unmodified as its own amalgamation
 (`port/sqlite_port/sqlite_baremetal_config.h`) skips SQLite's own
 `os_unix.c` entirely in favor of a small hand-written VFS
 (`port/sqlite_port/sqlite_vfs.c`, see its own file header for the
-full reasoning) built directly over `posix_shim.c`/`bmfs.c`:
+full reasoning) built directly over `posix_shim.c`/`ext4_shim.c`:
 
 - **No WAL.** `SQLITE_OMIT_WAL` plus an `iVersion 1` `sqlite3_io_methods`
   (no `xShmMap`/`xShmLock`/`xShmBarrier`/`xShmUnmap` slots at all) --
@@ -232,17 +244,12 @@ full reasoning) built directly over `posix_shim.c`/`bmfs.c`:
   journals `ORDER BY`/`GROUP BY`/`CREATE INDEX` etc. use never touch
   disk, regardless of what a program requests. The one on-disk temp
   file this doesn't cover -- a multi-database (`ATTACH`) transaction's
-  master journal -- is still handled (`sqlite_vfs.c`'s `bmfsOpen()`
+  master journal -- is still handled (`sqlite_vfs.c`'s `ext2Open()`
   invents a name via the same hardware RNG `port/mbedtls_port/
   entropy_hardware_poll.c` uses for mbedTLS), just untested by
   `sqltest.c`, which only ever has one database open.
 - **Single-threaded only** (`SQLITE_THREADSAFE=0`), matching this port
   throughout.
-- **BMFS's 31-byte filename cap** (see this file's "BMFS file I/O"
-  section) applies to every file SQLite opens, including ones it names
-  itself -- a journal is the main database's name plus `-journal`, so a
-  long database filename can push that combination past what BMFS can
-  hold, failing with `SQLITE_CANTOPEN`. Keep database filenames short.
 
 ## General
 

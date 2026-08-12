@@ -8,7 +8,7 @@
 //
 // This deliberately shadows musl's own gethostbyname() rather than
 // leaving it in place: musl's version reads /etc/resolv.conf for
-// server addresses (nothing writes that file on this port's BMFS
+// server addresses (nothing writes that file on this port's EXT2
 // image, so it'd fall back to querying 127.0.0.1, which nothing
 // listens on) instead of the DNS servers net_glue.c already
 // configures from the Firecracker "ip=" param, DHCP, or the

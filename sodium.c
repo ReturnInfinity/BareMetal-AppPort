@@ -7,7 +7,7 @@
 // This is also a valid *nix program of course.
 //
 // Unlike curltest.c/sqltest.c (which reach network sockets/TLS through
-// libcurl on top of net_shim.c/tls_shim.c, or BMFS through SQLite's
+// libcurl on top of net_shim.c/tls_shim.c, or EXT2 through SQLite's
 // VFS), this exercises the real, unmodified libsodium (see
 // BareMetal-AppPort/scripts/get-libsodium.sh) entirely in memory -- no
 // network, no filesystem.

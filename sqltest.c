@@ -1,5 +1,5 @@
 // sqltest.c -- a minimal demo of SQLite running as a BareMetal app:
-// creates a table on a real BMFS-backed database file, inserts a few
+// creates a table on a real EXT2-backed database file, inserts a few
 // rows (across two transactions, to exercise the rollback journal --
 // see port/sqlite_port/sqlite_vfs.c), queries them back, and prints
 // the result set. build with build-app.sh.
@@ -9,8 +9,8 @@
 // Unlike curltest.c (which reaches network sockets/TLS through libcurl
 // on top of net_shim.c/tls_shim.c), this exercises port/sqlite_port/
 // sqlite_vfs.c -- SQLite's own on-disk format read/written straight
-// against posix_shim.c/bmfs.c's open/read/write/lseek/close/unlink/
-// ftruncate, no network involved.
+// against posix_shim.c/ext4_shim.c's open/read/write/lseek/close/
+// unlink/ftruncate, no network involved.
 //
 // DB_PATH is removed first so the demo is idempotent (safe to run
 // again on a disk image that already has one from a previous run)
@@ -68,7 +68,7 @@ int main(void)
 
 	// Two separate transactions -- each COMMIT drives a full rollback-
 	// journal cycle (journal created, written, synced, then deleted --
-	// see sqlite_vfs.c) against the same BMFS file.
+	// see sqlite_vfs.c) against the same EXT2 file.
 	if (sqlite3_exec(db,
 		"BEGIN;"
 		"INSERT INTO readings (sensor, value) VALUES ('temp',     21.5);"
