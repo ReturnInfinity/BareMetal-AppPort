@@ -22,6 +22,49 @@
 static const char msg[] = "Hello, EXT2 from lwext4!\n";
 static const char more[] = "more data\n";
 
+// Recursively print every entry under path, indented by depth. Uses
+// lstat() (not stat()) so symlinks are reported as links rather than
+// followed through to their target.
+static void list_tree(const char *path, int depth)
+{
+	DIR *dir = opendir(path);
+	if (!dir) {
+		printf("opendir(%s) failed: %s\n", path, strerror(errno));
+		return;
+	}
+
+	struct dirent *de;
+	while ((de = readdir(dir)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+			continue;
+
+		char child[512];
+		size_t plen = strlen(path);
+		int need_slash = plen == 0 || path[plen - 1] != '/';
+		snprintf(child, sizeof(child), "%s%s%s", path, need_slash ? "/" : "", de->d_name);
+
+		struct stat st;
+		if (lstat(child, &st) < 0) {
+			printf("%*slstat(%s) failed: %s\n", depth * 2, "", child, strerror(errno));
+			continue;
+		}
+
+		printf("%*s", depth * 2, "");
+		if (S_ISDIR(st.st_mode)) {
+			printf("%s/\n", child);
+			list_tree(child, depth + 1);
+		} else if (S_ISLNK(st.st_mode)) {
+			char target[512] = {0};
+			ssize_t n = readlink(child, target, sizeof(target) - 1);
+			printf("%s -> %s\n", child, n >= 0 ? target : "?");
+		} else {
+			printf("%s (%ld bytes)\n", child, (long)st.st_size);
+		}
+	}
+
+	closedir(dir);
+}
+
 int main(void)
 {
 	// Start from a known state in case a previous run left the file
@@ -299,5 +342,9 @@ int main(void)
 	unlink(link_target);
 
 	printf("all filesystem tests passed\n");
+
+	printf("\nFilesystem contents:\n");
+	list_tree("/", 0);
+
 	return 0;
 }
