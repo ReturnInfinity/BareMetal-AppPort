@@ -83,17 +83,23 @@ Not implemented (all fall through to `-ENOSYS`):
 
 ## Heap (`posix_shim.c`)
 
-- **`mmap()` never really unmaps.** `munmap()` is a documented no-op —
-  it returns success but the memory is never reclaimed. A program that
-  mmaps and unmaps in a loop will exhaust the heap arena.
+- **`munmap()`'d memory can't be handed back to the OS, only reused by
+  later `mmap()` calls.** `sys_munmap()` (`posix_shim.c`) keeps freed
+  ranges on an address-sorted, coalescing free list rather than truly
+  unmapping them; `sys_mmap()` checks that list before bumping the
+  arena further. This avoids the old failure mode of an mmap/unmap
+  loop exhausting the arena, but freed mmap space still can't flow
+  back to `brk()`-backed small allocations (see next point) or to the
+  OS.
 - **No growth beyond the initial `b_system(FREE_MEMORY)` ceiling.** The
   heap size is fixed once, at first use; there's no mechanism to claim
   more RAM even if more becomes available (e.g. if BareMetal's own
   memory management changes).
 - **Large (≥128KB) `malloc()`s share the same bump arena as `brk()`.**
   Works, but means a single big allocation can exhaust room that
-  smaller `brk()`-backed allocations would otherwise have used, with
-  no way to trade space back.
+  smaller `brk()`-backed allocations would otherwise have used; the
+  mmap free list (above) doesn't help here since `brk()` never
+  consults it.
 
 ## EXT2 file I/O (`ext4_shim.c`, `lwext4_port/`)
 
