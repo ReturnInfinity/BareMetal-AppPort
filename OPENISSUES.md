@@ -25,10 +25,35 @@ one.
   `sigaltstack` are accepted and silently ignored (`posix_shim.c`) —
   handlers can be registered but will never actually fire, since
   BareMetal has no mechanism to deliver a signal into running app code.
-- **Single-threaded only.** `pthread_create` isn't wired up (would need
-  a `clone` implementation); `__set_thread_area`/TLS bootstrap works
-  and reports `can_do_threads=1` to musl since the FS-base wrmsr
-  genuinely succeeds, but there is nowhere to run a second thread.
+- **Threads (`pthread_create` and friends) work, but are cooperative
+  user-level threads, not real kernel threads** (`thread_shim.c`,
+  wired into `posix_shim.c`'s `SYS_clone`/`SYS_futex`/`SYS_sched_yield`
+  cases). `SYS_clone` builds a second call stack and context by hand
+  rather than trapping into a real `clone(2)` (there's no kernel task
+  table to fork into on this port), and `b_system(CALLBACK_TIMER, ...)`
+  drives a real round-robin timer tick between them — see
+  `thread_shim.c`'s file header for the full design and why that still
+  gives genuine concurrency (a thread blocked inside another blocking
+  `read()`/`recv()`/`nanosleep()` doesn't starve everyone else) despite
+  there being exactly one core. musl's own `pthread_mutex_t`/
+  `pthread_cond_t`/`pthread_rwlock_t`/`pthread_barrier_t`/
+  `pthread_spinlock_t`/TSD all work unmodified on top of the
+  `SYS_futex` shim (`FUTEX_WAIT`/`FUTEX_WAKE`/`FUTEX_REQUEUE` only —
+  the PI-futex ops are `-ENOSYS`, matching this port not supporting
+  `PTHREAD_PRIO_INHERIT`/`PTHREAD_MUTEX_ROBUST`). See `threads.c` for
+  a program exercising all of the above. Known limits:
+  - **Fixed thread table** (`THREAD_SHIM_MAX_THREADS` = 32 concurrent
+    threads, `thread_shim.c`), same style as the EXT2/socket tables.
+  - **No `pthread_cancel`.** Deferred and async cancellation both
+    ultimately rely on signal delivery (`SIGCANCEL`) to interrupt a
+    blocked thread, which this port doesn't have (see below) —
+    `pthread_create`/`join`/mutexes/condvars/etc. don't need it and
+    work regardless.
+  - **`sched_setscheduler`/explicit `pthread_attr_setschedpolicy`
+    aren't wired up** (`-ENOSYS`) — every thread is scheduled the same
+    (timer-tick round-robin, no priorities); a program that asks
+    `pthread_create` for an explicit scheduling policy/priority via
+    `pthread_attr_setschedpolicy()` won't get one.
 
 ## Missing common syscalls
 
@@ -147,10 +172,11 @@ Not implemented (all fall through to `-ENOSYS`):
 - **No IPv6** (`LWIP_IPV6=0` in `lwip_port/lwipopts.h`). Programs must
   use literal IPv4 addresses.
 - **`gethostbyname()` only, no `getaddrinfo()`/`gethostbyname_r()`.**
-  `dns_shim.c` provides `gethostbyname()` itself (IPv4 only, single
-  static `struct hostent` -- not thread-safe, but this port has no
-  threads), backed by lwIP's `dns_gethostbyname()` rather than musl's
-  own resolver: musl's reads `/etc/resolv.conf`, which nothing writes
+  `dns_shim.c` provides `gethostbyname()` itself (IPv4 only, backed by
+  a single static `struct hostent` with no locking -- not safe to call
+  from more than one thread at a time now that threads exist, see the
+  "Process model" section above), backed by lwIP's `dns_gethostbyname()`
+  rather than musl's own resolver: musl's reads `/etc/resolv.conf`, which nothing writes
   on this port's EXT2 image, so it'd fall back to querying
   `127.0.0.1` instead of the DNS servers `net_glue.c` actually
   configures (the fc `ip=` param's optional `dns0-ip`/`dns1-ip`
@@ -202,11 +228,14 @@ same lines as everything else here:
   for the same reason `dns_shim.c` shadows `gethostbyname()` in the
   first place (nothing writes `/etc/resolv.conf` on this port's EXT2
   image). IPv4 only, matching lwIP's `LWIP_IPV6=0`.
-- **No threading** (`HAVE_THREADS_POSIX` undefined) -- matches this
-  port being single-threaded throughout; `curl_multi_wakeup()` (for
-  interrupting a wait from another thread) is consequently a no-op,
-  irrelevant to the single easy-handle, single-threaded usage this
-  port's apps actually do.
+- **No threading support in libcurl itself** (`HAVE_THREADS_POSIX`
+  undefined), even though the port now has real threads (see "Process
+  model" above) -- curl's own multi-thread machinery (its c-ares
+  resolver thread pool, `curl_multi_wakeup()` for interrupting a wait
+  from another thread) is unneeded here since `dns_shim.c` shadows its
+  resolver anyway; `curl_multi_wakeup()` is consequently a no-op,
+  irrelevant to the single easy-handle usage this port's apps actually
+  do (whether from one thread or several).
 - **TLS via mbedTLS only** (`USE_MBEDTLS`) -- the same vendored copy
   `tls_shim.c` uses, reached through curl's own `vtls/mbedtls.c`
   instead of `tls_shim.c` itself. This pulled `MBEDTLS_PSA_CRYPTO_C`
@@ -254,8 +283,12 @@ full reasoning) built directly over `posix_shim.c`/`ext4_shim.c`:
   invents a name via the same hardware RNG `port/mbedtls_port/
   entropy_hardware_poll.c` uses for mbedTLS), just untested by
   `sqltest.c`, which only ever has one database open.
-- **Single-threaded only** (`SQLITE_THREADSAFE=0`), matching this port
-  throughout.
+- **No SQLite-level thread safety** (`SQLITE_THREADSAFE=0`) -- a single
+  `sqlite3*` connection (or the mutex-free VFS state `sqlite_vfs.c`
+  shares across connections) still isn't safe to use from more than
+  one thread at a time, even though the port now has real threads (see
+  "Process model" above); `sqltest.c` only ever has one thread open a
+  database at all.
 
 ## General
 

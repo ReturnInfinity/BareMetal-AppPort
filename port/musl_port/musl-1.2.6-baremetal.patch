@@ -131,6 +131,63 @@
 +	wrmsr
 +	xor %eax,%eax
  	ret
+--- musl-1.2.6/src/thread/x86_64/clone.s
++++ musl-1.2.6/src/thread/x86_64/clone.s
+@@ -1,3 +1,21 @@
++/*
++ * BareMetal-Firecracker port.
++ *
++ * Upstream __clone is hand-written asm ending in a raw `syscall`
++ * instruction -- unlike every other syscall site, it never goes
++ * through arch_prctl(x86_64/syscall_arch.h)'s __syscall*() macros, so
++ * patching those alone (see that file) doesn't reach this one. There
++ * is no real clone(2) to trap into on BareMetal (see that file's
++ * comment) and, more fundamentally, no way for a plain function call
++ * to "return twice" the way a real clone() does to start a child --
++ * so app/thread_shim.c's SYS_clone handler builds the new thread's
++ * whole execution context itself and always reports back as the
++ * parent (a nonzero tid, or a negative errno). The child-only half of
++ * this function (below the call, guarded by `test %eax,%eax; jnz 1f`
++ * upstream) can therefore never run and is simply dropped, rather
++ * than left as unreachable dead code that still has to be kept
++ * register-consistent with everything above it.
++ */
+ .text
+ .global __clone
+ .hidden __clone
+@@ -14,15 +32,20 @@
+ 	and $-16,%rsi
+ 	sub $8,%rsi
+ 	mov %rcx,(%rsi)
+-	syscall
+-	test %eax,%eax
+-	jnz 1f
+-	xor %ebp,%ebp
+-	pop %rdi
+-	call *%r9
+-	mov %eax,%edi
+-	xor %eax,%eax
+-	mov $60,%al
+-	syscall
+-	hlt
+-1:	ret
++	/* Shuffle from the raw clone(2) register convention (flags=rdi,
++	 * stack=rsi, ptid=rdx, ctid=r10, tls=r8, func smuggled in r9 --
++	 * see above) into a normal SysV call to __bmos_syscall(n, a1..a6)
++	 * (n=rdi, a1=rsi, a2=rdx, a3=rcx, a4=r8, a5=r9, a6=stack, per
++	 * arch/x86_64/syscall_arch.h's own __bmos_syscall() calls). func
++	 * (r9) has to move first, before r9 itself is overwritten. */
++	mov %r9,%r11
++	mov %r8,%r9
++	mov %r10,%r8
++	mov %rdx,%rcx
++	mov %rsi,%rdx
++	mov %rdi,%rsi
++	mov %rax,%rdi
++	push %r11
++	call __bmos_syscall
++	add $8,%rsp
++	ret
 --- musl-1.2.6/src/thread/x86_64/syscall_cp.s
 +++ musl-1.2.6/src/thread/x86_64/syscall_cp.s
 @@ -1,3 +1,14 @@
@@ -184,3 +241,55 @@
  	ret
  __cp_cancel:
  	jmp __cancel
+--- musl-1.2.6/src/thread/x86_64/__unmapself.s
++++ musl-1.2.6/src/thread/x86_64/__unmapself.s
+@@ -1,10 +1,43 @@
+ /* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
++/*
++ * BareMetal-Firecracker port.
++ *
++ * Upstream is hand-written asm ending in two raw `syscall` instructions
++ * (munmap the caller's own stack, then exit) -- same reason as
++ * arch/x86_64/syscall_arch.h's __bmos_syscall() calls (see that file):
++ * no syscall trap on this port, everything routes through a plain C
++ * dispatcher instead. This only runs for a *detached* thread tearing
++ * down its own stack right before exiting (see __pthread_exit() in
++ * pthread_create.c), so unlike a joinable thread's exit -- where the
++ * joiner is the one who eventually munmaps -- there is genuinely
++ * nobody else left to free this memory afterward.
++ *
++ * `call __bmos_syscall` (unlike a real `syscall` instruction) pushes a
++ * return address onto the very stack being unmapped here, which would
++ * be unsafe on real Linux (a real munmap() immediately invalidates
++ * that memory). It's safe on this port specifically because
++ * posix_shim.c's munmap() never actually invalidates anything -- freed
++ * ranges just join an address-sorted free list for later mmap() calls
++ * to reuse (see its own comment) -- so the bytes stay live until
++ * something else actually allocates over them. `cli` closes the one
++ * real gap that leaves: thread_shim.c's timer-tick scheduler could
++ * otherwise preempt this thread *between* the munmap and the final
++ * exit and hand this exact memory to another thread's mmap() while
++ * still running on it. Left disabled deliberately -- SYS_exit's
++ * handler (thread_shim_exit_current()) takes over the same discipline
++ * from here (it disables interrupts itself immediately) and only
++ * re-enables them once execution has moved to a different thread's
++ * stack entirely.
++ */
+ .text
+ .global __unmapself
+ .type   __unmapself,@function
+ __unmapself:
+-	movl $11,%eax   /* SYS_munmap */
+-	syscall         /* munmap(arg2,arg3) */
+-	xor %rdi,%rdi   /* exit() args: always return success */
+-	movl $60,%eax   /* SYS_exit */
+-	syscall         /* exit(0) */
++	cli
++	mov %rsi,%rdx   /* a2 = size */
++	mov %rdi,%rsi   /* a1 = base */
++	mov $11,%edi    /* n = SYS_munmap */
++	call __bmos_syscall
++	xor %esi,%esi   /* a1 = exit code 0 */
++	mov $60,%edi    /* n = SYS_exit */
++	call __bmos_syscall
+

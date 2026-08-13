@@ -49,6 +49,12 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
   end to end: create/read/write/lseek/fstat/stat/unlink, `chdir`/
   `getcwd`, `mkdir`/`opendir`/`readdir`/`rmdir`, and `symlink`/
   `readlink`, all against the EXT2 image lwext4 mounts.
+- `threads.c` -- exercises `port/thread_shim.c`'s cooperative pthreads
+  end to end: `pthread_create`/`join`/`detach`/`self`/`equal`, mutexes
+  (normal/`trylock`/recursive), condition variables (`signal`/
+  `broadcast`/`timedwait`), rwlocks, `pthread_once`, thread-specific
+  data (`pthread_key_*` and `__thread`), spinlocks, barriers, and
+  `sched_yield`.
 - `port/` -- the port glue every app links against:
   - `crt0.c`, `c.ld` -- startup and linker script for the flat-binary,
     ring-0, fixed-address BareMetal environment (no ELF loader, no
@@ -66,6 +72,11 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
     BSD-socket-shaped layer over lwIP's raw callback API, plus the
     Ethernet netif driver and port config.
   - `dns_shim.c` -- `gethostbyname()`, backed by lwIP's resolver.
+  - `thread_shim.c`/`.h` -- cooperative pthreads (`SYS_clone`/
+    `SYS_futex`/`SYS_sched_yield`), scheduled by a
+    `b_system(CALLBACK_TIMER, ...)`-driven round-robin tick -- see its
+    own file header for the design and `OPENISSUES.md`'s "Process
+    model" section for what's supported.
   - `tls_shim.c`/`.h`, `mbedtls_port/` -- a small blocking HTTPS-shaped
     TLS client wrapper over Mbed TLS, plus its port config
     (`baremetal_mbedtls_config.h`) and RNG hook
@@ -87,9 +98,11 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
     built on.
 - `scripts/` -- the fetch scripts `setup.sh` calls:
   - `get-musl.sh` -- downloads musl 1.2.6 and applies
-    `port/musl_port/musl-1.2.6-baremetal.patch`, the 3-file patch
-    (syscall transport, TLS bootstrap, cancellation-point syscalls),
-    then installs `port/musl_port/musl-1.2.6-config.mak` as musl's
+    `port/musl_port/musl-1.2.6-baremetal.patch` (syscall transport, TLS
+    bootstrap, cancellation-point syscalls, and the two raw-`syscall`
+    asm sites -- `clone`/`__unmapself` -- thread_shim.c's threads need
+    routed through the same dispatcher), then installs
+    `port/musl_port/musl-1.2.6-config.mak` as musl's
     `config.mak` (equivalent to running musl's `./configure` with the
     flags this port needs, without you having to run `configure`
     yourself).
@@ -114,4 +127,4 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
 
 ## Limitations
 
-This is not a general-purpose POSIX environment: no `fork`/`exec`, no threads (yet), no signals (yet?), TCP/UDP only (no raw sockets exposed), 30s timeout on blocking socket calls. See `OPENISSUES.md` for the full list and the reasoning behind each cut.
+This is not a general-purpose POSIX environment: no `fork`/`exec`, no signals (yet?), TCP/UDP only (no raw sockets exposed), 30s timeout on blocking socket calls. Threading (`pthread_create` and friends, `threads.c`) works, but as cooperative user-level threads on one core, not real kernel threads -- see `port/thread_shim.c`'s file header. See `OPENISSUES.md` for the full list and the reasoning behind each cut.

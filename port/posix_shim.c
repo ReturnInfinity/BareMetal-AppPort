@@ -28,6 +28,7 @@
 #include "ext4_shim.h"
 #include "net_shim.h"
 #include "net_glue.h"
+#include "thread_shim.h"
 
 // -----------------------------------------------------------------------
 // Heap (brk / anonymous mmap)
@@ -533,13 +534,17 @@ static long sys_clock_gettime(long clk_id, long ts_addr)
 	}
 }
 
-// nanosleep()/clock_nanosleep() -- there's no scheduler on this port for
-// a blocking sleep to yield to, but b_system(SLEEP, ns, 0) (see
-// libBareMetal.h) now HLTs the CPU until the APIC timer fires ns
+// nanosleep()/clock_nanosleep() -- b_system(SLEEP, ns, 0) (see
+// libBareMetal.h) HLTs the CPU until the APIC timer fires ns
 // nanoseconds out instead of spinning, so this chains that in
 // NET_POLL_INTERVAL_NS-sized chunks -- net_poll() is still called
 // between chunks so lwIP's timers/retransmits keep getting serviced
-// during a long sleep instead of stalling for its whole duration.
+// during a long sleep instead of stalling for its whole duration. This
+// predates thread_shim.c's scheduler and doesn't explicitly yield to
+// it, but doesn't need to: thread_shim.c's timer tick (the same APIC
+// timer this HLT wakes for) transparently preempts a sleeping thread
+// like any other, so other threads still make progress during a long
+// sleep here -- see that file's header.
 //
 // No signal delivery exists on this port (see OPENISSUES.md), so a
 // sleep can never legitimately be interrupted early -- *rem is always
@@ -770,7 +775,7 @@ static long sys_arch_prctl(long code, long addr)
 static long sys_set_tid_address(long addr)
 {
 	(void)addr;
-	return 1; // fake tid; there is only ever one thread
+	return thread_shim_current_tid(); // 1 outside thread_shim.c's scheduler, a real tid inside it
 }
 
 // exit()/_exit() call this from wherever they were invoked, deep in
@@ -857,8 +862,25 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_munmap:                            return sys_munmap(a1, a2);
 	case SYS_arch_prctl:                         return sys_arch_prctl(a1, a2);
 	case SYS_set_tid_address:                     return sys_set_tid_address(a1);
-	case SYS_exit:                                  return sys_exit(a1);
+	// A bare SYS_exit (as opposed to SYS_exit_group -- see sys_exit()'s
+	// own comment on _Exit()) only ever reaches here from musl's
+	// __pthread_exit()'s final retry loop (pthread_create.c), i.e.
+	// only from a worker thread created via thread_shim_clone() -- so
+	// it terminates just that thread, not the whole process, exactly
+	// like a real Linux clone()d thread. Reached from the original
+	// thread (which never issues a bare SYS_exit in practice -- see
+	// thread_shim.c's file header), it falls through to the same full
+	// teardown SYS_exit_group does, rather than hang.
+	case SYS_exit:
+		if (thread_shim_is_worker_thread())
+			thread_shim_exit_current(); // noreturn
+		return sys_exit(a1);
 	case SYS_exit_group:                             return sys_exit(a1);
+
+	// Cooperative threads -- see thread_shim.c.
+	case SYS_clone:       return thread_shim_clone(a1, a2, a3, a4, a5, a6);
+	case SYS_futex:        return thread_shim_futex(a1, a2, a3, a4, a5, a6);
+	case SYS_sched_yield:   return thread_shim_sched_yield();
 
 	// Networking -- IPv4 TCP/UDP only, see net_shim.c.
 	case SYS_socket:      return sys_socket(a1, a2, a3);

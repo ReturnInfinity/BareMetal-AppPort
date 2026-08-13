@@ -183,6 +183,7 @@ echo "Building..."
 
 gcc $CFLAGS -o "$BUILD_DIR/crt0.o" "$PORT/crt0.c"
 gcc $CFLAGS -o "$BUILD_DIR/posix_shim.o" "$PORT/posix_shim.c"
+gcc $CFLAGS -o "$BUILD_DIR/thread_shim.o" "$PORT/thread_shim.c"
 gcc $LWEXT4_CFLAGS -o "$BUILD_DIR/ext4_shim.o" "$PORT/ext4_shim.c"
 gcc $LWEXT4_CFLAGS -o "$BUILD_DIR/blockdev_baremetal.o" "$LWEXT4_PORT/blockdev_baremetal.c"
 NET_GLUE_CFLAGS="$LWIP_CFLAGS"
@@ -268,7 +269,7 @@ echo "Linking..."
 # .bss into one combined region with no permission split (ring-0, no
 # paging/protection to enforce one anyway -- see posix_shim.c's heap
 # comment) -- expected here, not a mistake ld should flag.
-ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -o "$BUILD_DIR/$APP_NAME.elf" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" \
+ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -o "$BUILD_DIR/$APP_NAME.elf" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" "$BUILD_DIR/thread_shim.o" \
 	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" \
 	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" \
