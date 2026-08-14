@@ -203,6 +203,10 @@ Not implemented (all fall through to `-ENOSYS`):
   isn't a shim limitation so much as a note that multi-NIC support
   would need kernel-side work first.
 - **Fixed socket table** (`SOCK_MAX` = 16 concurrent sockets).
+- **`getsockname()`/`getpeername()` aren't implemented.** Not in
+  `posix_shim.c`'s `SYS_` dispatch table at all — falls through to the
+  default `-ENOSYS` case, found running Python's `_socket` module
+  through its paces (see "Python" below) but not specific to Python.
 
 ## libcurl (`port/curl_port/`)
 
@@ -289,6 +293,74 @@ full reasoning) built directly over `posix_shim.c`/`ext4_shim.c`:
   one thread at a time, even though the port now has real threads (see
   "Process model" above); `sqltest.c` only ever has one thread open a
   database at all.
+
+## Python (`port/python_port/`)
+
+CPython 3.12.8 is vendored unmodified (`scripts/get-python.sh`);
+`port/python_port/pyconfig.h` is this port's hand-written build config
+(the role `curl_config.h`/`sqlite_baremetal_config.h` play for
+curl/SQLite), and `python.c`/`config_baremetal.c`/
+`frozen_encodings_baremetal.c` are this port's own entry point, static
+built-in module table, and frozen `encodings` slice in place of
+CPython's normal `Programs/python.c`/generated `Modules/config.c`. See
+`PYTHON.md` for the full account of how this port works and why each
+piece is the way it is -- this section is the condensed version, same
+role as every other section here:
+
+- **No dynamic loading** (matches "General" below) -- every module a
+  program needs must be statically linked in and registered in
+  `config_baremetal.c`'s `_PyImport_Inittab`, the same *static*
+  mechanism `Modules/Setup.bootstrap.in`'s own header comment
+  describes. No `ctypes` (needs `dlopen`), no installable third-party
+  packages, no compiled `.so` extension modules ever.
+- **Only a handful of C extension modules are built in**: the
+  `Modules/Setup.bootstrap.in` mandatory set (`posix`, `_thread`,
+  `_io`, `_signal`, `_codecs`, `_collections`, `itertools`, `_sre`,
+  `time`, `_weakref`, `_abc`, `_functools`, `_locale`, `_operator`,
+  `_stat`, `_symtable`, `_typing`, `_tracemalloc`, `gc`, ...) plus
+  `_socket`. Nothing from `Modules/Setup.stdlib.in` (`_datetime`,
+  `_json`, `_struct`, `array`, `_decimal`, ...) -- each would need its
+  own `HAVE_*` audit and a `setup.sh` addition, none attempted.
+- **Only a small slice of the pure-Python standard library is
+  present**, not the whole `Lib/` tree -- a handful of bootstrap
+  modules frozen into the binary (`importlib`/`os`/`site`/etc, plus
+  `encodings`/`encodings.aliases`/`encodings.utf_8`) and a precisely-
+  traced dependency closure for `json`/`re`/`collections`/
+  `encodings.ascii` installed onto the EXT2 disk image's `/pylib`
+  (`install-stdlib.sh`). `import` of anything else --
+  `import socket` (the pure-Python wrapper; only the low-level
+  `_socket` C module is built in), a different codec, most of the
+  standard library -- fails with `ModuleNotFoundError` until its own
+  files are added to `/pylib` the same way.
+- **No hash randomization** -- equivalent to `PYTHONHASHSEED=0`,
+  standard and documented, not a bug: `Python/bootstrap_hash.c` treats
+  finding no entropy source as a fatal boot error otherwise, and this
+  port doesn't expose one to app code yet (see "Missing common
+  syscalls" above -- no `getrandom()`). `dict`/`set` iteration order
+  and `hash()` values are deterministic, not random.
+- **Every other cut this port already makes elsewhere applies the same
+  way to `os.*`**: no `os.fork`/`exec*`/`subprocess`/`multiprocessing`
+  (no process model), no `os.chmod`/`chown`/`umask` (no uid/gid model),
+  no `os.pipe`/`dup`/`dup2`, no real `signal` delivery (handlers
+  register but never fire). None of these are Python-specific --
+  `Modules/posixmodule.c` just puts a name on each syscall this port
+  already doesn't have.
+- **`_thread`/threading is real but only smoke-tested.**
+  `_thread.start_new_thread()` plus `Lock` work correctly (see
+  `port/python_port/main_test.py`), backed by the same
+  `thread_shim.c` cooperative pthreads as `threads.c`. Not stress-
+  tested -- `thread_shim.c`'s `THREAD_SHIM_MAX_THREADS = 32` fixed
+  table under real concurrent load (more than a thread or two, real
+  contention) is unexercised from Python.
+- **VM RAM: `python.app` needs noticeably more than the ~4 MiB other
+  apps here get by with.** The flat binary alone (statically-linked
+  interpreter + frozen bytecode + every other port's library code, all
+  still linked in the same way curl/SQLite/etc are into every app) is
+  several MB, before the heap even starts -- 256 MiB was used for
+  testing, not tuned down to a real minimum. `posix_shim.c`'s "no
+  growth beyond the initial `b_system(FREE_MEMORY)` ceiling" caveat
+  (see "Heap" above) is a real, not just theoretical, concern for
+  Python specifically.
 
 ## General
 

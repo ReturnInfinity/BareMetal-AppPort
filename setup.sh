@@ -21,6 +21,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-sqlite.sh"
 "$SCRIPT_DIR/scripts/get-libsodium.sh"
 "$SCRIPT_DIR/scripts/get-lwext4.sh"
+"$SCRIPT_DIR/scripts/get-python.sh"
 
 BUILD_DIR="build"
 
@@ -50,6 +51,10 @@ SODIUM_PORT="port/libsodium_port"
 LWEXT4_DIR="$BUILD_DIR/lwext4-58bcf89"
 LWEXT4_INC="$LWEXT4_DIR/include"
 LWEXT4_PORT="port/lwext4_port"
+
+PYTHON_DIR="$BUILD_DIR/Python-3.12.8"
+PYTHON_HOST_BUILD="$BUILD_DIR/host-python-build"
+PYTHON_PORT="port/python_port"
 
 # Run a command, staying silent unless it fails -- then dump its output
 # and abort. Keeps musl/lwIP's noisy per-file build logs off the screen
@@ -135,6 +140,41 @@ SODIUM_CFLAGS="$CFLAGS -DSODIUM_STATIC -DCONFIGURED=1 -I $SODIUM_INC -I $SODIUM_
 # blockdev_baremetal.c are our own port glue, built per-app in
 # build-app.sh instead, like tls_shim.c/sqlite_vfs.c.
 LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -DCONFIG_USE_DEFAULT_CFG=0"
+
+# CPython's own headers pull in musl's the same way, plus its own
+# Include/ and Include/internal/ trees, plus this port's own
+# port/python_port/pyconfig.h (see that file's own header for how it
+# was derived -- a real ./configure run's answers, with this port's
+# actual cuts applied on top, documented in pyconfig_baremetal.h).
+# -DPy_BUILD_CORE exposes the internal pycore_*.h API surface every one
+# of these files needs (CPython's own Makefile does the same for its
+# PARSER_OBJS/PYTHON_OBJS/OBJECT_OBJS -- see PYTHON.md); the Setup.
+# bootstrap.in/Phase-2 static modules use -DPy_BUILD_CORE_BUILTIN
+# instead, CPython's own distinction between the interpreter core and
+# a statically-linked built-in module.
+#
+# gcc's own freestanding headers (stdatomic.h, needed by
+# Include/internal/pycore_atomic.h) aren't musl's job to ship and
+# aren't on the -nostdinc-restricted path by default -- added back via
+# -isystem after musl's own entry (so musl's stddef.h/stdint.h/etc,
+# which it does provide, still win) -- see PYTHON.md for how this was
+# found; nothing else built by this script needed it.
+PYTHON_GCC_FREESTANDING_INC="$(gcc -print-file-name=include)"
+PYTHON_CFLAGS="$CFLAGS -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal"
+PYTHON_CORE_CFLAGS="$PYTHON_CFLAGS -DPy_BUILD_CORE"
+PYTHON_BUILTIN_CFLAGS="$PYTHON_CFLAGS -DPy_BUILD_CORE_BUILTIN"
+
+# Modules/getpath.c normally gets these from the Makefile (in turn from
+# configure --prefix/--exec-prefix/PLATLIBDIR, VERSION from
+# patchlevel.h's PY_VERSION, VPATH from the build's own
+# srcdir-relative-ness). None of that applies here -- no installed
+# prefix, no VPATH build -- and port/python_port/python.c doesn't even
+# use calculate_path()'s filesystem search (see that file's own header:
+# PyConfig.module_search_paths is set directly instead), so these
+# values are placeholders only needed to satisfy getpath.c's #error/
+# undeclared-identifier checks at compile time, not meaningful at
+# runtime.
+PYTHON_GETPATH_DEFINES='-DPREFIX="/" -DEXEC_PREFIX="/" -DVERSION="3.12" -DVPATH="" -DPLATLIBDIR="lib"'
 
 mkdir -p "$BUILD_DIR"
 
@@ -259,5 +299,146 @@ for src in "$LWEXT4_DIR"/src/*.c; do
 	obj="$BUILD_DIR/lwext4_$(basename "$src" .c).o"
 	gcc $LWEXT4_CFLAGS -o "$obj" "$src"
 done
+
+# Unlike every other library above, CPython needs a *native* build of
+# itself first -- not to link against, but because a handful of its
+# own sources are generated at build time by running Python (the pegen
+# parser tables in Parser/parser.c, the AST node definitions in
+# Python/Python-ast.c, the bytecode dispatch table in Python/
+# generated_cases.c.h, and the frozen importlib/os/site/getpath/etc
+# bytecode in Python/deepfreeze/deepfreeze.c). Those generated files
+# are architecture-independent C/data, not target-specific, so a plain
+# native ./configure && make here produces everything this port's own
+# musl/freestanding build needs verbatim -- see PYTHON.md for the full
+# story of why this step exists and nothing else in this script needs
+# it. Skipped if already built (this is the one step in this script
+# expensive enough, ~10-15 minutes, to make that worth checking for).
+if [ ! -x "$PYTHON_HOST_BUILD/python" ]; then
+	echo "- Building native host Python (one-time, ~10-15 minutes)"
+	mkdir -p "$PYTHON_HOST_BUILD"
+	run_quiet bash -c "cd '$PYTHON_HOST_BUILD' && '../../$PYTHON_DIR/configure' --prefix='\$(pwd)/../host-python' --disable-test-modules"
+	run_quiet make -C "$PYTHON_HOST_BUILD" -j"$(nproc)"
+else
+	echo "- Native host Python already built, skipping"
+fi
+
+# The generated files landed in two different places (a quirk of
+# CPython's own Makefile, not this port's doing): the pegen parser/AST/
+# bytecode-dispatch files generated in-tree, directly under
+# $PYTHON_DIR (found already there, nothing to copy); the frozen
+# bytecode headers and deepfreeze.c generated into the *build*
+# directory instead (VPATH out-of-tree build), copied into $PYTHON_DIR
+# here so every generated file this port's own compile below needs
+# ends up in one place, the same tree get-python.sh unpacked.
+echo "- Copying Python's generated sources into $PYTHON_DIR"
+cp "$PYTHON_HOST_BUILD"/Python/frozen_modules/*.h "$PYTHON_DIR/Python/frozen_modules/"
+mkdir -p "$PYTHON_DIR/Python/deepfreeze"
+cp "$PYTHON_HOST_BUILD/Python/deepfreeze/deepfreeze.c" "$PYTHON_DIR/Python/deepfreeze/deepfreeze.c"
+
+# The core interpreter (parser + Python/ + Objects/) plus
+# Modules/Setup.bootstrap.in's mandatory static module set plus
+# Modules/socketmodule.c (needs no net_shim.c-backed shim of its own --
+# it just calls ordinary socket()/connect()/etc, which posix_shim.c
+# already dispatches to net_shim.c for every app here -- see
+# PYTHON.md). Object/file lists copied from
+# $PYTHON_HOST_BUILD/Makefile's PARSER_OBJS/PYTHON_OBJS/OBJECT_OBJS/
+# MODOBJS ($(MACHDEP_OBJS)/$(LIBOBJS)/$(DTRACE_OBJS) were empty for
+# that build and are omitted here too). pwdmodule.c is dropped from
+# MODOBJS (needs getpwuid(), no uid/gid model -- OPENISSUES.md's
+# Process model section); gcmodule.c is added (not in
+# Setup.bootstrap.in at all -- one of the handful Modules/config.c.in's
+# own "ADDMODULE MARKER" mechanism always force-builds regardless of
+# Setup, alongside marshal.c/import.c/Python-ast.c/Python-tokenize.c/
+# _warnings.c/unicodeobject.c's PyInit__string, which *are* already
+# covered by the PARSER_OBJS/PYTHON_OBJS/OBJECT_OBJS lists below).
+echo "- Building Python"
+
+PYTHON_SRCS="
+	Parser/token.c Parser/pegen.c Parser/pegen_errors.c
+	Parser/action_helpers.c Parser/parser.c Parser/string_parser.c
+	Parser/peg_api.c Parser/myreadline.c Parser/tokenizer.c
+
+	Python/_warnings.c Python/Python-ast.c Python/Python-tokenize.c
+	Python/asdl.c Python/assemble.c Python/ast.c Python/ast_opt.c
+	Python/ast_unparse.c Python/bltinmodule.c Python/ceval.c
+	Python/codecs.c Python/compile.c Python/context.c
+	Python/dynamic_annotations.c Python/errors.c Python/flowgraph.c
+	Python/frame.c Python/frozenmain.c Python/future.c Python/getargs.c
+	Python/getcompiler.c Python/getcopyright.c Python/getplatform.c
+	Python/getversion.c Python/ceval_gil.c Python/hamt.c
+	Python/hashtable.c Python/import.c Python/importdl.c
+	Python/initconfig.c Python/instrumentation.c Python/intrinsics.c
+	Python/legacy_tracing.c Python/marshal.c Python/modsupport.c
+	Python/mysnprintf.c Python/mystrtoul.c Python/pathconfig.c
+	Python/preconfig.c Python/pyarena.c Python/pyctype.c Python/pyfpe.c
+	Python/pyhash.c Python/pylifecycle.c Python/pymath.c
+	Python/pystate.c Python/pythonrun.c Python/pytime.c
+	Python/bootstrap_hash.c Python/specialize.c Python/structmember.c
+	Python/symtable.c Python/sysmodule.c Python/thread.c
+	Python/traceback.c Python/tracemalloc.c Python/getopt.c
+	Python/pystrcmp.c Python/pystrtod.c Python/pystrhex.c Python/dtoa.c
+	Python/formatter_unicode.c Python/fileutils.c Python/suggestions.c
+	Python/perf_trampoline.c Python/dynload_stub.c
+
+	Objects/abstract.c Objects/boolobject.c Objects/bytes_methods.c
+	Objects/bytearrayobject.c Objects/bytesobject.c Objects/call.c
+	Objects/capsule.c Objects/cellobject.c Objects/classobject.c
+	Objects/codeobject.c Objects/complexobject.c Objects/descrobject.c
+	Objects/enumobject.c Objects/exceptions.c
+	Objects/genericaliasobject.c Objects/genobject.c
+	Objects/fileobject.c Objects/floatobject.c Objects/frameobject.c
+	Objects/funcobject.c Objects/interpreteridobject.c
+	Objects/iterobject.c Objects/listobject.c Objects/longobject.c
+	Objects/dictobject.c Objects/odictobject.c Objects/memoryobject.c
+	Objects/methodobject.c Objects/moduleobject.c
+	Objects/namespaceobject.c Objects/object.c Objects/obmalloc.c
+	Objects/picklebufobject.c Objects/rangeobject.c Objects/setobject.c
+	Objects/sliceobject.c Objects/structseq.c Objects/tupleobject.c
+	Objects/typeobject.c Objects/typevarobject.c
+	Objects/unicodeobject.c Objects/unicodectype.c
+	Objects/unionobject.c Objects/weakrefobject.c
+
+	Python/deepfreeze/deepfreeze.c Python/frozen.c Modules/getbuildinfo.c
+"
+
+PYTHON_BUILTIN_SRCS="
+	Modules/atexitmodule.c Modules/faulthandler.c Modules/posixmodule.c
+	Modules/signalmodule.c Modules/_tracemalloc.c Modules/_codecsmodule.c
+	Modules/_collectionsmodule.c Modules/errnomodule.c
+	Modules/_io/_iomodule.c Modules/_io/iobase.c Modules/_io/fileio.c
+	Modules/_io/bytesio.c Modules/_io/bufferedio.c Modules/_io/textio.c
+	Modules/_io/stringio.c Modules/itertoolsmodule.c Modules/_sre/sre.c
+	Modules/_threadmodule.c Modules/timemodule.c Modules/_typingmodule.c
+	Modules/_weakref.c Modules/_abc.c Modules/_functoolsmodule.c
+	Modules/_localemodule.c Modules/_operator.c Modules/_stat.c
+	Modules/symtablemodule.c Modules/gcmodule.c Modules/socketmodule.c
+"
+
+for src in $PYTHON_SRCS; do
+	obj="$BUILD_DIR/python_$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')"
+	gcc $PYTHON_CORE_CFLAGS -o "$obj" "$PYTHON_DIR/$src"
+done
+# Modules/getpath.c isn't in PYTHON_SRCS above -- its own -DPREFIX/
+# -DVERSION/etc placeholders (PYTHON_GETPATH_DEFINES, see its own
+# comment) only belong on this one file.
+gcc $PYTHON_CORE_CFLAGS $PYTHON_GETPATH_DEFINES -o "$BUILD_DIR/python_Modules_getpath.o" "$PYTHON_DIR/Modules/getpath.c"
+
+for src in $PYTHON_BUILTIN_SRCS; do
+	obj="$BUILD_DIR/python_$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')"
+	gcc $PYTHON_BUILTIN_CFLAGS -o "$obj" "$PYTHON_DIR/$src"
+done
+
+# Unlike every other library here, CPython's whole point is the
+# resulting app, not a library other apps link a bit of -- so unlike
+# curl/SQLite/etc (which just leave their objects in build/ for
+# build-app.sh to pick up whenever *you* build an app that wants them),
+# setup.sh finishes by building python.app itself, the same three
+# sources PYTHON.md's "Running your own program" section describes,
+# so it's ready to go immediately after ./setup.sh with no separate
+# build-app.sh invocation needed. Re-run build-app.sh the same way by
+# hand any time port/python_port/*.c changes -- this is just running it
+# once, not a step build-app.sh itself needs to know about.
+echo "- Building python.app"
+"$SCRIPT_DIR/build-app.sh" "$PYTHON_PORT/python.c" "$PYTHON_PORT/config_baremetal.c" "$PYTHON_PORT/frozen_encodings_baremetal.c"
 
 # echo -e "${BOLD}Library builds complete${NORMAL}"

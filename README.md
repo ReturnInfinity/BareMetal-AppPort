@@ -1,6 +1,6 @@
 # BareMetal AppPort
 
-A build system for compiling your own C applications to run as BareMetal apps: a [musl](https://musl.libc.org/) libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), an EXT2 file I/O layer via [lwext4](https://github.com/gkostka/lwext4), a [lwIP](https://savannah.nongnu.org/projects/lwip/)-based TCP/IP networking, [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) for TLS/SSL, [curl](https://curl.se/)/libcurl (HTTP/HTTPS only) on top of all of it, and [SQLite](https://sqlite.org/) on top of EXT2 via its own small VFS. See `OPENISSUES.md` for what's supported and what isn't.
+A build system for compiling your own C applications to run as BareMetal apps: a [musl](https://musl.libc.org/) libc port (syscalls dispatched into `libBareMetal` calls instead of trapped), an EXT2 file I/O layer via [lwext4](https://github.com/gkostka/lwext4), a [lwIP](https://savannah.nongnu.org/projects/lwip/)-based TCP/IP networking, [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) for TLS/SSL, [curl](https://curl.se/)/libcurl (HTTP/HTTPS only) on top of all of it, [SQLite](https://sqlite.org/) on top of EXT2 via its own small VFS, and a [CPython](https://www.python.org/) 3.12 interpreter (`python.app`, see `PYTHON.md`) on top of everything else. See `OPENISSUES.md` for what's supported and what isn't.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ Run once, from this directory:
 ./setup.sh
 ```
 
-This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0, Mbed TLS 3.6.6, curl 8.21.0, the SQLite 3.46.1 amalgamation, and a pinned lwext4 commit (all used as-is, unmodified), creating `build/musl-1.2.6/`, `build/lwip-2.2.0/`, `build/mbedtls-3.6.6/`, `build/curl-8.21.0/`, `build/sqlite-3.46.1/`, and `build/lwext4-58bcf89/`. All are pinned versions -- the patch and the `port/lwip_port/`/`port/mbedtls_port/`/`port/curl_port/`/`port/sqlite_port/`/`port/lwext4_port/` glue are written against these exact releases. (`setup.sh` just runs `scripts/get-musl.sh`, `scripts/get-lwip.sh`, `scripts/get-mbedtls.sh`, `scripts/get-curl.sh`, `scripts/get-sqlite.sh`, and `scripts/get-lwext4.sh` in turn, if you want to re-run one on its own.)
+This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0, Mbed TLS 3.6.6, curl 8.21.0, the SQLite 3.46.1 amalgamation, a pinned lwext4 commit, and CPython 3.12.8 (all used as-is, unmodified), creating `build/musl-1.2.6/`, `build/lwip-2.2.0/`, `build/mbedtls-3.6.6/`, `build/curl-8.21.0/`, `build/sqlite-3.46.1/`, `build/lwext4-58bcf89/`, and `build/Python-3.12.8/`. All are pinned versions -- the patch and the `port/lwip_port/`/`port/mbedtls_port/`/`port/curl_port/`/`port/sqlite_port/`/`port/lwext4_port/`/`port/python_port/` glue are written against these exact releases. CPython also needs a one-time native host build (see `PYTHON.md`) to generate a handful of architecture-independent sources (the parser tables, frozen bytecode, ...) -- the only step here that isn't just a fetch-and-compile, and the reason a first `./setup.sh` run takes noticeably longer than a re-run. `setup.sh` finishes by building `python.app` itself, so it's ready to go immediately -- no separate `build-app.sh` invocation needed unless you change `port/python_port/`'s own sources (see Building an app below). (`setup.sh` just runs `scripts/get-musl.sh`, `scripts/get-lwip.sh`, `scripts/get-mbedtls.sh`, `scripts/get-curl.sh`, `scripts/get-sqlite.sh`, `scripts/get-lwext4.sh`, and `scripts/get-python.sh` in turn, if you want to re-run one on its own.)
 
 ## Building an app
 
@@ -24,7 +24,20 @@ This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads l
 
 Downloaded sources and intermediate `.o` files live under `build/`; the final `.app` is placed here in the top-level directory. It's a flat binary linked at `0xFFFF800000000000` (see `port/c.ld`), ready to load as a BareMetal app (e.g. copy it onto a disk image formatted with a plain EXT2 filesystem -- `mkfs.ext2` -- and load it from the BareMetal monitor or run it as a unikernel).
 
-`./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/`/`mbedtls-3.6.6/`/`curl-8.21.0/`/`sqlite-3.46.1/`/`lwext4-58bcf89/` zip/tarball.
+`./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/`/`mbedtls-3.6.6/`/`curl-8.21.0/`/`sqlite-3.46.1/`/`lwext4-58bcf89/`/`Python-3.12.8/` zip/tarball.
+
+`python.app` -- the CPython interpreter itself -- is already built by
+`./setup.sh` (see Setup above), ready to go with no separate step. To
+rebuild it after changing anything under `port/python_port/`, run the
+same three-source-file build `setup.sh` itself runs (it's assembled
+from this port's own glue rather than a single `.c` file):
+
+```
+./build-app.sh port/python_port/python.c port/python_port/config_baremetal.c port/python_port/frozen_encodings_baremetal.c
+```
+
+See `PYTHON.md` for what each of those does and how to point
+`python.app` at your own program.
 
 ## What's in here
 
@@ -55,6 +68,12 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
   `broadcast`/`timedwait`), rwlocks, `pthread_once`, thread-specific
   data (`pthread_key_*` and `__thread`), spinlocks, barriers, and
   `sched_yield`.
+- `port/python_port/python.c` (+ `config_baremetal.c` +
+  `frozen_encodings_baremetal.c`) -- builds into `python.app`, a real
+  CPython 3.12.8 interpreter. Runs `/pylib/main.py` off the EXT2 disk
+  image as its program (`port/python_port/install-main.sh` deploys one
+  there) -- see `PYTHON.md` for the full story of how this port works,
+  what's supported, and how to run your own script.
 - `port/` -- the port glue every app links against:
   - `crt0.c`, `c.ld` -- startup and linker script for the flat-binary,
     ring-0, fixed-address BareMetal environment (no ELF loader, no
@@ -96,6 +115,15 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
   - `libBareMetal.c`/`.h`/`.asm` -- the low-level calls into the
     BareMetal kernel (`b_output`, `b_net_tx`, ...) everything above is
     built on.
+  - `python_port/` -- CPython's build config for this port
+    (`pyconfig.h`, `pyconfig_baremetal.h`), this port's own entry point
+    and built-in module table in place of CPython's normal
+    `Programs/python.c`/generated `Modules/config.c`
+    (`python.c`/`config_baremetal.c`), the frozen `encodings` slice
+    core init needs before any real file can be read
+    (`frozen_encodings_baremetal.c`/`frozen_encodings/`), and the
+    deploy scripts (`install-stdlib.sh`/`install-main.sh`) -- see
+    `PYTHON.md` for the reasoning behind each.
 - `scripts/` -- the fetch scripts `setup.sh` calls:
   - `get-musl.sh` -- downloads musl 1.2.6 and applies
     `port/musl_port/musl-1.2.6-baremetal.patch` (syscall transport, TLS
@@ -124,6 +152,9 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
     tagged release predates six years of upstream fixes). Vendored
     unmodified; all lwext4-side port work lives in `port/ext4_shim.c`
     and `port/lwext4_port/` instead of patches to lwext4 itself.
+  - `get-python.sh` -- downloads CPython 3.12.8. Vendored unmodified;
+    all Python-side port work lives in `port/python_port/` instead of
+    patches to CPython itself -- see `PYTHON.md`.
 
 ## Limitations
 
