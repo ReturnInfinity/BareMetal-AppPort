@@ -1,4 +1,4 @@
-/* pyconfig_baremetal.h -- EXPERIMENTAL, Phase 1 draft. See ../../PYTHON_PORT.md.
+/* pyconfig_baremetal.h -- see PYTHON.md.
  *
  * Hand-written build config for CPython 3.12.8 on this port (see
  * scripts/get-python.sh), the same role curl_config.h/
@@ -6,24 +6,18 @@
  * generates pyconfig.h by running ./configure, which can't run against
  * this freestanding, no-syscall-trap target (no shell/fork to execute
  * its hundreds of AC_CHECK_FUNC/AC_CHECK_HEADER probe binaries against).
- * This is a hand-written substitute, #include'd via -DHAVE_CONFIG_H
- * the same way every other CPython build reaches its generated one.
+ * This is a hand-written substitute -- unlike curl/SQLite, CPython's
+ * own Include/Python.h includes "pyconfig.h" directly and
+ * unconditionally, no -DHAVE_CONFIG_H indirection needed.
  *
- * IMPORTANT -- unlike curl_config.h/sqlite_baremetal_config.h, this file
- * is NOT a complete answer. pyconfig.h.in in CPython's own source tree
- * is ~1900 lines and ~300 distinct HAVE_*/WITH_* macros are referenced
- * just by Modules/posixmodule.c + Python/thread_pthread.h + the handful
- * of other files the mandatory Modules/Setup.bootstrap.in module set
- * needs (posix, _thread, _io, _signal, atexit, faulthandler, _codecs,
- * _collections, errno, itertools, _sre, time, _weakref, _abc,
- * _functools, _locale, _operator, _stat, _symtable, _typing,
- * _tracemalloc -- see that file). Most of those ~300 are mechanical
+ * IMPORTANT -- this file itself is not what gets `#include`'d during a
+ * build (that's port/python_port/pyconfig.h -- see its own header for
+ * how the two relate). This file only takes a position on the macros
+ * that are a real port-design decision; the other ~150 mechanical ones
  * (does <sys/foo.h> exist, is struct stat's st_blksize field present,
- * is off_t 64-bit) and would be identical to what a normal x86-64
- * musl/Linux configure run already answers for this same musl-1.2.6
- * sysroot -- not listed here, left for a real build attempt to fill in
- * the way build-app.sh's own comments describe confirming --gc-sections
- * behavior empirically rather than by inspection.
+ * is off_t 64-bit) are architecture-level, not something this port
+ * needs its own opinion on, and are answered by pyconfig.h's own real
+ * ./configure-derived base instead -- see that file's header.
  *
  * What *is* below are the macros whose answer is a real port-design
  * decision, not a mechanical header probe -- the same split
@@ -132,7 +126,7 @@
  * them against its own empty in-process environ), just never see
  * anything meaningful -- same "let it link and silently do nothing"
  * choice as chdir()/getcwd() below, not something to gate at compile
- * time. Nothing to undef here; noted for PYTHON_PORT.md's Phase 1
+ * time. Nothing to undef here; noted for PYTHON.md's Phase 1
  * writeup instead (sys.path/site.py bootstrapping can't rely on
  * PYTHONHOME/PYTHONPATH env vars the way a normal build's Modules/
  * getpath.c does). */
@@ -148,7 +142,7 @@
  * build script (there is no configure to pick it automatically).
  * Consequence: no importable .so extension modules, ever -- every
  * module a program needs (see Modules/Setup.bootstrap.in and
- * PYTHON_PORT.md's Phase 1/2 module lists) must be linked in statically
+ * PYTHON.md's Phase 1/2 module lists) must be linked in statically
  * and registered in the frozen/builtin table Modules/config.c.in
  * generates, the same *static* mechanism Modules/Setup.bootstrap.in's
  * own header comment describes ("Built-in modules required to get a
@@ -192,7 +186,7 @@
 /* _POSIX_THREADS: not defined here -- musl's own <unistd.h> already
  * defines it (to _POSIX_VERSION); redefining it produces a harmless
  * but noisy macro-redefined warning on every file (found the hard way
- * running xbuild-phase1.sh -- see that script). */
+ * running this port's build (setup.sh/build-app.sh) -- see that script). */
 /* HAVE_PTHREAD_SIGMASK is left undefined in the Process-model section
  * above -- pthread_sigmask() itself is real in musl, but
  * thread_pthread.h only calls it to block signals for delivery this
@@ -268,7 +262,7 @@
  * MAP_ANONYMOUS|MAP_PRIVATE, -1, 0) -- verified against this port's
  * sys_mmap() (posix_shim.c), which requires MAP_ANONYMOUS and rejects
  * file-backed mappings -- so this is a real match, not just a
- * plausible one. The practical effect worth flagging in PYTHON_PORT.md
+ * plausible one. The practical effect worth flagging in PYTHON.md
  * rather than here: total interpreter heap is capped at whatever
  * BareMetal reports as free RAM at boot, arenas obmalloc frees are
  * reused by later mmap() calls but never shrink the process's
@@ -299,7 +293,7 @@
  * is only *defined* under #if HAVE_CLOCK but *called* unconditionally
  * as time.process_time()'s last-resort fallback, so leaving this
  * undefined fails the build, not just a runtime call -- found the hard
- * way running xbuild-phase1.sh. musl does provide a real clock();
+ * way running this port's build (setup.sh/build-app.sh). musl does provide a real clock();
  * whether it returns anything meaningful here depends on times()/
  * CLOCK_PROCESS_CPUTIME_ID, neither of which posix_shim.c backs, so
  * time.process_time() likely fails or returns garbage at runtime --
@@ -329,7 +323,7 @@
  * SO_REUSEADDR/nonblocking -- same limits every other app here lives
  * with) instead of straight syscalls, the same relationship
  * sqlite_vfs.c has to ext4_shim.c/posix_shim.c -- not yet written, see
- * PYTHON_PORT.md's Phase 2.
+ * PYTHON.md's Phase 2.
  * --------------------------------------------------------------------- */
 #undef HAVE_GETADDRINFO
 #undef HAVE_GETNAMEINFO
@@ -337,7 +331,7 @@
 
 /* ---------------------------------------------------------------------
  * Found empirically, not by reading OPENISSUES.md ahead of time --
- * running xbuild-phase1.sh against the merged pyconfig.h (built from
+ * running this port's build (setup.sh/build-app.sh) against the merged pyconfig.h (built from
  * a real x86-64 glibc configure run, see pyconfig.h's own header)
  * surfaced these because glibc has them and musl's sysroot either
  * doesn't provide the header at all or doesn't back the syscall:
@@ -384,7 +378,7 @@
 #undef PY_HAVE_PERF_TRAMPOLINE
 
 /* ---------------------------------------------------------------------
- * Phase 2 (see PYTHON_PORT.md) -- Modules/socketmodule.c/socketmodule.h
+ * Phase 2 (see PYTHON.md) -- Modules/socketmodule.c/socketmodule.h
  * declare struct members and #include headers for every optional
  * address family CPython knows about (AF_NETLINK, AF_CAN, AF_TIPC,
  * AF_VSOCK, AF_ALG, AF_QIPCRTR, ...), all Linux-specific and all gated

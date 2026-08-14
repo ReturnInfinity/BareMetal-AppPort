@@ -54,6 +54,9 @@ LWEXT4_DIR="$BUILD_DIR/lwext4-58bcf89"
 LWEXT4_INC="$LWEXT4_DIR/include"
 LWEXT4_PORT="port/lwext4_port"
 
+PYTHON_DIR="$BUILD_DIR/Python-3.12.8"
+PYTHON_PORT="port/python_port"
+
 PORT="port"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,6 +99,11 @@ fi
 
 if ! compgen -G "$BUILD_DIR/lwext4_*.o" >/dev/null; then
 	echo "error: lwext4 objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
+	exit 1
+fi
+
+if ! compgen -G "$BUILD_DIR/python_*.o" >/dev/null; then
+	echo "error: Python objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
 	exit 1
 fi
 
@@ -177,7 +185,22 @@ LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -I $PORT -DCONFIG_USE_DEFA
 # directory -- see setup.sh's SODIUM_CFLAGS comment). -DSODIUM_STATIC
 # matches setup.sh's SODIUM_CFLAGS -- an app's own #include <sodium.h>
 # needs the same define export.h does its SODIUM_EXPORT expansion on.
-APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC"
+#
+# -I $PYTHON_PORT is for <Python.h> itself (port/python_port/pyconfig.h
+# -- see that file's own header) plus CPython's own Include/ and
+# Include/internal/ trees, needed by this port's own
+# port/python_port/python.c/config_baremetal.c/frozen_encodings_baremetal.c
+# (build a python.app by passing those as your app sources, e.g.
+# `./build-app.sh port/python_port/python.c port/python_port/config_baremetal.c
+# port/python_port/frozen_encodings_baremetal.c`) and by any other app
+# that wants to embed the interpreter the same way. -DPy_BUILD_CORE
+# matches setup.sh's PYTHON_CORE_CFLAGS -- see that script's own
+# comment for why (the internal pycore_*.h API surface those three
+# files' own use of struct _frozen/_inittab/PyImport_FrozenModules
+# needs). gcc's own freestanding headers (stdatomic.h) are added back
+# the same way setup.sh's PYTHON_CFLAGS does, for the same reason.
+PYTHON_GCC_FREESTANDING_INC="$(gcc -print-file-name=include)"
+APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal -DPy_BUILD_CORE"
 
 echo "Building..."
 
@@ -247,6 +270,17 @@ for obj in "$BUILD_DIR"/lwext4_*.o; do
 	LWEXT4_OBJS="$LWEXT4_OBJS $obj"
 done
 
+# Like LWIP_OBJS/MBEDTLS_OBJS/CURL_OBJS/SODIUM_OBJS/LWEXT4_OBJS above:
+# the CPython interpreter core + Modules/Setup.bootstrap.in's static
+# module set + Modules/socketmodule.c are built once by setup.sh, just
+# picked up here -- linked into every app the same way curl/SQLite/
+# lwext4 already are, whether that app is port/python_port/python.c or
+# hello.c (--gc-sections below drops what's unreachable either way).
+PYTHON_OBJS=""
+for obj in "$BUILD_DIR"/python_*.o; do
+	PYTHON_OBJS="$PYTHON_OBJS $obj"
+done
+
 echo "Linking..."
 
 # Two stages, not a direct-to-binary `ld -T c.ld` link: c.ld's
@@ -273,7 +307,7 @@ ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -
 	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" \
 	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
 echo "Built $APP_NAME"

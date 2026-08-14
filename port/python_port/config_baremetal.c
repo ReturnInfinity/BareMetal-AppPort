@@ -2,17 +2,16 @@
 // BareMetal -- a 64-bit OS written in Assembly for x86-64 systems
 // Copyright (C) 2008-2026 Return Infinity -- see LICENSE.TXT
 //
-// config_baremetal.c -- EXPERIMENTAL, Phase 1/2 (see ../../PYTHON_PORT.md).
-// Hand-written equivalent of CPython's own Modules/config.c (normally
-// generated from Modules/config.c.in by the makesetup script, driven by
-// Modules/Setup -- see create_builtin() in Python/import.c, which walks
-// this table to satisfy "import posix"/"import _thread"/etc without any
-// .so to dlopen, the same _PyImport_Inittab mechanism CPython itself
-// uses for a static/no-dynamic-loading build. Content diffed directly
-// against build/host-python-build/Modules/config.c (a real ./configure
-// + make run of this same release -- see PYTHON_PORT.md's Phase 1),
-// with `pwd` dropped (needs getpwuid(), no uid/gid model on this port --
-// OPENISSUES.md's Process model section) and everything else kept.
+// config_baremetal.c -- hand-written equivalent of CPython's own
+// Modules/config.c (normally generated from Modules/config.c.in by the
+// makesetup script, driven by Modules/Setup -- see create_builtin() in
+// Python/import.c, which walks this table to satisfy "import posix"/
+// "import _thread"/etc without any .so to dlopen, the same
+// _PyImport_Inittab mechanism CPython itself uses for a static/
+// no-dynamic-loading build. Content diffed directly against a real
+// native ./configure + make run of this same release (see PYTHON.md),
+// with `pwd` dropped (needs getpwuid(), no uid/gid model on this port
+// -- OPENISSUES.md's Process model section) and everything else kept.
 #include "Python.h"
 
 extern PyObject* PyInit_atexit(void);
@@ -45,12 +44,12 @@ extern PyObject* PyInit__tokenize(void);
 extern PyObject* _PyWarnings_Init(void);
 extern PyObject* PyInit__string(void);
 
-/* Phase 2 (see PYTHON_PORT.md): not part of the host build's own
- * config.c at all -- there, _socket was built as a shared extension
- * (Modules/_socket.so), so it never needed an _PyImport_Inittab entry.
- * This port has no dynamic loading (OPENISSUES.md's General section),
- * so it's statically linked in and registered here instead, the same
- * treatment as every module above. */
+/* Not part of a normal native build's own config.c at all -- there,
+ * _socket is built as a shared extension (Modules/_socket.so), so it
+ * never needs an _PyImport_Inittab entry. This port has no dynamic
+ * loading (OPENISSUES.md's General section), so it's statically linked
+ * in and registered here instead, the same treatment as every module
+ * above. */
 extern PyObject* PyInit__socket(void);
 
 struct _inittab _PyImport_Inittab[] = {
@@ -101,7 +100,7 @@ struct _inittab _PyImport_Inittab[] = {
 	/* This lives in Objects/unicodeobject.c */
 	{"_string", PyInit__string},
 
-	/* Phase 2 -- see extern declaration's comment above */
+	/* See extern declaration's comment above */
 	{"_socket", PyInit__socket},
 
 	/* Sentinel */

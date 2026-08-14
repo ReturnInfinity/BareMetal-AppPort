@@ -1,36 +1,32 @@
-# Python Port -- Plan (EXPERIMENTAL)
+# Python Port
 
-**Status: Phases 1, 2, and 3 done and boot-verified.** A minimal
-CPython 3.12.8 actually boots as a BareMetal-Firecracker unikernel and
-runs Python code -- `python.app`, built by
-`port/python_port/xbuild-phase1.sh` (despite the name, now covers all
-three phases -- see that script's own header), combined into a
-unikernel via `BareMetal-Firecracker/build.sh` the same way
-`1-build.sh` does for a normal app. Phase 1 printed `2` from
-`print(1 + 1)`; Phase 2, on top of that, imported `_socket` and ran a
-real `socket()`/`bind()`/`close()` round trip through `posix_shim.c` ->
-`net_shim.c`; Phase 3, on top of both, imported `encodings.ascii` and
-`json` from real, unmodified `.py` files written onto the EXT2 disk
-image (`port/python_port/install-stdlib-phase3.sh`), not frozen
-bytecode. All exited cleanly under Firecracker (1 vCPU, 256 MiB -- see
-"Open questions" below on why more than the usual 4 MiB was needed).
-Everything under "Phase 1"/"Phase 2"/"Phase 3" below is no longer a
-plan, it's what was actually done, kept as a record of *why* each
-piece is the way it is.
-
-Investigating whether CPython can run as a BareMetal app now that
-`port/thread_shim.c` gives this port real `pthread_*` (see
-`OPENISSUES.md`'s "Process model" -> "Threads" section). Short answer:
-threading was the one *fundamental* blocker (a GIL-based interpreter
-genuinely cannot start without it), and it's gone now. Everything else
-below is real but bounded engineering, following the same
+A CPython 3.12.8 port for this repo, following the same
 vendor-unmodified-source-plus-hand-written-config pattern already used
-for curl/SQLite/Mbed TLS/lwIP/lwext4/libsodium -- not a new kind of
-problem for this repo, just a much bigger one. This document is that
-plan, not a working port: `port/python_port/pyconfig_baremetal.h` is a
-first-pass draft covering the macros that are real design decisions,
-`scripts/get-python.sh` fetches CPython 3.12.8 unmodified, and neither
-is wired into `setup.sh`/`build-app.sh` yet.
+for curl/SQLite/Mbed TLS/lwIP/lwext4/libsodium: `port/python_port/`
+holds this port's own glue (`python.c`, `config_baremetal.c`,
+`frozen_encodings_baremetal.c`, `pyconfig.h`), `scripts/get-python.sh`
+fetches CPython 3.12.8 unmodified, and both `setup.sh` and
+`build-app.sh` build it the same way they build every other port --
+`./setup.sh` once, then
+
+```
+./build-app.sh port/python_port/python.c port/python_port/config_baremetal.c port/python_port/frozen_encodings_baremetal.c
+```
+
+produces `python.app`, ready to combine into a unikernel via
+`BareMetal-Firecracker/build.sh` the same way `1-build.sh` does for any
+other app. It boots, runs real Python code, drives real sockets through
+`posix_shim.c`/`net_shim.c`, and imports real, unmodified `.py` files
+off the EXT2 disk image through `ext4_shim.c` -- see "Running your own
+program" below for how to point it at your own script.
+
+This became possible once `port/thread_shim.c` gave this port real
+`pthread_*` (see `OPENISSUES.md`'s "Process model" -> "Threads"
+section) -- a GIL-based interpreter genuinely cannot start without
+threading. What follows is a record of how this port was built and
+*why* each piece is the way it is, organized into three parts (labeled
+Phase 1/2/3 below) in the order they were tackled: the interpreter
+itself, sockets, then real filesystem-backed imports.
 
 ## Why this is bigger than curl/SQLite/lwext4
 
@@ -122,10 +118,10 @@ symbol names attached. See `pyconfig_baremetal.h`'s own comments for
 the macro-by-macro detail and which `OPENISSUES.md` section each traces
 back to.
 
-## Phased plan
+## How it was built
 
-**Phase 1 -- does it even start. DONE, boot-verified.** What this
-actually took, beyond the plan originally written here:
+**Phase 1 -- the interpreter itself.** What it took to get a
+boot-verified interpreter running:
 
 - **A native host CPython 3.12.8** (`build/host-python-build/`, a
   plain `./configure && make` on the build machine, not the target --
@@ -149,16 +145,22 @@ actually took, beyond the plan originally written here:
   musl) and mechanically applying every `pyconfig_baremetal.h` decision
   on top. `pyconfig_baremetal.h` stays as the annotated *why*;
   `pyconfig.h` is what's actually `#include`'d.
-- **`port/python_port/xbuild-phase1.sh`** -- hand-drives `gcc`/`ld`
-  directly per file, bypassing CPython's own `./configure`/`Makefile`
-  entirely, the same choice `build-app.sh` already makes for curl.
-  Compiles PARSER_OBJS+PYTHON_OBJS+OBJECT_OBJS+the frozen/getpath
-  glue+`Modules/Setup.bootstrap.in`'s module set (all object lists
-  copied straight from the host Makefile), then links against this
-  port's `crt0.o`/`posix_shim.o`/`thread_shim.o` plus (found necessary
-  at link time, not planned for -- see below) `ext4_shim.o`/
-  `net_glue.o`/`net_shim.o`/`dns_shim.o`.
-- **`port/python_port/pymain_baremetal.c`** in place of CPython's own
+- **`setup.sh`/`build-app.sh` build CPython the same way they build
+  every other port** -- `setup.sh` compiles PARSER_OBJS+PYTHON_OBJS+
+  OBJECT_OBJS+the frozen/getpath glue+`Modules/Setup.bootstrap.in`'s
+  module set once (object lists copied straight from a native host
+  build's own Makefile) into `build/python_*.o`, exactly like it
+  already does for curl/mbedTLS/lwIP/SQLite/libsodium/lwext4's own
+  objects; `build-app.sh` links those into every app's final binary the
+  same uniform way it already links curl/SQLite/etc into every app,
+  whether that app is `port/python_port/python.c` or `hello.c`
+  (`--gc-sections` drops what's unreachable either way). Neither runs
+  CPython's own `./configure`/`Makefile` -- bypassed entirely, the same
+  choice `build-app.sh` already makes for curl. `ext4_shim.o`/
+  `net_glue.o`/`net_shim.o`/`dns_shim.o` end up linked in too (found
+  necessary at link time, not planned for -- see below), same as they
+  already are for every other app.
+- **`port/python_port/python.c`** in place of CPython's own
   `Programs/python.c` (`Py_BytesMain`) -- uses the lower-level
   `Py_InitializeFromConfig()` embedding API with a hand-built
   `PyConfig` instead: `site_import=0`, `use_environment=0`,
@@ -177,7 +179,7 @@ actually took, beyond the plan originally written here:
   - Compiler-provided freestanding headers (`stdatomic.h`, needed by
     `Include/internal/pycore_atomic.h`) aren't musl's job to ship and
     aren't on the `-nostdinc`-restricted include path by default --
-    `xbuild-phase1.sh` adds `gcc -print-file-name=include` after
+    `setup.sh`/`build-app.sh` adds `gcc -print-file-name=include` after
     musl's own `-isystem` entry. curl/mbedTLS/lwIP/SQLite/lwext4 never
     needed this; CPython is the first thing built against this port to
     use C11 atomics.
@@ -197,7 +199,7 @@ actually took, beyond the plan originally written here:
   - `Modules/getpath.c` needs `-DPREFIX`/`-DEXEC_PREFIX`/`-DVERSION`/
     `-DVPATH`/`-DPLATLIBDIR` (normally supplied by the Makefile from
     `--prefix`/etc) -- given placeholder values since Phase 1's
-    `pymain_baremetal.c` never calls `calculate_path()` anyway.
+    `python.c` never calls `calculate_path()` anyway.
   - `Modules/gcmodule.c` isn't in `Modules/Setup.bootstrap.in` at all
     (it's one of the modules `Modules/config.c.in`'s own "ADDMODULE
     MARKER" mechanism always force-builds, alongside `marshal`/`_imp`/
@@ -206,7 +208,7 @@ actually took, beyond the plan originally written here:
     caught at link time (`undefined reference to PyInit_gc`).
   - `posix_shim.c`'s syscall dispatcher references `ext4_shim_*`/
     `net_shim_*` unconditionally, not behind any `#ifdef` -- so even
-    though `pymain_baremetal.c` touches no filesystem or network,
+    though `python.c` touches no filesystem or network,
     those objects (and `net_glue.o`/`dns_shim.o`/lwIP's/lwext4's own
     vendored objects) still have to be linked in. Not a Phase-1-specific
     problem: `build-app.sh` already links all of this into every app
@@ -219,7 +221,7 @@ actually took, beyond the plan originally written here:
     yet -- OPENISSUES.md) as a hard boot failure, not a silent
     fallback: `Fatal Python error: _Py_HashRandomization_Init: failed
     to get random numbers`. Fixed the standard, documented way
-    (equivalent to `PYTHONHASHSEED=0`): `pymain_baremetal.c` sets
+    (equivalent to `PYTHONHASHSEED=0`): `python.c` sets
     `config.use_hash_seed=1; config.hash_seed=0;`. Real fix later:
     give `bootstrap_hash.c` an RDRAND-backed source the same way
     `port/mbedtls_port/entropy_hardware_poll.c`/
@@ -246,9 +248,7 @@ actually took, beyond the plan originally written here:
   questions" for the one environmental change this needed
   (256 MiB of VM RAM instead of the usual 4 MiB).
 
-**Phase 2 -- sockets. DONE, boot-verified.** The original plan above
-guessed a `net_shim.c`-backed C module would be needed, on the
-assumption it'd be shaped like `sqlite_vfs.c`'s relationship to
+**Phase 2 -- sockets.** The initial guess was that a `net_shim.c`-backed C module would be needed, shaped like `sqlite_vfs.c`'s relationship to
 `ext4_shim.c`/`posix_shim.c`. That guess was wrong, in the good
 direction: `sqlite_vfs.c` exists because `SQLITE_OS_OTHER=1` makes
 SQLite bypass libc's OS layer entirely and demand a hand-written
@@ -258,8 +258,8 @@ like `net_test.c` or any other app here, and `posix_shim.c` already
 dispatches every one of those to `net_shim.c` regardless of caller.
 Compiled with **zero new C shim code**, only config work:
 
-- `Modules/socketmodule.c` added to `xbuild-phase1.sh` as
-  `PHASE2_MODOBJS`, registered in `config_baremetal.c`'s
+- `Modules/socketmodule.c` added to `setup.sh`/`build-app.sh` as
+  setup.sh's `PYTHON_BUILTIN_SRCS`, registered in `config_baremetal.c`'s
   `_PyImport_Inittab` as `PyInit__socket` (not in the host build's own
   `config.c` at all -- there it was built as a shared `.so`, since this
   port has no dynamic loading it needs the same static-linking
@@ -290,7 +290,7 @@ Compiled with **zero new C shim code**, only config work:
   s.bind(('0.0.0.0', 0)); s.close()` -- all real, all through
   `posix_shim.c` -> `net_shim.c`, no code path bypassed. Output:
   `_socket constants: 2 1`, `socket() fileno: 100`, `bind() ok`,
-  `close() ok`, `2` (see `pymain_baremetal.c`). Deliberately doesn't
+  `close() ok`, `2` (see `python.c`). Deliberately doesn't
   attempt a real `connect()`/DNS lookup -- this build/test host's
   `tap0` is configured but down (no carrier, see this repo's own
   `2-run.sh` warning), a host networking setup question, not a Phase 2
@@ -310,15 +310,14 @@ Compiled with **zero new C shim code**, only config work:
   `socket.timeout`/silently-ignored `setsockopt()`, not new limits
   Phase 2 introduced.
 
-**Phase 3 -- real filesystem-backed imports. DONE, boot-verified.**
-The original plan above was "ship `.py`/`.pyc` files on the EXT2
-image... using `ext4_shim.c`'s now-real `stat`/`readdir`/`open`" -- that
-part was right. What actually happened, and what it took:
+**Phase 3 -- real filesystem-backed imports.** The plan was to ship
+`.py`/`.pyc` files on the EXT2 image, using `ext4_shim.c`'s now-real
+`stat`/`readdir`/`open` -- that part was right. What it actually took:
 
 - **No host root needed to write files onto the disk image.**
   `disk.sh`'s own approach (`sudo mount -o loop`) needs interactive
   sudo and can't run against an image a Firecracker VM might have
-  open. `port/python_port/install-stdlib-phase3.sh` uses `debugfs -w`
+  open. `port/python_port/install-stdlib.sh` uses `debugfs -w`
   (e2fsprogs) instead -- writes ext2 structures directly against the
   image file, needing only read/write access to that file, no loop
   device, no root, no VM-stopped precondition beyond what `disk.sh`
@@ -336,8 +335,8 @@ part was right. What actually happened, and what it took:
   optional C accelerator) is genuinely optional -- not built, and
   `import json` doesn't need it, pure Python `json/scanner.py` covers
   it.
-- **`pymain_baremetal.c`'s `PyConfig.module_search_paths` gets one real
-  entry now**, `/pylib` (`install-stdlib-phase3.sh`'s target
+- **`python.c`'s `PyConfig.module_search_paths` gets one real
+  entry now**, `/pylib` (`install-stdlib.sh`'s target
   directory), instead of Phase 1's empty list. `importlib._bootstrap_external`'s
   `PathFinder` walks it the normal way -- no new C code, same "it just
   works once the plumbing's real" pattern Phase 2's `_socket` showed.
@@ -356,7 +355,7 @@ part was right. What actually happened, and what it took:
   `encodings.ascii`, not being frozen, falls through to `PathFinder`,
   which has nothing to search. **Fixed, not just documented**: since
   that `__path__` is a real, appendable list (just empty),
-  `pymain_baremetal.c` does `import encodings;
+  `python.c` does `import encodings;
   encodings.__path__.append('/pylib/encodings')` right after
   `Py_InitializeFromConfig()` -- a 2-line, no-new-C-code fix. This is a
   general pattern, not an `encodings`-specific hack: *any* frozen
@@ -374,14 +373,14 @@ part was right. What actually happened, and what it took:
 - **`Modules/Setup.stdlib.in`'s C-extension modules** (`_datetime`,
   `_json`, `_struct`, `array`, ...) are still not built in -- Phase 3
   only proved the *pure-Python* filesystem-import path. Each of those
-  would still need its own `HAVE_*` audit and a `PHASE2_MODOBJS`-style
-  addition to `xbuild-phase1.sh`, same as `_socket` was, not attempted
+  would still need its own `HAVE_*` audit and a setup.sh's `PYTHON_BUILTIN_SRCS`-style
+  addition to `setup.sh`/`build-app.sh`, same as `_socket` was, not attempted
   here.
 
 ## Open questions / risks
 
 - ~~CPython's own build tooling~~ -- resolved by avoiding it entirely,
-  the same way anticipated: `xbuild-phase1.sh` never runs CPython's
+  the same way anticipated: `setup.sh`/`build-app.sh` never runs CPython's
   `./configure`/`Makefile`, only a native host build (for its
   architecture-independent generated sources, see Phase 1 above) plus
   hand-driven `gcc`/`ld` invocations against the real target flags,
@@ -426,8 +425,8 @@ part was right. What actually happened, and what it took:
   matching `pyconfig_baremetal.h` leaving `HAVE_SEM_CLOCKWAIT` undefined.
 - ~~Only 3 of `Lib/encodings/`'s ~100 codec modules are frozen~~ --
   resolved by Phase 3: `encodings.__path__.append('/pylib/encodings')`
-  in `pymain_baremetal.c` means any codec whose `.py` file is copied
-  onto `/pylib/encodings` (via `install-stdlib-phase3.sh`, currently
+  in `python.c` means any codec whose `.py` file is copied
+  onto `/pylib/encodings` (via `install-stdlib.sh`, currently
   just `ascii.py`) becomes importable normally. Only `ascii`/`utf_8`
   are actually present right now -- a different codec (`'latin-1'`,
   `'cp1252'`, ...) still needs its file added the same way, but the
@@ -450,13 +449,13 @@ part was right. What actually happened, and what it took:
 - **`import socket` (the ergonomic `Lib/socket.py` wrapper) still isn't
   available**, only the low-level `_socket` C module -- unlike the
   `encodings` gap, this one has a clear, unblocked fix now:
-  `install-stdlib-phase3.sh`-style, trace `import socket`'s real
+  `install-stdlib.sh`-style, trace `import socket`'s real
   dependency closure (`os`/`sys`/`io` already frozen; `selectors`/`enum`
   not yet) the same way `json`'s was traced, add those files to
   `/pylib`, no `__path__` patch needed (`socket.py` is a plain module,
   not a frozen package). Not done yet, just no longer an open question
   about *how*.
-- **`install-stdlib-phase3.sh` isn't idempotent.** `debugfs mkdir`
+- **`install-stdlib.sh` isn't idempotent.** `debugfs mkdir`
   fails outright if `/pylib` already exists -- fine for this session's
   one-time install, but re-running it (e.g. after `setup.sh` recreates
   `disk.img` from scratch) needs the old `/pylib` gone first, and there's
@@ -468,26 +467,25 @@ part was right. What actually happened, and what it took:
   committed to git (512 MB, gitignored like every other build
   artifact), so this is local-only state, not something the `python`
   branch's commits capture. Anyone re-running Phase 3 elsewhere needs
-  `install-stdlib-phase3.sh` run once against their own `disk.img`
+  `install-stdlib.sh` run once against their own `disk.img`
   first.
 
 ## Running your own program
 
-`pymain_baremetal.c` runs `/pylib/main.py` off the EXT2 disk image as
-the actual program -- nothing Python-level is baked into the binary
-anymore. `port/python_port/install-main.sh /path/to/disk.img
+`python.c` runs `/pylib/main.py` off the EXT2 disk image as the actual
+program -- nothing Python-level is baked into the binary.
+`port/python_port/install-main.sh /path/to/disk.img
 [/path/to/your_script.py]` puts a file there via `debugfs -w` (same
-no-root approach as `install-stdlib-phase3.sh`, and unlike that script,
-this one *is* idempotent -- safe to re-run on every change). With no
-script argument it installs this directory's own `main_test.py`, a
-smoke test covering everything Phases 1-3 (and the `_thread` finding
-above) proved works: core language, `os`/`sys`/`time`, `_socket`, and
-the real `/pylib`-backed `json`/`re`/`collections`/`encodings.ascii`
-imports -- 10/10 checks passed, boot-verified. Anything your own
-script imports beyond what's already on `/pylib`/frozen/built-in needs
-its own files added the same way `install-stdlib-phase3.sh`'s own
-comment describes (trace a real `import` on
-`build/host-python-build/python`, add exactly what's new).
+no-root approach as `install-stdlib.sh`, and unlike that script, this
+one *is* idempotent -- safe to re-run on every change). With no script
+argument it installs this directory's own `main_test.py`, a smoke test
+covering core language, `os`/`sys`/`time`, `_socket`, and the real
+`/pylib`-backed `json`/`re`/`collections`/`encodings.ascii` imports --
+10/10 checks pass, boot-verified. Anything your own script imports
+beyond what's already on `/pylib`/frozen/built-in needs its own files
+added the same way `install-stdlib.sh`'s own comment describes (trace a
+real `import` on `build/host-python-build/python`, add exactly what's
+new).
 
 ## Bottom line
 
@@ -497,7 +495,7 @@ on BareMetal-Firecracker, runs Python code, drives real sockets through
 `posix_shim.c`/`net_shim.c`, and imports real, unmodified `.py` files
 off the EXT2 disk image through `ext4_shim.c` -- all three with zero
 new C shim code, only config-header cuts and ~20 lines of embedding-API
-setup in `pymain_baremetal.c`. What's left is filling in *more* of the
+setup in `python.c`. What's left is filling in *more* of the
 same two mechanisms this now has (freeze more bootstrap-critical
 modules, install more `Lib/` files onto `/pylib`) plus the smaller
 concrete gaps in "Open questions" above (`_socket`'s C-extension

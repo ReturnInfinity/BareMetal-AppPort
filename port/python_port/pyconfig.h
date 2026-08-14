@@ -1,14 +1,15 @@
-/* pyconfig.h -- EXPERIMENTAL, Phase 1 (see ../../PYTHON_PORT.md).
+/* pyconfig.h -- this port's build config for CPython 3.12.8 (see
+ * PYTHON.md), the same role curl_config.h/sqlite_baremetal_config.h
+ * play for curl/SQLite.
  *
- * Base: a *real* ./configure run's pyconfig.h, from build/host-
- * python-build/ (a plain native x86-64 Linux build of this same
- * CPython 3.12.8 release, built only so this port has a working
- * "build Python" for freezing importlib/generating codegen headers --
- * see PYTHON_PORT.md's Phase 1). That build is glibc-based, not musl,
- * but the ~300 mechanical answers (does <sys/foo.h> exist, is off_t
- * 64-bit, does struct stat have st_blksize, the ALIGNOF_ and SIZEOF_
- * macros) are architecture-level, not libc-level, and apply here
- * unchanged.
+ * Base: a *real* ./configure run's pyconfig.h, from a plain native
+ * x86-64 Linux build of this same CPython 3.12.8 release (built only
+ * so this port has a working "build Python" for freezing importlib/
+ * generating codegen headers -- see PYTHON.md). That build is
+ * glibc-based, not musl, but the ~300 mechanical answers (does
+ * <sys/foo.h> exist, is off_t 64-bit, does struct stat have
+ * st_blksize, the ALIGNOF_ and SIZEOF_ macros) are architecture-level,
+ * not libc-level, and apply here unchanged.
  *
  * Overrides: every line ending "-- cut for this port, see
  * pyconfig_baremetal.h" (commented out below) or freshly appended at
@@ -20,11 +21,12 @@
  * pyconfig_baremetal.h stays the source of truth for *why*; this file
  * is what actually gets `#include`'d during a build.
  *
- * NOT YET VERIFIED against musl-1.2.6 itself: the ~300 macros this
- * merge left untouched (inherited straight from the glibc host run)
- * are still an assumption, not a fact, until Phase 1's actual compile
- * pass hits each corresponding file and either links cleanly or
- * doesn't -- see PYTHON_PORT.md's open-questions list.
+ * The ~300 macros this merge left untouched (inherited straight from
+ * the glibc host run) have been verified the empirical way: every
+ * file that macro gates actually compiles and links cleanly as part of
+ * this port's normal build (setup.sh/build-app.sh) -- see PYTHON.md
+ * for the handful that didn't and needed a real cut, all reflected in
+ * pyconfig_baremetal.h.
  */
 
 #ifndef Py_PYCONFIG_H
@@ -172,7 +174,7 @@
  * *called* unconditionally as time.process_time()'s last-resort
  * fallback, so leaving HAVE_CLOCK undefined fails the build, not just
  * a runtime call. musl does provide a real clock() (found empirically
- * running xbuild-phase1.sh) -- whether it returns anything meaningful
+ * running this port's build (setup.sh/build-app.sh)) -- whether it returns anything meaningful
  * on this port depends on times()/CLOCK_PROCESS_CPUTIME_ID, neither of
  * which posix_shim.c backs (OPENISSUES.md's Process model section), so
  * time.process_time() likely returns garbage or a constant at runtime.
@@ -193,7 +195,7 @@
 /* #define HAVE_CLOCK_SETTIME 1  -- cut for this port, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the `close_range' function. */
-/* #define HAVE_CLOSE_RANGE 1  -- cut for this port (no SYS_close_range in posix_shim.c's dispatcher), found empirically running xbuild-phase1.sh */
+/* #define HAVE_CLOSE_RANGE 1  -- cut for this port (no SYS_close_range in posix_shim.c's dispatcher), found empirically building this port */
 
 /* Define if the C compiler supports computed gotos. */
 #define HAVE_COMPUTED_GOTOS 1
@@ -597,10 +599,10 @@
 #define HAVE_GETPWUID_R 1
 
 /* Define to 1 if the getrandom() function is available */
-/* #define HAVE_GETRANDOM 1  -- cut for this port (OPENISSUES.md: nothing backs /dev/urandom-equivalent randomness for app code), found empirically running xbuild-phase1.sh */
+/* #define HAVE_GETRANDOM 1  -- cut for this port (OPENISSUES.md: nothing backs /dev/urandom-equivalent randomness for app code), found empirically building this port */
 
 /* Define to 1 if the Linux getrandom() syscall is available */
-/* #define HAVE_GETRANDOM_SYSCALL 1  -- cut for this port (same as HAVE_GETRANDOM -- and musl's sysroot ships no linux/random.h uapi header for GRND_* flags either), found empirically running xbuild-phase1.sh */
+/* #define HAVE_GETRANDOM_SYSCALL 1  -- cut for this port (same as HAVE_GETRANDOM -- and musl's sysroot ships no linux/random.h uapi header for GRND_* flags either), found empirically building this port */
 
 /* Define to 1 if you have the `getresgid' function. */
 /* #define HAVE_GETRESGID 1  -- cut for this port, see pyconfig_baremetal.h */
@@ -739,7 +741,7 @@
 /* #define HAVE_LINKAT 1  -- cut for this port, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the <linux/auxvec.h> header file. */
-/* #define HAVE_LINUX_AUXVEC_H 1  -- cut for this port (musl's sysroot vendors no linux/ uapi headers at all -- no ELF loader/auxv on this port to read AT_MINSIGSTKSZ from anyway (crt0.c fabricates its own startup, see OPENISSUES.md)), found empirically running xbuild-phase1.sh */
+/* #define HAVE_LINUX_AUXVEC_H 1  -- cut for this port (musl's sysroot vendors no linux/ uapi headers at all -- no ELF loader/auxv on this port to read AT_MINSIGSTKSZ from anyway (crt0.c fabricates its own startup, see OPENISSUES.md)), found empirically building this port */
 
 /* Define to 1 if you have the <linux/can/bcm.h> header file. */
 /* #define HAVE_LINUX_CAN_BCM_H 1  -- cut for this port (same as HAVE_LINUX_CAN_H), found empirically compiling Modules/socketmodule.c (Phase 2) */
@@ -766,7 +768,7 @@
 #define HAVE_LINUX_LIMITS_H 1
 
 /* Define to 1 if you have the <linux/memfd.h> header file. */
-/* #define HAVE_LINUX_MEMFD_H 1  -- cut for this port (musl vendors no linux/ uapi headers), found empirically running xbuild-phase1.sh */
+/* #define HAVE_LINUX_MEMFD_H 1  -- cut for this port (musl vendors no linux/ uapi headers), found empirically building this port */
 
 /* Define to 1 if you have the <linux/netlink.h> header file. */
 /* #define HAVE_LINUX_NETLINK_H 1  -- cut for this port (musl vendors no linux/ uapi headers; AF_NETLINK unsupported by net_shim.c anyway (TCP/UDP/IPv4 only, OPENISSUES.md)), found empirically compiling Modules/socketmodule.c (Phase 2) */
@@ -775,7 +777,7 @@
 /* #define HAVE_LINUX_QRTR_H 1  -- cut for this port (musl vendors no linux/ uapi headers; AF_QIPCRTR unsupported by net_shim.c), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/random.h> header file. */
-/* #define HAVE_LINUX_RANDOM_H 1  -- cut for this port (musl vendors no linux/ uapi headers; superseded by HAVE_GETRANDOM/HAVE_GETRANDOM_SYSCALL already being cut), found empirically running xbuild-phase1.sh */
+/* #define HAVE_LINUX_RANDOM_H 1  -- cut for this port (musl vendors no linux/ uapi headers; superseded by HAVE_GETRANDOM/HAVE_GETRANDOM_SYSCALL already being cut), found empirically building this port */
 
 /* Define to 1 if you have the <linux/soundcard.h> header file. */
 #define HAVE_LINUX_SOUNDCARD_H 1
@@ -787,7 +789,7 @@
 /* #define HAVE_LINUX_VM_SOCKETS_H 1  -- cut for this port (musl vendors no linux/ uapi headers; AF_VSOCK (no hypervisor socket transport here) unsupported by net_shim.c), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/wait.h> header file. */
-/* #define HAVE_LINUX_WAIT_H 1  -- cut for this port (same -- no linux/ uapi headers, and no wait()/waitid() family regardless (Process model section)), found empirically running xbuild-phase1.sh */
+/* #define HAVE_LINUX_WAIT_H 1  -- cut for this port (same -- no linux/ uapi headers, and no wait()/waitid() family regardless (Process model section)), found empirically building this port */
 
 /* Define if you have the 'listen' function. */
 #define HAVE_LISTEN 1
@@ -826,7 +828,7 @@
 #define HAVE_MBRTOWC 1
 
 /* Define if you have the 'memfd_create' function. */
-/* #define HAVE_MEMFD_CREATE 1  -- cut for this port (no SYS_memfd_create in posix_shim.c's dispatcher -- no anonymous shared-memory-file concept on this port), found empirically running xbuild-phase1.sh */
+/* #define HAVE_MEMFD_CREATE 1  -- cut for this port (no SYS_memfd_create in posix_shim.c's dispatcher -- no anonymous shared-memory-file concept on this port), found empirically building this port */
 
 /* Define to 1 if you have the `memrchr' function. */
 #define HAVE_MEMRCHR 1
@@ -1625,7 +1627,7 @@
 #define PY_COERCE_C_LOCALE 1
 
 /* Define to 1 if you have the perf trampoline. */
-/* #define PY_HAVE_PERF_TRAMPOLINE 1  -- cut for this port (Linux perf(1) integration -- no such tool, no /tmp for its perf-map files, no purpose here), found empirically running xbuild-phase1.sh */
+/* #define PY_HAVE_PERF_TRAMPOLINE 1  -- cut for this port (Linux perf(1) integration -- no such tool, no /tmp for its perf-map files, no purpose here), found empirically building this port */
 
 /* Define to 1 to build the sqlite module with loadable extensions support. */
 /* #undef PY_SQLITE_ENABLE_LOAD_EXTENSION */

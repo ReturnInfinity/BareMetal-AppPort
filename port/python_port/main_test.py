@@ -1,20 +1,17 @@
-# main_test.py -- EXPERIMENTAL (see ../../PYTHON_PORT.md). A smoke test
-# for this port, meant to be deployed as /pylib/main.py via
-# install-main.sh. Not part of CPython -- this port's own file.
+# main_test.py -- a smoke test for this port, meant to be deployed as
+# /pylib/main.py via install-main.sh. Not part of CPython -- this
+# port's own file.
 #
 # Each section is independent and self-reporting (PASS/FAIL, not an
 # assert that aborts the rest) -- one broken section shouldn't hide
-# whether everything else still works. Sticks to what Phases 1-3
-# actually proved works on this port (see PYTHON_PORT.md): core
-# language, the frozen bootstrap modules, _socket, and the /pylib
-# stdlib slice install-stdlib-phase3.sh installs (json, re, collections,
-# encodings.ascii, ...). The _thread section is the one genuinely new
-# thing being tested here -- Modules/_threadmodule.c has been compiled
-# and linked in since Phase 1 (config_baremetal.c) but never actually
-# exercised from Python before this file, so it's wrapped in a timeout
-# rather than a plain blocking acquire() in case thread_shim.c's
-# cooperative scheduler doesn't do what CPython's own thread_pthread.h
-# assumes -- see that section's own comment.
+# whether everything else still works. Covers core language, the
+# frozen bootstrap modules, _socket, and the /pylib stdlib slice
+# install-stdlib.sh installs (json, re, collections, encodings.ascii,
+# ...) -- see PYTHON.md. The _thread section exercises
+# Modules/_threadmodule.c's start_new_thread()/Lock from Python,
+# wrapped in a timeout rather than a plain blocking acquire() in case
+# thread_shim.c's cooperative scheduler doesn't do what CPython's own
+# thread_pthread.h assumes -- see that section's own comment.
 
 results = []
 
@@ -63,7 +60,7 @@ def test_sys_module():
 
 
 def test_os_module():
-	# os is one of Phase 1's frozen bootstrap modules, backed by real
+	# os is one of this port's frozen bootstrap modules, backed by real
 	# ext4_shim.c syscalls (open/read/write/stat/unlink), not stubs.
 	import os
 	cwd = os.getcwd()
@@ -95,9 +92,8 @@ def test_time_module():
 
 
 def test_json_module():
-	# Real file on /pylib (install-stdlib-phase3.sh), not frozen --
-	# proves Phase 3's filesystem-import path, not just that json
-	# exists.
+	# Real file on /pylib (install-stdlib.sh), not frozen -- proves
+	# the real filesystem-import path, not just that json exists.
 	import json
 	data = {"a": [1, 2, 3], "b": None, "c": True, "d": "text"}
 	encoded = json.dumps(data)
@@ -123,15 +119,15 @@ def test_collections_module():
 
 
 def test_encodings_ascii():
-	# Not frozen -- only reachable via pymain_baremetal.c's
-	# encodings.__path__.append('/pylib/encodings') fix (Phase 3).
+	# Not frozen -- only reachable via python.c's
+	# encodings.__path__.append('/pylib/encodings') fix.
 	import encodings.ascii
 	assert encodings.ascii.getregentry().name == "ascii"
 	assert "hello".encode("ascii") == b"hello"
 
 
 def test_socket_module():
-	# _socket is a static built-in C module (Phase 2, config_baremetal.c)
+	# _socket is a static built-in C module (config_baremetal.c)
 	# -- not the pure-Python socket.py wrapper, which isn't installed.
 	import _socket
 	s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
@@ -142,12 +138,12 @@ def test_socket_module():
 
 
 def test_thread_module():
-	# EXPERIMENTAL -- see this file's header. thread_shim.c's cooperative
-	# pthreads have been exercised from C (threads.c) but never from
-	# Python's _thread module before this. A lock with a bounded
-	# acquire() timeout is used instead of a plain blocking acquire()
-	# so a real scheduling problem here reports FAIL rather than
-	# hanging this whole script (and the VM's console output) forever.
+	# thread_shim.c's cooperative pthreads are exercised from C
+	# (threads.c) too, but this is _thread.start_new_thread() itself.
+	# A lock with a bounded acquire() timeout is used instead of a
+	# plain blocking acquire() so a real scheduling problem here
+	# reports FAIL rather than hanging this whole script (and the VM's
+	# console output) forever.
 	import _thread
 
 	done = _thread.allocate_lock()
@@ -174,7 +170,7 @@ check("re module (real /pylib file)", test_re_module)
 check("collections module (real /pylib file)", test_collections_module)
 check("encodings.ascii (real /pylib file, frozen-package __path__ fix)", test_encodings_ascii)
 check("_socket module (socket/bind/close)", test_socket_module)
-check("_thread module (EXPERIMENTAL)", test_thread_module)
+check("_thread module", test_thread_module)
 
 passed = sum(1 for _, ok, _ in results if ok)
 print("")

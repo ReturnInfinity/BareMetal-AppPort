@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
-# EXPERIMENTAL (see ../../PYTHON_PORT.md). Writes a .py file onto an
-# EXT2 disk image as /pylib/main.py -- the file pymain_baremetal.c
-# actually runs (see PYMAIN_SCRIPT_PATH there). Same debugfs -w
-# approach as install-stdlib-phase3.sh (no host root/loop-mount, safe
-# to run against a disk image a Firecracker VM doesn't currently have
-# open), just for the one file that changes on every deploy instead of
-# the stdlib slice that changes rarely.
+# Writes a .py file onto an EXT2 disk image as /pylib/main.py -- the
+# file python.c actually runs (see PYMAIN_SCRIPT_PATH there). Same
+# debugfs -w approach as install-stdlib.sh (no host root/loop-mount,
+# safe to run against a disk image a Firecracker VM doesn't currently
+# have open), just for the one file that changes on every deploy
+# instead of the stdlib slice that changes rarely.
 #
-# Unlike install-stdlib-phase3.sh, this one *is* idempotent -- main.py
+# Unlike install-stdlib.sh, this one *is* idempotent -- main.py
 # is expected to be replaced often (that's the whole point), so an
 # existing /pylib/main.py is removed first rather than erroring out.
 #
 # Usage: ./install-main.sh /path/to/disk.img [/path/to/your_script.py]
-# With no second argument, installs this directory's own
-# main_test.py -- a smoke test covering what Phases 1-3 proved works
-# on this port (core language, os/sys/time, _socket, and the real
-# /pylib-backed json/re/collections/encodings.ascii imports), plus one
-# EXPERIMENTAL, timeout-guarded _thread test (see that file's own
-# comment for why it's bounded rather than a plain blocking acquire()).
+# With no second argument, installs this directory's own main_test.py
+# -- a smoke test covering core language, os/sys/time, _socket, and the
+# real /pylib-backed json/re/collections/encodings.ascii imports, plus
+# one timeout-guarded _thread test (see that file's own comment for why
+# it's bounded rather than a plain blocking acquire()).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

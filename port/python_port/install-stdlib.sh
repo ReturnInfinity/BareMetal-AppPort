@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# EXPERIMENTAL, Phase 3 (see ../../PYTHON_PORT.md). Not wired into
-# setup.sh/build-app.sh -- writes a curated set of real, unmodified
-# Lib/*.py files from build/Python-3.12.8/ directly into an EXT2 disk
-# image, under /pylib, using debugfs -w (part of e2fsprogs). Not a
-# loop mount (disk.sh's own approach): that needs root (`sudo mount`)
-# and can't run against a disk image a Firecracker VM might currently
-# have open; debugfs writes the raw ext2 structures directly, needing
-# only read/write access to the image file itself, the same
-# ext4_shim.c/lwext4 stack every other app's disk.img content already
-# sits on.
+# Writes a curated set of real, unmodified Lib/*.py files from
+# build/Python-3.12.8/ directly into an EXT2 disk image, under /pylib,
+# using debugfs -w (part of e2fsprogs) -- deploying the disk-image
+# content python.app needs is a per-deployment step, not a build step,
+# so this is a standalone script rather than something setup.sh/
+# build-app.sh run automatically. Not a loop mount (disk.sh's own
+# approach): that needs root (`sudo mount`) and can't run against a
+# disk image a Firecracker VM might currently have open; debugfs writes
+# the raw ext2 structures directly, needing only read/write access to
+# the image file itself, the same ext4_shim.c/lwext4 stack every other
+# app's disk.img content already sits on.
 #
-# Usage: ./install-stdlib-phase3.sh /path/to/disk.img
+# Usage: ./install-stdlib.sh /path/to/disk.img
 #
 # What gets installed is deliberately small, not "all of Lib/" --
 # exactly the closure `import json` and `import encodings.ascii` pull
