@@ -6,14 +6,20 @@ for curl/SQLite/Mbed TLS/lwIP/lwext4/libsodium: `port/python_port/`
 holds this port's own glue (`python.c`, `config_baremetal.c`,
 `frozen_encodings_baremetal.c`, `pyconfig.h`), `scripts/get-python.sh`
 fetches CPython 3.12.8 unmodified, and both `setup.sh` and
-`build-app.sh` build it the same way they build every other port --
-`./setup.sh` once, then
+`build-app.sh` build it the same way they build every other port.
+Unlike a library other apps merely link against, though, CPython's
+whole point *is* the app -- so `./setup.sh` alone leaves `python.app`
+already built and ready to go, no separate `build-app.sh` invocation
+needed. (Re-run the same build by hand any time
+`port/python_port/`'s own sources change:
 
 ```
 ./build-app.sh port/python_port/python.c port/python_port/config_baremetal.c port/python_port/frozen_encodings_baremetal.c
 ```
 
-produces `python.app`, ready to combine into a unikernel via
+-- this is exactly what `setup.sh` itself runs at the end.)
+
+`python.app` is ready to combine into a unikernel via
 `BareMetal-Firecracker/build.sh` the same way `1-build.sh` does for any
 other app. It boots, runs real Python code, drives real sockets through
 `posix_shim.c`/`net_shim.c`, and imports real, unmodified `.py` files

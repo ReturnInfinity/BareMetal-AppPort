@@ -14,7 +14,7 @@ Run once, from this directory:
 ./setup.sh
 ```
 
-This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0, Mbed TLS 3.6.6, curl 8.21.0, the SQLite 3.46.1 amalgamation, a pinned lwext4 commit, and CPython 3.12.8 (all used as-is, unmodified), creating `build/musl-1.2.6/`, `build/lwip-2.2.0/`, `build/mbedtls-3.6.6/`, `build/curl-8.21.0/`, `build/sqlite-3.46.1/`, `build/lwext4-58bcf89/`, and `build/Python-3.12.8/`. All are pinned versions -- the patch and the `port/lwip_port/`/`port/mbedtls_port/`/`port/curl_port/`/`port/sqlite_port/`/`port/lwext4_port/`/`port/python_port/` glue are written against these exact releases. CPython also needs a one-time native host build (see `PYTHON.md`) to generate a handful of architecture-independent sources (the parser tables, frozen bytecode, ...) -- the only step here that isn't just a fetch-and-compile, and the reason a first `./setup.sh` run takes noticeably longer than a re-run. (`setup.sh` just runs `scripts/get-musl.sh`, `scripts/get-lwip.sh`, `scripts/get-mbedtls.sh`, `scripts/get-curl.sh`, `scripts/get-sqlite.sh`, `scripts/get-lwext4.sh`, and `scripts/get-python.sh` in turn, if you want to re-run one on its own.)
+This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0, Mbed TLS 3.6.6, curl 8.21.0, the SQLite 3.46.1 amalgamation, a pinned lwext4 commit, and CPython 3.12.8 (all used as-is, unmodified), creating `build/musl-1.2.6/`, `build/lwip-2.2.0/`, `build/mbedtls-3.6.6/`, `build/curl-8.21.0/`, `build/sqlite-3.46.1/`, `build/lwext4-58bcf89/`, and `build/Python-3.12.8/`. All are pinned versions -- the patch and the `port/lwip_port/`/`port/mbedtls_port/`/`port/curl_port/`/`port/sqlite_port/`/`port/lwext4_port/`/`port/python_port/` glue are written against these exact releases. CPython also needs a one-time native host build (see `PYTHON.md`) to generate a handful of architecture-independent sources (the parser tables, frozen bytecode, ...) -- the only step here that isn't just a fetch-and-compile, and the reason a first `./setup.sh` run takes noticeably longer than a re-run. `setup.sh` finishes by building `python.app` itself, so it's ready to go immediately -- no separate `build-app.sh` invocation needed unless you change `port/python_port/`'s own sources (see Building an app below). (`setup.sh` just runs `scripts/get-musl.sh`, `scripts/get-lwip.sh`, `scripts/get-mbedtls.sh`, `scripts/get-curl.sh`, `scripts/get-sqlite.sh`, `scripts/get-lwext4.sh`, and `scripts/get-python.sh` in turn, if you want to re-run one on its own.)
 
 ## Building an app
 
@@ -26,16 +26,18 @@ Downloaded sources and intermediate `.o` files live under `build/`; the final `.
 
 `./clean.sh` removes library code and build artifacts (`.o`/`.a`/`.app`) from this directory and `build/` without touching the fetched `musl-1.2.6/`/`lwip-2.2.0/`/`mbedtls-3.6.6/`/`curl-8.21.0/`/`sqlite-3.46.1/`/`lwext4-58bcf89/`/`Python-3.12.8/` zip/tarball.
 
-Building `python.app` -- the CPython interpreter itself -- takes three
-source files, not one, since it's assembled from this port's own glue
-rather than a single `.c` file:
+`python.app` -- the CPython interpreter itself -- is already built by
+`./setup.sh` (see Setup above), ready to go with no separate step. To
+rebuild it after changing anything under `port/python_port/`, run the
+same three-source-file build `setup.sh` itself runs (it's assembled
+from this port's own glue rather than a single `.c` file):
 
 ```
 ./build-app.sh port/python_port/python.c port/python_port/config_baremetal.c port/python_port/frozen_encodings_baremetal.c
 ```
 
-See `PYTHON.md` for what each of those does and how to point the
-resulting `python.app` at your own program.
+See `PYTHON.md` for what each of those does and how to point
+`python.app` at your own program.
 
 ## What's in here
 

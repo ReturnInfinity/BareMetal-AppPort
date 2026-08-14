@@ -428,4 +428,17 @@ for src in $PYTHON_BUILTIN_SRCS; do
 	gcc $PYTHON_BUILTIN_CFLAGS -o "$obj" "$PYTHON_DIR/$src"
 done
 
+# Unlike every other library here, CPython's whole point is the
+# resulting app, not a library other apps link a bit of -- so unlike
+# curl/SQLite/etc (which just leave their objects in build/ for
+# build-app.sh to pick up whenever *you* build an app that wants them),
+# setup.sh finishes by building python.app itself, the same three
+# sources PYTHON.md's "Running your own program" section describes,
+# so it's ready to go immediately after ./setup.sh with no separate
+# build-app.sh invocation needed. Re-run build-app.sh the same way by
+# hand any time port/python_port/*.c changes -- this is just running it
+# once, not a step build-app.sh itself needs to know about.
+echo "- Building python.app"
+"$SCRIPT_DIR/build-app.sh" "$PYTHON_PORT/python.c" "$PYTHON_PORT/config_baremetal.c" "$PYTHON_PORT/frozen_encodings_baremetal.c"
+
 # echo -e "${BOLD}Library builds complete${NORMAL}"
