@@ -1,18 +1,22 @@
 # Python Port -- Plan (EXPERIMENTAL)
 
-**Status: Phases 1 and 2 done and boot-verified.** A minimal CPython
-3.12.8 actually boots as a BareMetal-Firecracker unikernel and runs
-Python code -- `python.app`, built by `port/python_port/xbuild-phase1.sh`
-(despite the name, now covers both phases -- see that script's own
-header), combined into a unikernel via `BareMetal-Firecracker/build.sh`
-the same way `1-build.sh` does for a normal app. Phase 1 printed `2`
-from `print(1 + 1)`; Phase 2, on top of that, imported `_socket` and
-ran a real `socket()`/`bind()`/`close()` round trip through
-`posix_shim.c` -> `net_shim.c`. Both exited cleanly under Firecracker
-(1 vCPU, 256 MiB -- see "Open questions" below on why more than the
-usual 4 MiB was needed). Everything under "Phase 1"/"Phase 2" below is
-no longer a plan, it's what was actually done, kept as a record of
-*why* each piece is the way it is. Phase 3 is still just a plan.
+**Status: Phases 1, 2, and 3 done and boot-verified.** A minimal
+CPython 3.12.8 actually boots as a BareMetal-Firecracker unikernel and
+runs Python code -- `python.app`, built by
+`port/python_port/xbuild-phase1.sh` (despite the name, now covers all
+three phases -- see that script's own header), combined into a
+unikernel via `BareMetal-Firecracker/build.sh` the same way
+`1-build.sh` does for a normal app. Phase 1 printed `2` from
+`print(1 + 1)`; Phase 2, on top of that, imported `_socket` and ran a
+real `socket()`/`bind()`/`close()` round trip through `posix_shim.c` ->
+`net_shim.c`; Phase 3, on top of both, imported `encodings.ascii` and
+`json` from real, unmodified `.py` files written onto the EXT2 disk
+image (`port/python_port/install-stdlib-phase3.sh`), not frozen
+bytecode. All exited cleanly under Firecracker (1 vCPU, 256 MiB -- see
+"Open questions" below on why more than the usual 4 MiB was needed).
+Everything under "Phase 1"/"Phase 2"/"Phase 3" below is no longer a
+plan, it's what was actually done, kept as a record of *why* each
+piece is the way it is.
 
 Investigating whether CPython can run as a BareMetal app now that
 `port/thread_shim.c` gives this port real `pthread_*` (see
@@ -306,15 +310,73 @@ Compiled with **zero new C shim code**, only config work:
   `socket.timeout`/silently-ignored `setsockopt()`, not new limits
   Phase 2 introduced.
 
-**Phase 3 -- real filesystem-backed imports and stdlib growth.** Ship
-`.py`/`.pyc` files on the EXT2 image instead of (or alongside) frozen
-bytecode, using `ext4_shim.c`'s now-real `stat`/`readdir`/`open`.
-Pull in additional `Modules/Setup.stdlib.in` modules one at a time
-(`_datetime`, `_json`, `_struct`, `array`, ...), each needing its own
-pass through the same "which `HAVE_*` macros does this file actually
-touch" audit `pyconfig_baremetal.h`'s header describes for the
-bootstrap set. `_socket` from Phase 2 unlocks `urllib`/`http.client`
-(pure-Python, no extra C module) for free at that point.
+**Phase 3 -- real filesystem-backed imports. DONE, boot-verified.**
+The original plan above was "ship `.py`/`.pyc` files on the EXT2
+image... using `ext4_shim.c`'s now-real `stat`/`readdir`/`open`" -- that
+part was right. What actually happened, and what it took:
+
+- **No host root needed to write files onto the disk image.**
+  `disk.sh`'s own approach (`sudo mount -o loop`) needs interactive
+  sudo and can't run against an image a Firecracker VM might have
+  open. `port/python_port/install-stdlib-phase3.sh` uses `debugfs -w`
+  (e2fsprogs) instead -- writes ext2 structures directly against the
+  image file, needing only read/write access to that file, no loop
+  device, no root, no VM-stopped precondition beyond what `disk.sh`
+  itself already requires.
+- **What gets installed is a small, precisely-traced dependency
+  closure, not "all of Lib/".** Rather than guessing which files
+  `import json` needs by reading source (Phase 1/2's style for
+  `HAVE_*` macros doesn't apply to Python-level dependencies), it was
+  traced directly: `build/host-python-build/python -S -c "import
+  json"`, diffing `sys.modules` before/after. Result: 19 files --
+  `json`'s own 4-file package, plus `collections`, `re` (itself a
+  5-file package in 3.12), `enum`, `functools`, `_collections_abc`,
+  `copyreg`, `keyword`, `operator`, `reprlib`, `types` -- plus
+  `encodings/ascii.py` for the other test (see below). `_json` (json's
+  optional C accelerator) is genuinely optional -- not built, and
+  `import json` doesn't need it, pure Python `json/scanner.py` covers
+  it.
+- **`pymain_baremetal.c`'s `PyConfig.module_search_paths` gets one real
+  entry now**, `/pylib` (`install-stdlib-phase3.sh`'s target
+  directory), instead of Phase 1's empty list. `importlib._bootstrap_external`'s
+  `PathFinder` walks it the normal way -- no new C code, same "it just
+  works once the plumbing's real" pattern Phase 2's `_socket` showed.
+- **Real finding, not anticipated by the original plan: a frozen
+  *package*'s `__path__` doesn't let you add real filesystem submodules
+  to it for free.** First attempt at testing `import encodings.ascii`
+  (deliberately picked *because* `encodings` is one of Phase 1's frozen
+  packages, to test layering) failed with `ModuleNotFoundError`, even
+  though `/pylib/encodings/ascii.py` existed and `/pylib` was on
+  `sys.path` correctly. Root cause: `importlib._bootstrap.FrozenImporter`
+  builds a frozen package's `ModuleSpec` with `submodule_search_locations=[]`
+  (empty, not `None`) -- `encodings.aliases`/`encodings.utf_8` still
+  import fine despite this because `FrozenImporter` matches them
+  directly by their own exact frozen name in `sys.meta_path`, before
+  `PathFinder` (which needs a real `__path__`) is ever consulted; but
+  `encodings.ascii`, not being frozen, falls through to `PathFinder`,
+  which has nothing to search. **Fixed, not just documented**: since
+  that `__path__` is a real, appendable list (just empty),
+  `pymain_baremetal.c` does `import encodings;
+  encodings.__path__.append('/pylib/encodings')` right after
+  `Py_InitializeFromConfig()` -- a 2-line, no-new-C-code fix. This is a
+  general pattern, not an `encodings`-specific hack: *any* frozen
+  package gets this same treatment if/when it needs real filesystem
+  submodules later, and it's a no-op (harmless empty search location)
+  if `/pylib` isn't present, so Phase 1's zero-filesystem-dependency
+  boot path is unaffected.
+- **Boot test**: `import encodings.ascii; encodings.ascii.getregentry().name`
+  -> `ascii` (real file, not frozen -- confirms the `__path__` fix);
+  `import json; json.dumps({'a': [1, 2, 3]})` -> `{"a": [1, 2, 3]}`;
+  `json.loads(...)` round-trips it back. Both from real, unmodified
+  CPython source files read off the EXT2 image at runtime, through
+  `ext4_shim.c`, with zero new C shim code -- config/data only, the
+  same shape Phase 2 turned out to have.
+- **`Modules/Setup.stdlib.in`'s C-extension modules** (`_datetime`,
+  `_json`, `_struct`, `array`, ...) are still not built in -- Phase 3
+  only proved the *pure-Python* filesystem-import path. Each of those
+  would still need its own `HAVE_*` audit and a `PHASE2_MODOBJS`-style
+  addition to `xbuild-phase1.sh`, same as `_socket` was, not attempted
+  here.
 
 ## Open questions / risks
 
@@ -352,13 +414,14 @@ bootstrap set. `_socket` from Phase 2 unlocks `urllib`/`http.client`
   `build/musl-1.2.6/src/thread/sem_timedwait.c` exists (futex-based, no
   new shim needed); `sem_clockwait.c` does not (a later musl addition),
   matching `pyconfig_baremetal.h` leaving `HAVE_SEM_CLOCKWAIT` undefined.
-- **Only 3 of `Lib/encodings/`'s ~100 codec modules are frozen**
-  (`encodings`, `encodings.aliases`, `encodings.utf_8` -- see Phase 1).
-  Any code path that needs a different codec (`'latin-1'`, `'ascii'`
-  as their own explicit `encodings.ascii` import rather than the C-level
-  fast path, `'cp1252'`, ...) will `ModuleNotFoundError` until Phase 3
-  puts a real `Lib/` tree on the EXT2 image or more get frozen by hand
-  the same way.
+- ~~Only 3 of `Lib/encodings/`'s ~100 codec modules are frozen~~ --
+  resolved by Phase 3: `encodings.__path__.append('/pylib/encodings')`
+  in `pymain_baremetal.c` means any codec whose `.py` file is copied
+  onto `/pylib/encodings` (via `install-stdlib-phase3.sh`, currently
+  just `ascii.py`) becomes importable normally. Only `ascii`/`utf_8`
+  are actually present right now -- a different codec (`'latin-1'`,
+  `'cp1252'`, ...) still needs its file added the same way, but the
+  *mechanism* is no longer the blocker.
 - **`socket.getsockname()`/`getpeername()` aren't wired up in
   `posix_shim.c`** (found running Phase 2's boot test, dropped from it
   rather than fixed) -- not in the `SYS_` dispatch table at all, falls
@@ -374,21 +437,42 @@ bootstrap set. `_socket` from Phase 2 unlocks `urllib`/`http.client`
   C; re-running Phase 2's test with a real `tap0`/bridge up (see
   `BareMetal-Firecracker/scripts/mkbr0.sh`) would confirm it from
   Python too, not yet done.
-- **`import socket` (the ergonomic `Lib/socket.py` wrapper) isn't
-  available**, only the low-level `_socket` C module -- same shape as
-  the `encodings` gap above, same fix (freeze it by hand, or wait for
-  Phase 3's real `Lib/` tree). `socket.py` itself is more involved than
-  `encodings/__init__.py` was (imports `os`, `enum`, `errno`, `select`
-  -- not all necessarily frozen/available yet), not checked.
+- **`import socket` (the ergonomic `Lib/socket.py` wrapper) still isn't
+  available**, only the low-level `_socket` C module -- unlike the
+  `encodings` gap, this one has a clear, unblocked fix now:
+  `install-stdlib-phase3.sh`-style, trace `import socket`'s real
+  dependency closure (`os`/`sys`/`io` already frozen; `selectors`/`enum`
+  not yet) the same way `json`'s was traced, add those files to
+  `/pylib`, no `__path__` patch needed (`socket.py` is a plain module,
+  not a frozen package). Not done yet, just no longer an open question
+  about *how*.
+- **`install-stdlib-phase3.sh` isn't idempotent.** `debugfs mkdir`
+  fails outright if `/pylib` already exists -- fine for this session's
+  one-time install, but re-running it (e.g. after `setup.sh` recreates
+  `disk.img` from scratch) needs the old `/pylib` gone first, and there's
+  no `rm -rf`-equivalent single debugfs command for that (`rm`+`rmdir`
+  per entry). Worth a real fix before this becomes a normal part of the
+  build flow rather than a one-off experiment.
+- **`/pylib` now lives permanently on this test host's `disk.img`**,
+  not just for the duration of the boot test -- `disk.img` itself isn't
+  committed to git (512 MB, gitignored like every other build
+  artifact), so this is local-only state, not something the `python`
+  branch's commits capture. Anyone re-running Phase 3 elsewhere needs
+  `install-stdlib-phase3.sh` run once against their own `disk.img`
+  first.
 
 ## Bottom line
 
 No fundamental primitive is missing -- threading was the last one, and
-Phases 1 and 2 prove it end to end: a real CPython 3.12.8 now boots on
-BareMetal-Firecracker, runs Python code, and drives real sockets
-through `posix_shim.c`/`net_shim.c` with zero new C shim code (only
-config-header cuts, the same kind Phase 1 needed). What's left (Phase 3
-and the smaller "freeze more stdlib" gaps in Open questions above) is
-more of the same kind of bounded, mostly-mechanical work, not a new
-category of problem -- a real `Lib/` tree on the EXT2 image once
-`ext4_shim.c`-backed imports are wired up.
+Phases 1, 2, and 3 prove it end to end: a real CPython 3.12.8 now boots
+on BareMetal-Firecracker, runs Python code, drives real sockets through
+`posix_shim.c`/`net_shim.c`, and imports real, unmodified `.py` files
+off the EXT2 disk image through `ext4_shim.c` -- all three with zero
+new C shim code, only config-header cuts and ~20 lines of embedding-API
+setup in `pymain_baremetal.c`. What's left is filling in *more* of the
+same two mechanisms this now has (freeze more bootstrap-critical
+modules, install more `Lib/` files onto `/pylib`) plus the smaller
+concrete gaps in "Open questions" above (`_socket`'s C-extension
+siblings like `_datetime`/`_json`/`_struct`, `getsockname()`/
+`getpeername()`, `Lib/socket.py`'s own dependency closure) -- not a new
+category of problem.
