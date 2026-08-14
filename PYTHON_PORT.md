@@ -1,15 +1,18 @@
 # Python Port -- Plan (EXPERIMENTAL)
 
-**Status: Phase 1 done and boot-verified.** A minimal CPython 3.12.8
-actually boots as a BareMetal-Firecracker unikernel and runs Python
-code -- `python.app`, built by `port/python_port/xbuild-phase1.sh`,
-combined into a unikernel via `BareMetal-Firecracker/build.sh` the same
-way `1-build.sh` does for a normal app, printed `2` from
-`print(1 + 1)` and exited cleanly under Firecracker (1 vCPU, 256 MiB --
-see "Open questions" below on why more than the usual 4 MiB was
-needed). Everything under "Phase 1" below is no longer a plan, it's
-what was actually done, kept as a record of *why* each piece is the
-way it is. Phases 2/3 are still just plans.
+**Status: Phases 1 and 2 done and boot-verified.** A minimal CPython
+3.12.8 actually boots as a BareMetal-Firecracker unikernel and runs
+Python code -- `python.app`, built by `port/python_port/xbuild-phase1.sh`
+(despite the name, now covers both phases -- see that script's own
+header), combined into a unikernel via `BareMetal-Firecracker/build.sh`
+the same way `1-build.sh` does for a normal app. Phase 1 printed `2`
+from `print(1 + 1)`; Phase 2, on top of that, imported `_socket` and
+ran a real `socket()`/`bind()`/`close()` round trip through
+`posix_shim.c` -> `net_shim.c`. Both exited cleanly under Firecracker
+(1 vCPU, 256 MiB -- see "Open questions" below on why more than the
+usual 4 MiB was needed). Everything under "Phase 1"/"Phase 2" below is
+no longer a plan, it's what was actually done, kept as a record of
+*why* each piece is the way it is. Phase 3 is still just a plan.
 
 Investigating whether CPython can run as a BareMetal app now that
 `port/thread_shim.c` gives this port real `pthread_*` (see
@@ -239,16 +242,69 @@ actually took, beyond the plan originally written here:
   questions" for the one environmental change this needed
   (256 MiB of VM RAM instead of the usual 4 MiB).
 
-**Phase 2 -- sockets.** A `net_shim.c`-backed C module (same shape as
-`sqlite_vfs.c`'s relationship to `ext4_shim.c`/`posix_shim.c`) standing
-in for the parts of `Modules/socketmodule.c` that talk straight to
-`socket()`/`connect()`/`send()`/`recv()`, with `HAVE_GETADDRINFO` left
-undefined so CPython's own bundled fallback rides `dns_shim.c` for
-free (see above). Inherits every limit `OPENISSUES.md`'s Networking
-section already documents (16 sockets, 30s timeout, no
-`SO_REUSEADDR`/nonblocking, TCP/UDP/IPv4 only) -- a Python program
-would see those as `socket.timeout`/missing `setsockopt` effects, not
-new limits.
+**Phase 2 -- sockets. DONE, boot-verified.** The original plan above
+guessed a `net_shim.c`-backed C module would be needed, on the
+assumption it'd be shaped like `sqlite_vfs.c`'s relationship to
+`ext4_shim.c`/`posix_shim.c`. That guess was wrong, in the good
+direction: `sqlite_vfs.c` exists because `SQLITE_OS_OTHER=1` makes
+SQLite bypass libc's OS layer entirely and demand a hand-written
+replacement. `Modules/socketmodule.c` doesn't do that -- it just calls
+ordinary `socket()`/`bind()`/`connect()`/`send()`/`recv()`, exactly
+like `net_test.c` or any other app here, and `posix_shim.c` already
+dispatches every one of those to `net_shim.c` regardless of caller.
+Compiled with **zero new C shim code**, only config work:
+
+- `Modules/socketmodule.c` added to `xbuild-phase1.sh` as
+  `PHASE2_MODOBJS`, registered in `config_baremetal.c`'s
+  `_PyImport_Inittab` as `PyInit__socket` (not in the host build's own
+  `config.c` at all -- there it was built as a shared `.so`, since this
+  port has no dynamic loading it needs the same static-linking
+  treatment as every bootstrap module).
+- `HAVE_GETADDRINFO` was already undefined (Phase 1's `pyconfig.h`) --
+  `Modules/socketmodule.c` self-`#include`s its own bundled
+  `getaddrinfo.c`/`getnameinfo.c` fallback in that case, built on
+  `gethostbyname()`, so DNS resolution rides `dns_shim.c`'s real
+  resolver for free, no new code, exactly as guessed.
+- A new round of Linux-only `HAVE_*`/config macros needed cutting,
+  found the same empirical way as Phase 1's -- `socketmodule.h`
+  declares struct members and headers for every optional address
+  family CPython knows about, almost all Linux-specific and almost all
+  absent from musl's sysroot: `HAVE_LINUX_NETLINK_H`, `HAVE_ASM_TYPES_H`
+  (AF_NETLINK), `HAVE_LINUX_QRTR_H` (AF_QIPCRTR), `HAVE_LINUX_TIPC_H`
+  (AF_TIPC), `HAVE_LINUX_CAN_H`/`_RAW_H`/`_BCM_H`/`_J1939_H`/
+  `_RAW_FD_FRAMES`/`_RAW_JOIN_FILTERS` (AF_CAN), `HAVE_LINUX_VM_SOCKETS_H`
+  (AF_VSOCK), `HAVE_SOCKADDR_ALG` (AF_ALG) -- and `ENABLE_IPV6` (no
+  IPv6 anywhere on this port, `LWIP_IPV6=0`; also silences
+  `getaddrinfo.c`'s IPv6 branch, which calls the deprecated
+  `getipnodebyname()`/`getipnodebyaddr()` musl doesn't provide). Left
+  `HAVE_SYS_UN_H`/`HAVE_NETPACKET_PACKET_H`/`HAVE_NET_IF_H` alone --
+  musl's sysroot has real (non-uapi) headers for those, so they
+  compile; `net_shim.c` still won't accept `AF_UNIX`/`AF_PACKET` at the
+  `socket()`-call level, same "link, fail at the call site" pattern as
+  the rest of this port.
+- **Boot test**: `import _socket; _socket.socket(AF_INET, SOCK_STREAM);
+  s.bind(('0.0.0.0', 0)); s.close()` -- all real, all through
+  `posix_shim.c` -> `net_shim.c`, no code path bypassed. Output:
+  `_socket constants: 2 1`, `socket() fileno: 100`, `bind() ok`,
+  `close() ok`, `2` (see `pymain_baremetal.c`). Deliberately doesn't
+  attempt a real `connect()`/DNS lookup -- this build/test host's
+  `tap0` is configured but down (no carrier, see this repo's own
+  `2-run.sh` warning), a host networking setup question, not a Phase 2
+  code question. `s.getsockname()` was tried first and dropped: not in
+  `posix_shim.c`'s `SYS_` dispatch table at all (`-ENOSYS`), a real,
+  separate gap (`getpeername()` too), not exercised by this test.
+- **`import socket` (the ergonomic pure-Python wrapper,
+  `Lib/socket.py`) doesn't work yet** -- only the low-level `_socket`
+  C extension is frozen/built in. `socket.py` itself would need
+  freezing (Phase 1's `encodings` precedent) or a real file on the EXT2
+  image (Phase 3) before `socket.socket(...)`, `socket.create_connection()`,
+  etc. are usable the normal way.
+- Every limit `OPENISSUES.md`'s Networking section already documents
+  (16-socket fixed table, 30s blocking-call timeout, no
+  `SO_REUSEADDR`/nonblocking mode, TCP/UDP/IPv4 only, single NIC)
+  applies unchanged -- a Python program hits these as
+  `socket.timeout`/silently-ignored `setsockopt()`, not new limits
+  Phase 2 introduced.
 
 **Phase 3 -- real filesystem-backed imports and stdlib growth.** Ship
 `.py`/`.pyc` files on the EXT2 image instead of (or alongside) frozen
@@ -303,13 +359,36 @@ bootstrap set. `_socket` from Phase 2 unlocks `urllib`/`http.client`
   fast path, `'cp1252'`, ...) will `ModuleNotFoundError` until Phase 3
   puts a real `Lib/` tree on the EXT2 image or more get frozen by hand
   the same way.
+- **`socket.getsockname()`/`getpeername()` aren't wired up in
+  `posix_shim.c`** (found running Phase 2's boot test, dropped from it
+  rather than fixed) -- not in the `SYS_` dispatch table at all, falls
+  to the default `-ENOSYS` case. `OPENISSUES.md`'s Networking section
+  doesn't call these out by name; worth adding there independent of
+  Python.
+- **Real network connectivity (DNS + `connect()`) still unverified end
+  to end from Python.** Phase 2's boot test proved `socket()`/`bind()`/
+  `close()` reach `net_shim.c` correctly, but deliberately didn't
+  attempt a live connection -- this test host's `tap0` is configured
+  but down (no carrier). `curltest.c`/`net_test.c` prove the
+  underlying `gethostbyname()`->`connect()` path works on this port in
+  C; re-running Phase 2's test with a real `tap0`/bridge up (see
+  `BareMetal-Firecracker/scripts/mkbr0.sh`) would confirm it from
+  Python too, not yet done.
+- **`import socket` (the ergonomic `Lib/socket.py` wrapper) isn't
+  available**, only the low-level `_socket` C module -- same shape as
+  the `encodings` gap above, same fix (freeze it by hand, or wait for
+  Phase 3's real `Lib/` tree). `socket.py` itself is more involved than
+  `encodings/__init__.py` was (imports `os`, `enum`, `errno`, `select`
+  -- not all necessarily frozen/available yet), not checked.
 
 ## Bottom line
 
 No fundamental primitive is missing -- threading was the last one, and
-Phase 1 proves it end to end: a real CPython 3.12.8 now boots on
-BareMetal-Firecracker and runs Python code. What's left (Phases 2/3)
-is more of the same kind of bounded, mostly-mechanical work Phase 1
-turned out to be, not a new category of problem -- a `net_shim.c`-backed
-socket shim following `sqlite_vfs.c`'s precedent, and a real `Lib/`
-tree on the EXT2 image once `ext4_shim.c`-backed imports are wired up.
+Phases 1 and 2 prove it end to end: a real CPython 3.12.8 now boots on
+BareMetal-Firecracker, runs Python code, and drives real sockets
+through `posix_shim.c`/`net_shim.c` with zero new C shim code (only
+config-header cuts, the same kind Phase 1 needed). What's left (Phase 3
+and the smaller "freeze more stdlib" gaps in Open questions above) is
+more of the same kind of bounded, mostly-mechanical work, not a new
+category of problem -- a real `Lib/` tree on the EXT2 image once
+`ext4_shim.c`-backed imports are wired up.

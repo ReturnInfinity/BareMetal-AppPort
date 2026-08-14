@@ -71,7 +71,7 @@
 #define DOUBLE_IS_LITTLE_ENDIAN_IEEE754 1
 
 /* Define if --enable-ipv6 is specified */
-#define ENABLE_IPV6 1
+/* #define ENABLE_IPV6 1  -- cut for this port (no IPv6 anywhere on this port (LWIP_IPV6=0 in port/lwip_port/lwipopts.h, matches curl_config.h's own #undef USE_IPV6); also silences Modules/getaddrinfo.c's getipnodebyname()/getipnodebyaddr() calls, deprecated RFC 2553 functions musl doesn't provide), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define if getpgrp() must be called as getpgrp(0). */
 /* #undef GETPGRP_HAVE_ARG */
@@ -104,7 +104,7 @@
 #define HAVE_ASINH 1
 
 /* Define to 1 if you have the <asm/types.h> header file. */
-#define HAVE_ASM_TYPES_H 1
+/* #define HAVE_ASM_TYPES_H 1  -- cut for this port (musl vendors no asm/ uapi headers either), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the `atanh' function. */
 #define HAVE_ATANH 1
@@ -742,22 +742,22 @@
 /* #define HAVE_LINUX_AUXVEC_H 1  -- cut for this port (musl's sysroot vendors no linux/ uapi headers at all -- no ELF loader/auxv on this port to read AT_MINSIGSTKSZ from anyway (crt0.c fabricates its own startup, see OPENISSUES.md)), found empirically running xbuild-phase1.sh */
 
 /* Define to 1 if you have the <linux/can/bcm.h> header file. */
-#define HAVE_LINUX_CAN_BCM_H 1
+/* #define HAVE_LINUX_CAN_BCM_H 1  -- cut for this port (same as HAVE_LINUX_CAN_H), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/can.h> header file. */
-#define HAVE_LINUX_CAN_H 1
+/* #define HAVE_LINUX_CAN_H 1  -- cut for this port (musl vendors no linux/ uapi headers; AF_CAN (no CAN bus on this port) unsupported by net_shim.c), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/can/j1939.h> header file. */
-#define HAVE_LINUX_CAN_J1939_H 1
+/* #define HAVE_LINUX_CAN_J1939_H 1  -- cut for this port (same as HAVE_LINUX_CAN_H), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define if compiling using Linux 3.6 or later. */
-#define HAVE_LINUX_CAN_RAW_FD_FRAMES 1
+/* #define HAVE_LINUX_CAN_RAW_FD_FRAMES 1  -- cut for this port (AF_CAN unsupported by net_shim.c, and musl vendors no linux/can/raw.h anyway (HAVE_LINUX_CAN_RAW_H already cut above)), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/can/raw.h> header file. */
-#define HAVE_LINUX_CAN_RAW_H 1
+/* #define HAVE_LINUX_CAN_RAW_H 1  -- cut for this port (same as HAVE_LINUX_CAN_H), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define if compiling using Linux 4.1 or later. */
-#define HAVE_LINUX_CAN_RAW_JOIN_FILTERS 1
+/* #define HAVE_LINUX_CAN_RAW_JOIN_FILTERS 1  -- cut for this port (same as HAVE_LINUX_CAN_RAW_FD_FRAMES), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/fs.h> header file. */
 #define HAVE_LINUX_FS_H 1
@@ -769,10 +769,10 @@
 /* #define HAVE_LINUX_MEMFD_H 1  -- cut for this port (musl vendors no linux/ uapi headers), found empirically running xbuild-phase1.sh */
 
 /* Define to 1 if you have the <linux/netlink.h> header file. */
-#define HAVE_LINUX_NETLINK_H 1
+/* #define HAVE_LINUX_NETLINK_H 1  -- cut for this port (musl vendors no linux/ uapi headers; AF_NETLINK unsupported by net_shim.c anyway (TCP/UDP/IPv4 only, OPENISSUES.md)), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/qrtr.h> header file. */
-#define HAVE_LINUX_QRTR_H 1
+/* #define HAVE_LINUX_QRTR_H 1  -- cut for this port (musl vendors no linux/ uapi headers; AF_QIPCRTR unsupported by net_shim.c), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/random.h> header file. */
 /* #define HAVE_LINUX_RANDOM_H 1  -- cut for this port (musl vendors no linux/ uapi headers; superseded by HAVE_GETRANDOM/HAVE_GETRANDOM_SYSCALL already being cut), found empirically running xbuild-phase1.sh */
@@ -781,10 +781,10 @@
 #define HAVE_LINUX_SOUNDCARD_H 1
 
 /* Define to 1 if you have the <linux/tipc.h> header file. */
-#define HAVE_LINUX_TIPC_H 1
+/* #define HAVE_LINUX_TIPC_H 1  -- cut for this port (musl vendors no linux/ uapi headers; AF_TIPC unsupported by net_shim.c), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/vm_sockets.h> header file. */
-#define HAVE_LINUX_VM_SOCKETS_H 1
+/* #define HAVE_LINUX_VM_SOCKETS_H 1  -- cut for this port (musl vendors no linux/ uapi headers; AF_VSOCK (no hypervisor socket transport here) unsupported by net_shim.c), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define to 1 if you have the <linux/wait.h> header file. */
 /* #define HAVE_LINUX_WAIT_H 1  -- cut for this port (same -- no linux/ uapi headers, and no wait()/waitid() family regardless (Process model section)), found empirically running xbuild-phase1.sh */
@@ -1199,7 +1199,7 @@
 #define HAVE_SNPRINTF 1
 
 /* struct sockaddr_alg (linux/if_alg.h) */
-#define HAVE_SOCKADDR_ALG 1
+/* #define HAVE_SOCKADDR_ALG 1  -- cut for this port (musl vendors no linux/if_alg.h; AF_ALG (kernel crypto API sockets) unsupported by net_shim.c), found empirically compiling Modules/socketmodule.c (Phase 2) */
 
 /* Define if sockaddr has sa_len member */
 /* #undef HAVE_SOCKADDR_SA_LEN */

@@ -2,7 +2,7 @@
 // BareMetal -- a 64-bit OS written in Assembly for x86-64 systems
 // Copyright (C) 2008-2026 Return Infinity -- see LICENSE.TXT
 //
-// config_baremetal.c -- EXPERIMENTAL, Phase 1 (see ../../PYTHON_PORT.md).
+// config_baremetal.c -- EXPERIMENTAL, Phase 1/2 (see ../../PYTHON_PORT.md).
 // Hand-written equivalent of CPython's own Modules/config.c (normally
 // generated from Modules/config.c.in by the makesetup script, driven by
 // Modules/Setup -- see create_builtin() in Python/import.c, which walks
@@ -44,6 +44,14 @@ extern PyObject* PyInit__ast(void);
 extern PyObject* PyInit__tokenize(void);
 extern PyObject* _PyWarnings_Init(void);
 extern PyObject* PyInit__string(void);
+
+/* Phase 2 (see PYTHON_PORT.md): not part of the host build's own
+ * config.c at all -- there, _socket was built as a shared extension
+ * (Modules/_socket.so), so it never needed an _PyImport_Inittab entry.
+ * This port has no dynamic loading (OPENISSUES.md's General section),
+ * so it's statically linked in and registered here instead, the same
+ * treatment as every module above. */
+extern PyObject* PyInit__socket(void);
 
 struct _inittab _PyImport_Inittab[] = {
 	{"atexit", PyInit_atexit},
@@ -92,6 +100,9 @@ struct _inittab _PyImport_Inittab[] = {
 
 	/* This lives in Objects/unicodeobject.c */
 	{"_string", PyInit__string},
+
+	/* Phase 2 -- see extern declaration's comment above */
+	{"_socket", PyInit__socket},
 
 	/* Sentinel */
 	{0, 0}

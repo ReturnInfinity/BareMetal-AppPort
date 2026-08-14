@@ -17,12 +17,14 @@
 # see PYTHON_PORT.md's Phase 1 section). $(MACHDEP_OBJS)/$(LIBOBJS)/
 # $(DTRACE_OBJS) were empty for that build and are omitted; pwdmodule
 # is dropped from MODOBJS (needs getpwuid(), no uid/gid model on this
-# port -- see OPENISSUES.md's Process model section).
+# port -- see OPENISSUES.md's Process model section). PHASE2_MODOBJS
+# (Modules/socketmodule.c) is this port's own addition, not copied
+# from the Makefile -- see its own comment below.
 #
-# Does NOT link yet -- this only compiles each translation unit and
-# reports which ones fail and why, the fast way to find every real gap
-# between CPython's assumptions and this port's musl+posix_shim.c
-# surface before spending time on any single one.
+# Compiles every translation unit, reports which ones fail and why (the
+# fast way to find every real gap between CPython's assumptions and
+# this port's musl+posix_shim.c surface before spending time on any
+# single one), then links and produces python.app.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,6 +88,17 @@ GETPATH_DEFINES='-DPREFIX="/" -DEXEC_PREFIX="/" -DVERSION="3.12" -DVPATH="" -DPL
 # needs to be added by hand here.
 MODOBJS="Modules/atexitmodule.c Modules/faulthandler.c Modules/posixmodule.c Modules/signalmodule.c Modules/_tracemalloc.c Modules/_codecsmodule.c Modules/_collectionsmodule.c Modules/errnomodule.c Modules/_io/_iomodule.c Modules/_io/iobase.c Modules/_io/fileio.c Modules/_io/bytesio.c Modules/_io/bufferedio.c Modules/_io/textio.c Modules/_io/stringio.c Modules/itertoolsmodule.c Modules/_sre/sre.c Modules/_threadmodule.c Modules/timemodule.c Modules/_typingmodule.c Modules/_weakref.c Modules/_abc.c Modules/_functoolsmodule.c Modules/_localemodule.c Modules/_operator.c Modules/_stat.c Modules/symtablemodule.c Modules/gcmodule.c"
 
+# Phase 2 (see PYTHON_PORT.md): Modules/socketmodule.c is a
+# Modules/Setup.stdlib.in module (not bootstrap), but turned out to
+# need no net_shim.c-backed C shim at all -- unlike sqlite_vfs.c
+# (SQLite bypasses libc and needs a whole hand-written OS layer),
+# socketmodule.c just calls ordinary socket()/connect()/send()/recv(),
+# which posix_shim.c already dispatches to net_shim.c for every other
+# app here. HAVE_GETADDRINFO already left undefined (pyconfig_baremetal.h)
+# means it self-includes its own bundled getaddrinfo.c/getnameinfo.c
+# fallback, built on gethostbyname() -- dns_shim.c's real resolver.
+PHASE2_MODOBJS="Modules/socketmodule.c"
+
 n_ok=0
 n_fail=0
 failed_files=""
@@ -116,6 +129,11 @@ done
 
 echo "Compiling bootstrap static modules (-DPy_BUILD_CORE_BUILTIN)..."
 for f in $MODOBJS; do
+	compile_one "$SRC/$f" "$BUILTIN_CFLAGS"
+done
+
+echo "Compiling Phase 2 modules (-DPy_BUILD_CORE_BUILTIN)..."
+for f in $PHASE2_MODOBJS; do
 	compile_one "$SRC/$f" "$BUILTIN_CFLAGS"
 done
 
@@ -172,7 +190,7 @@ gcc $CFLAGS_BASE -o "$OUT/libBareMetal.o" "port/libBareMetal.c"
 echo "Linking..."
 rm -f "$OUT/$APP_NAME.elf"
 PY_OBJS=""
-for f in $PARSER_OBJS $PYTHON_OBJS $OBJECT_OBJS $FROZEN_OBJS $MODOBJS; do
+for f in $PARSER_OBJS $PYTHON_OBJS $OBJECT_OBJS $FROZEN_OBJS $MODOBJS $PHASE2_MODOBJS; do
 	rel="${f#$SRC/}"
 	obj="$OUT/$(echo "$rel" | tr '/' '_' | sed 's/\.c$/.o/')"
 	PY_OBJS="$PY_OBJS $obj"

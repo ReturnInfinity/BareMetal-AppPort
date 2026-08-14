@@ -2,7 +2,7 @@
 // BareMetal -- a 64-bit OS written in Assembly for x86-64 systems
 // Copyright (C) 2008-2026 Return Infinity -- see LICENSE.TXT
 //
-// pymain_baremetal.c -- EXPERIMENTAL, Phase 1 (see ../../PYTHON_PORT.md).
+// pymain_baremetal.c -- EXPERIMENTAL, Phase 1/2 (see ../../PYTHON_PORT.md).
 // This port's own "main()" for the interpreter, in place of CPython's
 // normal Programs/python.c (Py_BytesMain(argc, argv), which drives full
 // command-line parsing and Modules/getpath.c's filesystem-searching
@@ -79,7 +79,30 @@ int main(void)
 	}
 	PyConfig_Clear(&config);
 
-	PyRun_SimpleString("print(1 + 1)\n");
+	// Phase 2 (see PYTHON_PORT.md): exercises _socket (the C extension
+	// module, Modules/socketmodule.c -- see config_baremetal.c) end to
+	// end -- module init, its constant tables, and a real socket()/
+	// bind()/close() round trip through posix_shim.c -> net_shim.c.
+	// No getsockname()/getpeername() here -- not in posix_shim.c's
+	// SYS_ dispatch table (-ENOSYS), a real gap, not a test omission.
+	// Deliberately does *not* attempt a real connect()/gethostbyname()
+	// either: this build's host environment has tap0 configured but
+	// down (no carrier), which is a test-host networking setup
+	// question (see this repo's own 2-run.sh warning), not something
+	// Phase 2's code needs a working network to prove. `import socket`
+	// (the pure-Python wrapper in Lib/socket.py) isn't available yet
+	// either -- that .py file isn't frozen or on disk, only _socket is.
+	PyRun_SimpleString(
+		"import _socket\n"
+		"print('_socket constants:', _socket.AF_INET, _socket.SOCK_STREAM)\n"
+		"s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)\n"
+		"print('socket() fileno:', s.fileno())\n"
+		"s.bind(('0.0.0.0', 0))\n"
+		"print('bind() ok')\n"
+		"s.close()\n"
+		"print('close() ok')\n"
+		"print(1 + 1)\n"
+	);
 
 	return Py_FinalizeEx() < 0 ? 1 : 0;
 

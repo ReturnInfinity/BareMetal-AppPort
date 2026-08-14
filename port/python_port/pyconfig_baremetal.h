@@ -383,4 +383,43 @@
  * surfaced the missing asm symbols. */
 #undef PY_HAVE_PERF_TRAMPOLINE
 
+/* ---------------------------------------------------------------------
+ * Phase 2 (see PYTHON_PORT.md) -- Modules/socketmodule.c/socketmodule.h
+ * declare struct members and #include headers for every optional
+ * address family CPython knows about (AF_NETLINK, AF_CAN, AF_TIPC,
+ * AF_VSOCK, AF_ALG, AF_QIPCRTR, ...), all Linux-specific and all gated
+ * behind their own HAVE_*_H macro. net_shim.c only ever implements
+ * AF_INET (TCP/UDP, OPENISSUES.md's Networking section) -- none of
+ * these would work at runtime even if they compiled, but musl's sysroot
+ * settles it at compile time anyway: it vendors no linux/ uapi headers
+ * at all (same story as HAVE_LINUX_RANDOM_H/HAVE_LINUX_WAIT_H/etc in
+ * the Phase-1 section above). Left AF_UNIX (HAVE_SYS_UN_H)/AF_PACKET
+ * (HAVE_NETPACKET_PACKET_H)/net/if.h alone -- musl's sysroot does
+ * provide real headers for those (confirmed present, unlike the linux/
+ * ones), so they compile; net_shim.c still won't accept those domains
+ * at the socket()-call level, same "link, fail at the call site" story
+ * as everything else cut only at the syscall-dispatch layer instead of
+ * here.
+ * --------------------------------------------------------------------- */
+#undef HAVE_LINUX_NETLINK_H
+#undef HAVE_ASM_TYPES_H
+#undef HAVE_LINUX_QRTR_H
+#undef HAVE_LINUX_TIPC_H
+#undef HAVE_LINUX_CAN_H
+#undef HAVE_LINUX_CAN_RAW_H
+#undef HAVE_LINUX_CAN_BCM_H
+#undef HAVE_LINUX_CAN_J1939_H
+#undef HAVE_LINUX_VM_SOCKETS_H
+#undef HAVE_SOCKADDR_ALG
+/* No IPv6 anywhere on this port (LWIP_IPV6=0 in port/lwip_port/
+ * lwipopts.h, matches curl_config.h's own #undef USE_IPV6) --
+ * ENABLE_IPV6 also silences Modules/getaddrinfo.c's
+ * getipnodebyname()/getipnodebyaddr() calls (deprecated RFC 2553
+ * functions musl doesn't provide) in its IPv6 branch. */
+#undef ENABLE_IPV6
+/* AC_CHECK_DECL-style macros distinct from HAVE_LINUX_CAN_RAW_H itself
+ * -- same AF_CAN cut, musl vendors no linux/can/raw.h regardless. */
+#undef HAVE_LINUX_CAN_RAW_FD_FRAMES
+#undef HAVE_LINUX_CAN_RAW_JOIN_FILTERS
+
 #endif
