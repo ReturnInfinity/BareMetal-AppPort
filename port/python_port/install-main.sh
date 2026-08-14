@@ -38,6 +38,7 @@ if [ ! -f "$SRC" ]; then
 fi
 
 CMDFILE="$(mktemp)"
+LOG="/tmp/install-main-debugfs.log"
 trap 'rm -f "$CMDFILE"' EXIT
 
 {
@@ -52,5 +53,21 @@ trap 'rm -f "$CMDFILE"' EXIT
 } > "$CMDFILE"
 
 echo "Installing $SRC as /pylib/main.py on $DISK ..."
-debugfs -w -f "$CMDFILE" "$DISK"
-echo "Done. Verify with: debugfs -R 'cat /pylib/main.py' \"$DISK\""
+# debugfs's own transcript (command echoes, "Allocated inode", the
+# expected "already exists" noise on every run after the first -- see
+# above) goes to a log file instead of the screen; this script is
+# meant to be run on every deploy (install-main.sh's own header), so
+# that output would otherwise scroll past on every single run.
+#
+# debugfs's own exit code can't signal failure here -- confirmed by
+# running it against a plain non-ext2 file: every command inside fails
+# ("Filesystem not open"), but the process itself still exits 0
+# regardless. Real verification instead: stat the file back out
+# afterward and check it actually landed.
+debugfs -w -f "$CMDFILE" "$DISK" > "$LOG" 2>&1 || true
+if ! debugfs -R 'stat /pylib/main.py' "$DISK" 2>/dev/null | grep -q '^Inode:'; then
+	echo "error: /pylib/main.py isn't on $DISK after the write -- see $LOG" >&2
+	cat "$LOG" >&2
+	exit 1
+fi
+echo "Done (debugfs log: $LOG). Verify with: debugfs -R 'cat /pylib/main.py' \"$DISK\""
