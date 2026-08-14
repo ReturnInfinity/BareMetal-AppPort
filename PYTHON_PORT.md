@@ -405,11 +405,21 @@ part was right. What actually happened, and what it took:
   workload's object graph are all meaningfully larger than
   `hello.c`/`sqltest.c`'s footprint. `1-build.sh`/cloud deployment
   sizing (`3-upload.sh`) hasn't been looked at yet either.
-- **`thread_shim.c`'s `THREAD_SHIM_MAX_THREADS = 32` fixed table** vs.
-  whatever `pthread_attr_setstacksize`/CPython's own default thread
-  stack size actually request -- still unaddressed; Phase 1's
-  `pymain_baremetal.c` never calls `_thread.start_new_thread()`, so
-  `Modules/_threadmodule.c` links but is still functionally untested.
+- ~~`Modules/_threadmodule.c` functionally untested~~ -- resolved
+  (partially): `port/python_port/main_test.py` (see "Running your own
+  program" below) added a bounded `_thread` test --
+  `_thread.start_new_thread()` plus a `Lock` used as a completion
+  signal, `acquire()` called with a 5s timeout rather than blocking
+  forever in case `thread_shim.c`'s cooperative scheduler didn't
+  actually cooperate with CPython's `Python/thread_pthread.h`
+  assumptions the way `pyconfig_baremetal.h`'s Threading section
+  predicted. It passed, boot-verified: a second thread ran concurrently
+  with the main one, `Lock.release()`/timed `acquire()` synchronized
+  them correctly, real result data crossed threads intact. Only a
+  smoke test, not a stress test -- `thread_shim.c`'s
+  `THREAD_SHIM_MAX_THREADS = 32` fixed table vs. CPython's default
+  thread stack size under real concurrent load (more than one or two
+  threads, real contention) is still unexercised.
 - ~~musl's `sem_timedwait`/`sem_clockwait` presence~~ -- resolved:
   `build/musl-1.2.6/src/thread/sem_timedwait.c` exists (futex-based, no
   new shim needed); `sem_clockwait.c` does not (a later musl addition),
@@ -460,6 +470,24 @@ part was right. What actually happened, and what it took:
   branch's commits capture. Anyone re-running Phase 3 elsewhere needs
   `install-stdlib-phase3.sh` run once against their own `disk.img`
   first.
+
+## Running your own program
+
+`pymain_baremetal.c` runs `/pylib/main.py` off the EXT2 disk image as
+the actual program -- nothing Python-level is baked into the binary
+anymore. `port/python_port/install-main.sh /path/to/disk.img
+[/path/to/your_script.py]` puts a file there via `debugfs -w` (same
+no-root approach as `install-stdlib-phase3.sh`, and unlike that script,
+this one *is* idempotent -- safe to re-run on every change). With no
+script argument it installs this directory's own `main_test.py`, a
+smoke test covering everything Phases 1-3 (and the `_thread` finding
+above) proved works: core language, `os`/`sys`/`time`, `_socket`, and
+the real `/pylib`-backed `json`/`re`/`collections`/`encodings.ascii`
+imports -- 10/10 checks passed, boot-verified. Anything your own
+script imports beyond what's already on `/pylib`/frozen/built-in needs
+its own files added the same way `install-stdlib-phase3.sh`'s own
+comment describes (trace a real `import` on
+`build/host-python-build/python`, add exactly what's new).
 
 ## Bottom line
 
