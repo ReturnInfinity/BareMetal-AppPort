@@ -2,7 +2,14 @@
 // BareMetal -- a 64-bit OS written in Assembly for x86-64 systems
 // Copyright (C) 2008-2026 Return Infinity -- see LICENSE.TXT
 //
-// pymain_baremetal.c -- EXPERIMENTAL, Phase 1/2/3 (see ../../PYTHON_PORT.md).
+// pymain_baremetal.c -- EXPERIMENTAL (see ../../PYTHON_PORT.md, whose
+// Phase 1/2/3 built and boot-verified everything below: frozen
+// bootstrap modules, real sockets via _socket, and real filesystem
+// imports off /pylib). Runs PYMAIN_SCRIPT_PATH (a real .py file on the
+// EXT2 disk image, see port/python_port/install-stdlib-phase3.sh for
+// how to put files there) as the program -- replace that file's
+// content to run something else; nothing here needs to change.
+//
 // This port's own "main()" for the interpreter, in place of CPython's
 // normal Programs/python.c (Py_BytesMain(argc, argv), which drives full
 // command-line parsing and Modules/getpath.c's filesystem-searching
@@ -30,8 +37,17 @@
 // no new C code needed here either, same story as Phase 2's
 // _socket.
 #include "Python.h"
+#include <stdio.h>
 
 extern void baremetal_install_frozen_modules(void);
+
+// The program to run -- a real file on the EXT2 disk image (Phase 3),
+// not baked into this binary. Change this (or, better, make it
+// something install-stdlib-phase3.sh-adjacent tooling writes
+// per-deployment) rather than hand-editing Python source into this .c
+// file the way pymain_baremetal.c's own Phase 1/2/3 test snippets used
+// to.
+#define PYMAIN_SCRIPT_PATH "/pylib/main.py"
 
 int main(void)
 {
@@ -110,58 +126,22 @@ int main(void)
 		"encodings.__path__.append('/pylib/encodings')\n"
 	);
 
-	// Phase 2 (see PYTHON_PORT.md): exercises _socket (the C extension
-	// module, Modules/socketmodule.c -- see config_baremetal.c) end to
-	// end -- module init, its constant tables, and a real socket()/
-	// bind()/close() round trip through posix_shim.c -> net_shim.c.
-	// No getsockname()/getpeername() here -- not in posix_shim.c's
-	// SYS_ dispatch table (-ENOSYS), a real gap, not a test omission.
-	// Deliberately does *not* attempt a real connect()/gethostbyname()
-	// either: this build's host environment has tap0 configured but
-	// down (no carrier), which is a test-host networking setup
-	// question (see this repo's own 2-run.sh warning), not something
-	// Phase 2's code needs a working network to prove. `import socket`
-	// (the pure-Python wrapper in Lib/socket.py) isn't available yet
-	// either -- that .py file isn't frozen or on disk, only _socket is.
-	PyRun_SimpleString(
-		"import _socket\n"
-		"print('_socket constants:', _socket.AF_INET, _socket.SOCK_STREAM)\n"
-		"s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)\n"
-		"print('socket() fileno:', s.fileno())\n"
-		"s.bind(('0.0.0.0', 0))\n"
-		"print('bind() ok')\n"
-		"s.close()\n"
-		"print('close() ok')\n"
-		"print(1 + 1)\n"
-	);
+	// Run the actual program -- see PYMAIN_SCRIPT_PATH's own comment.
+	// PyRun_SimpleFileExFlags (not PyRun_AnyFileExFlags) always treats
+	// this as a plain script, not an interactive prompt -- isatty()
+	// isn't a meaningful question for an EXT2 file, and there's no
+	// real terminal on the other end of this port's serial console
+	// input path to be interactive with anyway.
+	int rc;
+	FILE *fp = fopen(PYMAIN_SCRIPT_PATH, "r");
+	if (fp != NULL) {
+		rc = PyRun_SimpleFileExFlags(fp, PYMAIN_SCRIPT_PATH, 1, NULL);
+	} else {
+		fprintf(stderr, "pymain_baremetal: could not open " PYMAIN_SCRIPT_PATH "\n");
+		rc = 1;
+	}
 
-	// Phase 3 (see file header): real filesystem imports off /pylib --
-	// works now because of the encodings.__path__ patch above.
-	// encodings.ascii isn't frozen (only encodings/__init__.py,
-	// .aliases, .utf_8 are), so a successful import here can only be
-	// coming from the real /pylib/encodings/ascii.py file, found via
-	// PathFinder walking the patched __path__.
-	PyRun_SimpleString(
-		"import encodings.ascii\n"
-		"print('encodings.ascii:', encodings.ascii.getregentry().name)\n"
-	);
-
-	// json was never frozen at all (Phase 1/2 didn't touch it) --
-	// success here can only be real PathFinder-driven filesystem
-	// imports off /pylib, exercising json's own 4-file package plus
-	// its dependency closure (collections/re/enum/functools/etc --
-	// see install-stdlib-phase3.sh's own comment for how that list was
-	// derived) and a real package-relative import (json/decoder.py's
-	// "from json import scanner"). Run as its own PyRun_SimpleString
-	// call so the encodings.ascii outcome above can't affect it either
-	// way.
-	PyRun_SimpleString(
-		"import json\n"
-		"print('json.dumps:', json.dumps({'a': [1, 2, 3]}))\n"
-		"print('json.loads:', json.loads('{\"a\": [1, 2, 3]}'))\n"
-	);
-
-	return Py_FinalizeEx() < 0 ? 1 : 0;
+	return (Py_FinalizeEx() < 0 || rc != 0) ? 1 : 0;
 
 fail:
 	PyConfig_Clear(&config);
