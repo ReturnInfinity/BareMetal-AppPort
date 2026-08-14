@@ -256,6 +256,57 @@ long net_shim_bind(long fd, const void *addr, long addrlen)
 	return tcp_bind(s->pcb, &ip, lwip_ntohs(sin->sin_port)) == ERR_OK ? 0 : -EADDRINUSE;
 }
 
+// getsockname()/getpeername() -- found missing (OPENISSUES.md's
+// Networking section doesn't call these out by name, PYTHON.md's Phase
+// 2 does) while boot-testing socketserver.TCPServer.server_bind(),
+// which calls getsockname() right after bind() to learn the port a
+// bind to port 0 actually picked. No new state needed: tcp_pcb/udp_pcb
+// (both built on lwIP's IP_PCB base) already track local_ip/local_port
+// once bind() succeeds and remote_ip/remote_port once a connection is
+// established -- this just reads them back out, the same
+// pcb-field-to-sockaddr_in translation net_shim_accept() already does
+// for the accepted connection's remote address.
+long net_shim_getsockname(long fd, void *addr, socklen_t *addrlenp)
+{
+	struct bsock *s = &socks[fd - SOCK_FD_BASE];
+	if (!addr || !addrlenp || *addrlenp < (socklen_t)sizeof(struct sockaddr_in))
+		return -EINVAL;
+
+	struct sockaddr_in sin;
+	memset(&sin, 0, sizeof(sin));
+	sin.sin_family = AF_INET;
+	if (s->type == SOCK_DGRAM) {
+		sin.sin_port = lwip_htons(s->upcb->local_port);
+		sin.sin_addr.s_addr = s->upcb->local_ip.addr;
+	} else {
+		sin.sin_port = lwip_htons(s->pcb->local_port);
+		sin.sin_addr.s_addr = s->pcb->local_ip.addr;
+	}
+	memcpy(addr, &sin, sizeof(sin));
+	*addrlenp = sizeof(sin);
+
+	return 0;
+}
+
+long net_shim_getpeername(long fd, void *addr, socklen_t *addrlenp)
+{
+	struct bsock *s = &socks[fd - SOCK_FD_BASE];
+	if (!addr || !addrlenp || *addrlenp < (socklen_t)sizeof(struct sockaddr_in))
+		return -EINVAL;
+	if (s->type != SOCK_STREAM || s->state != SK_CONNECTED)
+		return -ENOTCONN;
+
+	struct sockaddr_in sin;
+	memset(&sin, 0, sizeof(sin));
+	sin.sin_family = AF_INET;
+	sin.sin_port = lwip_htons(s->pcb->remote_port);
+	sin.sin_addr.s_addr = s->pcb->remote_ip.addr;
+	memcpy(addr, &sin, sizeof(sin));
+	*addrlenp = sizeof(sin);
+
+	return 0;
+}
+
 long net_shim_listen(long fd, long backlog)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];

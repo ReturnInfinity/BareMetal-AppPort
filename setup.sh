@@ -412,6 +412,9 @@ PYTHON_BUILTIN_SRCS="
 	Modules/_weakref.c Modules/_abc.c Modules/_functoolsmodule.c
 	Modules/_localemodule.c Modules/_operator.c Modules/_stat.c
 	Modules/symtablemodule.c Modules/gcmodule.c Modules/socketmodule.c
+	Modules/selectmodule.c Modules/mathmodule.c Modules/_struct.c
+	Modules/binascii.c Modules/_randommodule.c Modules/arraymodule.c
+	Modules/unicodedata.c
 "
 
 for src in $PYTHON_SRCS; do
@@ -426,6 +429,24 @@ gcc $PYTHON_CORE_CFLAGS $PYTHON_GETPATH_DEFINES -o "$BUILD_DIR/python_Modules_ge
 for src in $PYTHON_BUILTIN_SRCS; do
 	obj="$BUILD_DIR/python_$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')"
 	gcc $PYTHON_BUILTIN_CFLAGS -o "$obj" "$PYTHON_DIR/$src"
+done
+
+# _sha2 (random.py's preferred, non-hashlib source of sha512 -- see
+# random.py's own "hashlib is pretty heavy to load, try lean internal
+# module first" comment) needs two extra files beyond the single-file
+# shape every other PYTHON_BUILTIN_SRCS module has: sha2module.c itself
+# plus the HACL*-generated Hacl_Hash_SHA2.c it wraps (Modules/Setup.
+# stdlib.in's own build rule for it). HACL's own code is portable C
+# with no OS dependency (no syscalls, no libc calls beyond memcpy/
+# memset) -- confirmed by checking Modules/_hacl/ for any unistd.h/
+# sys/*.h/pthread use before adding this, unlike _ssl's real dependency
+# on a TLS library this port doesn't have. Needs its own extra -I/-D
+# flags (copied from Makefile.pre.in's LIBHACL_CFLAGS), not the same
+# PYTHON_BUILTIN_CFLAGS as every other module here.
+PYTHON_SHA2_CFLAGS="$PYTHON_BUILTIN_CFLAGS -I $PYTHON_DIR/Modules/_hacl/include -D_BSD_SOURCE -D_DEFAULT_SOURCE"
+for src in Modules/sha2module.c Modules/_hacl/Hacl_Hash_SHA2.c; do
+	obj="$BUILD_DIR/python_$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')"
+	gcc $PYTHON_SHA2_CFLAGS -o "$obj" "$PYTHON_DIR/$src"
 done
 
 # Unlike every other library here, CPython's whole point is the

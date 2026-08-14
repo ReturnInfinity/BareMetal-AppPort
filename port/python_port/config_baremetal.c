@@ -52,6 +52,45 @@ extern PyObject* PyInit__string(void);
  * above. */
 extern PyObject* PyInit__socket(void);
 
+/* select()/poll() are already real (posix_shim.c's "immediate ready,
+ * then block for real in the read/write/accept that follows" shim,
+ * see that file's own comment) -- selectmodule.c's plain select()
+ * path needs no HAVE_* gating beyond what pyconfig.h's glibc-derived
+ * base already sets (HAVE_SYS_SELECT_H). math/_struct/binascii/
+ * _random are all single-file, HAVE_*-gate-free Modules/*.c (verified
+ * against this release's source directly), the same "just compile and
+ * register" shape as _socket above -- added because http.server's
+ * dependency closure (socketserver -> selectors -> select,
+ * email/base64 -> struct/binascii, random -> _random/math) needs them,
+ * not because any of them individually needed new port work. */
+extern PyObject* PyInit_select(void);
+extern PyObject* PyInit_math(void);
+extern PyObject* PyInit__struct(void);
+extern PyObject* PyInit_binascii(void);
+extern PyObject* PyInit__random(void);
+
+/* random.py's own "hashlib is pretty heavy to load, try lean internal
+ * module first" -- sha2module.c + the HACL* Hacl_Hash_SHA2.c it wraps,
+ * both portable C with no OS dependency, added instead of porting all
+ * of hashlib.py's own multi-module fallback chain. */
+extern PyObject* PyInit__sha2(void);
+
+/* socket.py's own send_fds()/recv_fds() gate their `import array` on
+ * `hasattr(_socket.socket, "sendmsg")` -- true here (the method exists
+ * on the type even though net_shim.c has no real sendmsg/recvmsg
+ * backing it), so this is a hard, not merely optional, dependency in
+ * practice. Single-file, HAVE_*-gate-free like select/math/_struct/
+ * binascii/_random above. */
+extern PyObject* PyInit_array(void);
+
+/* socket.py's getfqdn("0.0.0.0")/gethostbyaddr() path (server_bind()
+ * on any plain HTTPServer(("0.0.0.0", port), ...)) needs
+ * encodings.idna, which needs unicodedata.ucd_3_2_0 -- single-file,
+ * HAVE_*-gate-free like the others (its Unicode tables are
+ * unicodedata_db.h/unicodename_db.h, already generated and vendored
+ * alongside unicodedata.c, no external data file). */
+extern PyObject* PyInit_unicodedata(void);
+
 struct _inittab _PyImport_Inittab[] = {
 	{"atexit", PyInit_atexit},
 	{"faulthandler", PyInit_faulthandler},
@@ -102,6 +141,14 @@ struct _inittab _PyImport_Inittab[] = {
 
 	/* See extern declaration's comment above */
 	{"_socket", PyInit__socket},
+	{"select", PyInit_select},
+	{"math", PyInit_math},
+	{"_struct", PyInit__struct},
+	{"binascii", PyInit_binascii},
+	{"_random", PyInit__random},
+	{"_sha2", PyInit__sha2},
+	{"array", PyInit_array},
+	{"unicodedata", PyInit_unicodedata},
 
 	/* Sentinel */
 	{0, 0}

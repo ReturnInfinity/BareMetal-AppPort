@@ -44,6 +44,19 @@ fi
 
 # name:destination-subdir pairs, one per line -- destination-subdir is
 # "." for /pylib itself.
+#
+# The block below (_weakrefset.py through weakref.py) is the traced
+# closure of `import http.server, socketserver, threading` on a real
+# CPython (build/host-python-build/python -S -c "import ...", diffing
+# sys.modules before/after, same method as the json/encodings.ascii
+# block above) -- added once selectmodule.c/mathmodule.c/_struct.c/
+# binascii.c/_randommodule.c were wired into config_baremetal.c/
+# setup.sh's PYTHON_BUILTIN_SRCS (they, not this block, were the real
+# missing pieces: os/os.path/posixpath/stat/genericpath are already
+# frozen -- see Python/frozen.c -- and ssl/zlib/_datetime are each
+# behind a real try/except ImportError in the stdlib source itself, so
+# skipping _ssl/zlib and adding _pydatetime.py as datetime.py's
+# fallback avoided needing those three C extensions at all).
 FILES="
 _collections_abc.py:.
 copyreg.py:.
@@ -54,6 +67,7 @@ operator.py:.
 reprlib.py:.
 types.py:.
 collections/__init__.py:collections
+collections/abc.py:collections
 json/__init__.py:json
 json/decoder.py:json
 json/encoder.py:json
@@ -64,6 +78,52 @@ re/_compiler.py:re
 re/_constants.py:re
 re/_parser.py:re
 encodings/ascii.py:encodings
+encodings/idna.py:encodings
+stringprep.py:.
+_weakrefset.py:.
+base64.py:.
+bisect.py:.
+calendar.py:.
+copy.py:.
+datetime.py:.
+_pydatetime.py:.
+fnmatch.py:.
+ipaddress.py:.
+locale.py:.
+mimetypes.py:.
+quopri.py:.
+random.py:.
+selectors.py:.
+shutil.py:.
+socket.py:.
+socketserver.py:.
+string.py:.
+struct.py:.
+threading.py:.
+warnings.py:.
+weakref.py:.
+email/__init__.py:email
+email/_encoded_words.py:email
+email/_parseaddr.py:email
+email/_policybase.py:email
+email/base64mime.py:email
+email/charset.py:email
+email/encoders.py:email
+email/errors.py:email
+email/feedparser.py:email
+email/header.py:email
+email/iterators.py:email
+email/message.py:email
+email/parser.py:email
+email/quoprimime.py:email
+email/utils.py:email
+html/__init__.py:html
+html/entities.py:html
+http/__init__.py:http
+http/client.py:http
+http/server.py:http
+urllib/__init__.py:urllib
+urllib/parse.py:urllib
 "
 
 CMDFILE="$(mktemp)"
@@ -75,6 +135,10 @@ trap 'rm -f "$CMDFILE"' EXIT
 	echo "mkdir /pylib/json"
 	echo "mkdir /pylib/re"
 	echo "mkdir /pylib/encodings"
+	echo "mkdir /pylib/email"
+	echo "mkdir /pylib/html"
+	echo "mkdir /pylib/http"
+	echo "mkdir /pylib/urllib"
 	while IFS= read -r line; do
 		[ -z "$line" ] && continue
 		src="${line%%:*}"

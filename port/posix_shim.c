@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/utsname.h>
 
 #include "libBareMetal.h"
 #include "posix_shim.h"
@@ -456,6 +457,37 @@ static long sys_getcwd(char *buf, size_t size)
 	return ext4_shim_getcwd(buf, size);
 }
 
+// uname() -- OPENISSUES.md's Process model section documents this as
+// cut (no pid/uid/process-table model to report), and pyconfig_
+// baremetal.h leaves HAVE_UNAME undefined so Python-level os.uname()
+// stays off -- but musl's gethostname() (unistd.h) is implemented
+// purely in terms of uname()'s nodename field (see musl's own
+// src/unistd/gethostname.c), and Lib/socket.py's getfqdn() calls
+// gethostname() for any of the common "bind to everything" addresses
+// ("0.0.0.0", "::", or no host at all) -- exactly what
+// http.server.HTTPServer.server_bind() does on every plain `HTTPServer(
+// ("0.0.0.0", port), ...)`. So unlike getpid()/getuid()/etc (genuinely
+// meaningless with no process/user model), a hostname is real,
+// expected input to ordinary networking code -- answered here with a
+// fixed, honest placeholder rather than -ENOSYS, the same "static but
+// real" choice WALLCLOCK-backed clocks already make elsewhere in this
+// file.
+static long sys_uname(long buf_addr)
+{
+	struct utsname *u = (struct utsname *)buf_addr;
+	if (!u)
+		return -EFAULT;
+
+	memset(u, 0, sizeof(*u));
+	strcpy(u->sysname, "BareMetal");
+	strcpy(u->nodename, "baremetal");
+	strcpy(u->release, "1.0");
+	strcpy(u->version, "BareMetal-Firecracker");
+	strcpy(u->machine, "x86_64");
+
+	return 0;
+}
+
 static long sys_getdents(long fd, void *buf, size_t len)
 {
 	if (!ext4_shim_is_fd(fd))
@@ -644,6 +676,16 @@ static long sys_accept4(long fd, long addr, long addrlenp, long flags)
 static long sys_connect(long fd, long addr, long addrlen)
 {
 	return net_shim_connect(fd, (const void *)addr, addrlen);
+}
+
+static long sys_getsockname(long fd, long addr, long addrlenp)
+{
+	return net_shim_getsockname(fd, (void *)addr, (socklen_t *)addrlenp);
+}
+
+static long sys_getpeername(long fd, long addr, long addrlenp)
+{
+	return net_shim_getpeername(fd, (void *)addr, (socklen_t *)addrlenp);
 }
 
 static long sys_sendto(long fd, long buf, long len, long flags, long addr, long addrlen)
@@ -836,6 +878,7 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_chdir:                                     return sys_chdir((const char *)a1);
 	case SYS_fchdir:                                     return sys_fchdir(a1);
 	case SYS_getcwd:                                       return sys_getcwd((char *)a1, (size_t)a2);
+	case SYS_uname:                                        return sys_uname(a1);
 	// musl's readdir() on this arch actually issues SYS_getdents64,
 	// not the legacy SYS_getdents its own dirent.h still declares --
 	// both land here since ext4_shim_getdents() fills musl's own
@@ -889,6 +932,8 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_accept:         return sys_accept4(a1, a2, a3, 0);
 	case SYS_accept4:         return sys_accept4(a1, a2, a3, a4);
 	case SYS_connect:          return sys_connect(a1, a2, a3);
+	case SYS_getsockname:       return sys_getsockname(a1, a2, a3);
+	case SYS_getpeername:        return sys_getpeername(a1, a2, a3);
 	case SYS_sendto:            return sys_sendto(a1, a2, a3, a4, a5, a6);
 	case SYS_recvfrom:           return sys_recvfrom(a1, a2, a3, a4, a5, a6);
 
@@ -908,8 +953,23 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 
 	// No real fd flags/locking to speak of; accept and ignore rather
 	// than fail callers (e.g. open(..., O_CLOEXEC)'s F_SETFD) that
-	// don't check the result anyway.
+	// don't check the result anyway. F_DUPFD/F_DUPFD_CLOEXEC are the
+	// one exception: their return value isn't a status code but the
+	// new fd number itself, and this port has no real dup() (no
+	// SYS_dup case, HAVE_DUP left undefined -- see
+	// pyconfig_baremetal.h) -- blindly returning 0 here would silently
+	// hand back fd 0 (stdin) as a "successful" duplicate. Found via
+	// Python/fileutils.c's _Py_dup(), which every uncaught-exception
+	// traceback's source-line display goes through
+	// (Parser/tokenizer.c's _PyTokenizer_FindEncodingFilename): the
+	// bogus fd 0 made the tokenizer's encoding sniff read real stdin
+	// instead of the failing fcntl cleanly, hanging the VM forever on
+	// sys_read's blocking fd-0 path. Fail this specific case instead,
+	// same "let it fail cleanly rather than lie" choice HAVE_DUP
+	// already makes for real dup().
 	case SYS_fcntl:
+		if (a2 == F_DUPFD || a2 == F_DUPFD_CLOEXEC)
+			return -EINVAL;
 		return 0;
 
 	// No signal delivery, no thread list, on this port -- accept
