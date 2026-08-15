@@ -670,6 +670,65 @@ static long sys_clock_nanosleep(long clk_id, long flags, long req_addr, long rem
 }
 
 // -----------------------------------------------------------------------
+// getrandom() -- same RDRAND-with-RDTSC-fallback technique crt0.c's
+// fill_random() already uses to seed musl's stack-protector canary and
+// mallocng's hardening secret (see this port's OPENISSUES.md, "Missing
+// common syscalls"), just generalized to an arbitrary-length buffer and
+// exposed as a real syscall. Duplicated here rather than shared with
+// crt0.c (which can't call into this file -- it runs before .bss is
+// zeroed) or the other RDRAND call sites (sqlite_vfs.c,
+// entropy_hardware_poll.c, randombytes_baremetal.c) -- same
+// "duplicated rather than shared" choice sqlite_vfs.c's own copy
+// already makes, see that file's header.
+//
+// GRND_RANDOM/GRND_NONBLOCK/GRND_INSECURE are accepted and ignored:
+// there's no blocking entropy pool here to distinguish between --
+// RDRAND itself never blocks, and the RDTSC fallback is unconditional
+// on RDRAND being absent or exhausted, not a caller-selectable mode.
+// -----------------------------------------------------------------------
+
+static int has_rdrand(void)
+{
+	unsigned int eax, ebx, ecx, edx;
+	__asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1), "c"(0));
+	return (ecx >> 30) & 1;
+}
+
+static long sys_getrandom(long buf_addr, long buflen, long flags)
+{
+	unsigned char *buf = (unsigned char *)buf_addr;
+	int rdrand_ok = has_rdrand();
+	long n = 0;
+
+	(void)flags; // GRND_RANDOM/GRND_NONBLOCK/GRND_INSECURE -- see header above
+
+	if (buflen < 0)
+		return -EINVAL;
+
+	while (n < buflen) {
+		unsigned long v = 0;
+		int ok = 0;
+
+		if (rdrand_ok) {
+			for (int tries = 0; tries < 10 && !ok; tries++)
+				__asm__ volatile ("rdrand %0\n\tsetc %b1" : "=r"(v), "=q"(ok) :: "cc");
+		}
+
+		if (!ok) {
+			unsigned int lo, hi;
+			__asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+			v = ((unsigned long)hi << 32 | lo) ^ (unsigned long)buf ^ (unsigned long)n;
+		}
+
+		long chunk = buflen - n < (long)sizeof(v) ? buflen - n : (long)sizeof(v);
+		memcpy(buf + n, &v, chunk);
+		n += chunk;
+	}
+
+	return n;
+}
+
+// -----------------------------------------------------------------------
 // Networking (sockets) -- see net_shim.c/net_glue.c. IPv4 TCP/UDP only.
 // -----------------------------------------------------------------------
 
@@ -953,6 +1012,7 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_clock_gettime:                    return sys_clock_gettime(a1, a2);
 	case SYS_nanosleep:                       return sys_nanosleep(a1, a2);
 	case SYS_clock_nanosleep:                return sys_clock_nanosleep(a1, a2, a3, a4);
+	case SYS_getrandom:                     return sys_getrandom(a1, a2, a3);
 	case SYS_brk:                             return sys_brk(a1);
 	case SYS_mmap:                             return sys_mmap(a1, a2, a3, a4, a5, a6);
 	case SYS_munmap:                            return sys_munmap(a1, a2);

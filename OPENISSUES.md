@@ -114,11 +114,18 @@ Not implemented (all fall through to `-ENOSYS`):
   no wall-clock↔`TIMECOUNTER` conversion wired up yet, so a
   `CLOCK_REALTIME` absolute deadline is treated the same way for
   now — fine for "sleep until roughly now plus a bit", wrong otherwise.
-- `getrandom` — nothing backs `/dev/urandom`-equivalent randomness for
-  application code (musl's own internal entropy needs, e.g. the stack
-  canary and mallocng's hardening secret, are seeded via `crt0.c`'s
-  `fill_random()` using `rdrand`/`rdtsc`, but that path isn't exposed
-  as a syscall).
+- `getrandom` is implemented (`posix_shim.c`), on the same
+  `rdrand`-with-`rdtsc`-fallback technique `crt0.c`'s `fill_random()`
+  already uses to seed musl's own internal entropy needs (stack canary,
+  mallocng's hardening secret), just generalized to an arbitrary-length
+  buffer and exposed as a real syscall — duplicated rather than shared
+  with `crt0.c` (which runs before `.bss` is zeroed, so can't call into
+  `posix_shim.c` yet) or the other `rdrand` call sites (`sqlite_vfs.c`,
+  `entropy_hardware_poll.c`, `randombytes_baremetal.c`), same
+  "duplicated rather than shared" choice those already make.
+  `GRND_RANDOM`/`GRND_NONBLOCK`/`GRND_INSECURE` are accepted and
+  ignored — `rdrand` itself never blocks, so there's no blocking
+  entropy pool here to distinguish between.
 - `epoll_*` — no way to multiplex across multiple fds and learn
   *which* is ready first. `poll`/`select` themselves are implemented
   (`posix_shim.c`), but not as a real wait: every fd this port
@@ -378,10 +385,11 @@ role as every other section here:
   files are added to `/pylib` the same way.
 - **No hash randomization** -- equivalent to `PYTHONHASHSEED=0`,
   standard and documented, not a bug: `Python/bootstrap_hash.c` treats
-  finding no entropy source as a fatal boot error otherwise, and this
-  port doesn't expose one to app code yet (see "Missing common
-  syscalls" above -- no `getrandom()`). `dict`/`set` iteration order
-  and `hash()` values are deterministic, not random.
+  finding no entropy source as a fatal boot error otherwise. A real
+  `getrandom()` now exists (see "Missing common syscalls" above), but
+  `pyconfig.h` doesn't define `HAVE_GETRANDOM` and this hasn't been
+  wired up/tested from the Python side yet, so `dict`/`set` iteration
+  order and `hash()` values remain deterministic, not random, for now.
 - **Every other cut this port already makes elsewhere applies the same
   way to `os.*`**: no `os.fork`/`exec*`/`subprocess`/`multiprocessing`
   (no process model), no `os.chmod`/`chown`/`umask` (no uid/gid model),
