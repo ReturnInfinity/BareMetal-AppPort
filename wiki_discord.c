@@ -62,10 +62,11 @@
 #define DISCORD_WEBHOOK_URL "PUT_YOUR_WEBHOOK_HERE"
 #define CA_BUNDLE_PATH     "/etc/ssl/cacert.pem" // see curltest.c's file header
 
-// See curltest.c's set_ca_bundle() -- same disk-first, compiled-in-
-// fallback CA bundle source.
-extern const unsigned char cacert_pem[];
-extern const unsigned int cacert_pem_len;
+// See curltest.c's set_ca_bundle() and its matching comment -- same
+// disk-first, compiled-in-fallback CA bundle source, weak for the same
+// plain-*nix-program-buildable reason.
+__attribute__((weak)) const unsigned char cacert_pem[1];
+__attribute__((weak)) const unsigned int cacert_pem_len;
 
 #define USER_AGENT "BareMetal-wiki-discord/1.0 (https://github.com/ReturnInfinity/BareMetal-App)"
 

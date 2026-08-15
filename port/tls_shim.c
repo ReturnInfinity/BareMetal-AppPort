@@ -59,8 +59,16 @@
 // The same bundle, generated into build/cacert_data.c by
 // port/mbedtls_port/gen-cacert-data.sh and linked into every app (see
 // build-app.sh) -- the no-disk fallback, see this file's header.
-extern const unsigned char cacert_pem[];
-extern const unsigned int cacert_pem_len;
+//
+// Weak, with a real (empty) definition here rather than a bare
+// `extern` -- keeps this file linkable (and this fallback branch
+// harmlessly inert, not a null-pointer read) as a plain *nix program
+// too when cacert_data.o isn't part of the link, same as every other
+// file in this port that documents itself as also buildable that way.
+// build-app.sh's cacert_data.o provides a real, non-weak definition
+// that overrides these for the actual BareMetal build.
+__attribute__((weak)) const unsigned char cacert_pem[1];
+__attribute__((weak)) const unsigned int cacert_pem_len;
 
 struct tls_conn {
 	int in_use;

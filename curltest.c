@@ -44,9 +44,13 @@
 
 // See this file's header. cacert_pem/cacert_pem_len come from
 // build/cacert_data.c (port/mbedtls_port/gen-cacert-data.sh), linked
-// into every app the same way tls_shim.c's own fallback is.
-extern const unsigned char cacert_pem[];
-extern const unsigned int cacert_pem_len;
+// into every app the same way tls_shim.c's own fallback is. Weak, with
+// a real (empty) definition here rather than a bare `extern` -- see
+// tls_shim.c's matching comment for why: keeps this buildable as a
+// plain *nix program too (this file's header) when cacert_data.o isn't
+// part of the link.
+__attribute__((weak)) const unsigned char cacert_pem[1];
+__attribute__((weak)) const unsigned int cacert_pem_len;
 
 static char response_buf[RESPONSE_BUF_SIZE];
 static size_t response_len;
