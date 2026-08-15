@@ -20,5 +20,7 @@ long net_shim_recv(long fd, void *buf, size_t len, long flags);
 long net_shim_sendto(long fd, const void *buf, size_t len, long flags, const void *addr, long addrlen);
 long net_shim_recvfrom(long fd, void *buf, size_t len, long flags, void *addr, socklen_t *addrlenp);
 long net_shim_close(long fd);
+long net_shim_setsockopt(long fd, long level, long optname, const void *optval, long optlen);
+long net_shim_getsockopt(long fd, long level, long optname, void *optval, socklen_t *optlenp);
 
 #endif

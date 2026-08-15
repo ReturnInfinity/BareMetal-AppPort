@@ -9,22 +9,37 @@
 // (connect/accept/send/recv) runs its own synchronous loop that
 // calls net_poll() (drains the NIC, services lwIP's timers, which
 // fires our registered callbacks synchronously) until the operation
-// either completes or NET_BLOCK_TIMEOUT_MS elapses.
+// either completes or that socket's timeout elapses.
 //
-// That timeout is a deliberate departure from POSIX (which blocks
-// indefinitely): this is a single-threaded, unikernel-style VM with
-// no way to interrupt or recover a truly stuck blocking call, so a
-// bounded wait is safer than risking a permanently hung VM.
+// Each socket carries its own SO_RCVTIMEO (accept/recv/recvfrom) and
+// SO_SNDTIMEO (connect/send) timeout in milliseconds, settable via
+// setsockopt() and defaulting to NET_BLOCK_TIMEOUT_MS. A value of 0
+// (the real POSIX meaning of an unset/zeroed SO_*TIMEO) blocks
+// indefinitely instead of timing out -- safe to offer now that
+// threads exist (thread_shim.c): a call parked here no longer risks
+// wedging the whole VM, since the round-robin timer tick keeps other
+// threads running regardless, and the EINTR check below already lets
+// another thread break it out early via a signal
+// (pthread_kill()/pthread_cancel()). The bounded 30s default remains
+// for callers that never touch setsockopt(), matching this port's
+// original stance of not blocking forever by surprise.
 //
-// Scope: IPv4 TCP and UDP only (no raw sockets, no setsockopt options
-// actually honored, no non-blocking mode). Good enough for a TCP
-// client or a single-threaded accept-serve-close TCP server, or a
+// connect() doesn't have its own dedicated timeout socket option in
+// real POSIX, but ties its bound to SO_SNDTIMEO here too -- the
+// closest fit among the two this port exposes, and consistent with
+// send() sharing the same option.
+//
+// Scope: IPv4 TCP and UDP only (no raw sockets, no non-blocking mode;
+// only SO_RCVTIMEO/SO_SNDTIMEO are honored by setsockopt(), every
+// other option is still an accept-and-ignore stub). Good enough for a
+// TCP client or a single-threaded accept-serve-close TCP server, or a
 // UDP client/server exchanging whole datagrams.
 // =============================================================================
 
 #include <string.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 
 #include "lwip/tcp.h"
@@ -91,6 +106,13 @@ struct bsock {
 	// handed to the app yet, referenced by socket-table slot index.
 	int acceptq[ACCEPTQ_MAX];
 	int acceptq_head, acceptq_tail, acceptq_count;
+
+	// SO_RCVTIMEO/SO_SNDTIMEO, in milliseconds; 0 means block
+	// indefinitely (real POSIX semantics). Defaulted to
+	// NET_BLOCK_TIMEOUT_MS wherever a slot starts life -- see
+	// net_shim_socket() and on_accept().
+	long rcv_timeout_ms;
+	long snd_timeout_ms;
 };
 
 static struct bsock socks[SOCK_MAX];
@@ -106,6 +128,15 @@ static int alloc_slot(void)
 static void reset_sock(struct bsock *s)
 {
 	memset(s, 0, sizeof(*s));
+	s->rcv_timeout_ms = NET_BLOCK_TIMEOUT_MS;
+	s->snd_timeout_ms = NET_BLOCK_TIMEOUT_MS;
+}
+
+// timeout_ms == 0 means block indefinitely (SO_RCVTIMEO/SO_SNDTIMEO's
+// real POSIX meaning for an unset/zeroed value) -- never times out.
+static int block_timed_out(u32_t start, long timeout_ms)
+{
+	return timeout_ms != 0 && (u32_t)(sys_now() - start) >= (u32_t)timeout_ms;
 }
 
 int net_shim_is_fd(long fd)
@@ -341,7 +372,7 @@ long net_shim_accept(long fd, void *addr, socklen_t *addrlenp)
 		net_poll();
 		if (s->acceptq_count != 0)
 			break;
-		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
+		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -EAGAIN;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 		if (thread_shim_take_eintr())
@@ -402,7 +433,7 @@ long net_shim_connect(long fd, const void *addr, long addrlen)
 		net_poll();
 		if (s->state != SK_CONNECTING)
 			break;
-		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
+		if (block_timed_out(start, s->snd_timeout_ms))
 			return -ETIMEDOUT;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 		if (thread_shim_take_eintr())
@@ -465,7 +496,7 @@ static long udp_wait_rx(struct bsock *s)
 		net_poll();
 		if (s->udpq_count != 0)
 			break;
-		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
+		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -ETIMEDOUT;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 		if (thread_shim_take_eintr())
@@ -500,7 +531,7 @@ long net_shim_recv(long fd, void *buf, size_t len, long flags)
 		net_poll();
 		if (s->rx_head || s->eof || s->state == SK_ERROR)
 			continue;
-		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
+		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -ETIMEDOUT;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 		if (thread_shim_take_eintr())
@@ -602,7 +633,7 @@ long net_shim_send(long fd, const void *buf, size_t len, long flags)
 		if (s->state == SK_ERROR)
 			return -ECONNRESET;
 		net_poll();
-		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
+		if (block_timed_out(start, s->snd_timeout_ms))
 			return -ETIMEDOUT;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
 		if (thread_shim_take_eintr())
@@ -628,6 +659,53 @@ long net_shim_sendto(long fd, const void *buf, size_t len, long flags, const voi
 	ip.addr = sin->sin_addr.s_addr;
 
 	return udp_do_send(s, buf, len, &ip, lwip_ntohs(sin->sin_port));
+}
+
+// Only SO_RCVTIMEO/SO_SNDTIMEO actually do anything -- every other
+// level/optname (SO_REUSEADDR, TCP_NODELAY, ...) is still an
+// accept-and-ignore stub, same as before this existed (see
+// posix_shim.c's sys_setsockopt()).
+long net_shim_setsockopt(long fd, long level, long optname, const void *optval, long optlen)
+{
+	struct bsock *s = &socks[fd - SOCK_FD_BASE];
+
+	if (level != SOL_SOCKET || (optname != SO_RCVTIMEO && optname != SO_SNDTIMEO))
+		return 0;
+	if (!optval || (size_t)optlen < sizeof(struct timeval))
+		return -EINVAL;
+
+	const struct timeval *tv = optval;
+	if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= 1000000)
+		return -EINVAL;
+
+	long ms = tv->tv_sec * 1000L + tv->tv_usec / 1000L;
+
+	if (optname == SO_RCVTIMEO)
+		s->rcv_timeout_ms = ms;
+	else
+		s->snd_timeout_ms = ms;
+
+	return 0;
+}
+
+long net_shim_getsockopt(long fd, long level, long optname, void *optval, socklen_t *optlenp)
+{
+	struct bsock *s = &socks[fd - SOCK_FD_BASE];
+
+	if (level != SOL_SOCKET || (optname != SO_RCVTIMEO && optname != SO_SNDTIMEO))
+		return 0;
+	if (!optval || !optlenp || (size_t)*optlenp < sizeof(struct timeval))
+		return -EINVAL;
+
+	long ms = (optname == SO_RCVTIMEO) ? s->rcv_timeout_ms : s->snd_timeout_ms;
+
+	struct timeval tv;
+	tv.tv_sec = ms / 1000;
+	tv.tv_usec = (ms % 1000) * 1000;
+	memcpy(optval, &tv, sizeof(tv));
+	*optlenp = sizeof(tv);
+
+	return 0;
 }
 
 long net_shim_close(long fd)

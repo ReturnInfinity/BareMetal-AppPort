@@ -719,6 +719,25 @@ static long sys_recvfrom(long fd, long buf, long len, long flags, long addr, lon
 	return net_shim_recvfrom(fd, (void *)buf, (size_t)len, flags, (void *)addr, (socklen_t *)addrlenp);
 }
 
+// SO_RCVTIMEO/SO_SNDTIMEO are wired through to net_shim.c (they bound
+// how long its blocking accept/connect/send/recv loops run -- see its
+// file header); every other option, and every non-socket fd, is still
+// an accept-and-ignore stub -- there's nothing else on this port
+// (SO_REUSEADDR, TCP_NODELAY, ...) that actually has a knob behind it.
+static long sys_setsockopt(long fd, long level, long optname, long optval, long optlen)
+{
+	if (net_shim_is_fd(fd))
+		return net_shim_setsockopt(fd, level, optname, (const void *)optval, optlen);
+	return 0;
+}
+
+static long sys_getsockopt(long fd, long level, long optname, long optval, long optlenp)
+{
+	if (net_shim_is_fd(fd))
+		return net_shim_getsockopt(fd, level, optname, (void *)optval, (socklen_t *)optlenp);
+	return 0;
+}
+
 // -----------------------------------------------------------------------
 // select()/poll()
 //
@@ -978,12 +997,11 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_select:      return sys_select(a1, a2, a3, a4, a5);
 	case SYS_poll:         return sys_poll(a1, a2, a3);
 
-	// No options are actually honored (e.g. SO_REUSEADDR, SO_RCVTIMEO);
-	// accept and ignore rather than fail callers that merely set them
-	// defensively.
-	case SYS_setsockopt:
-	case SYS_getsockopt:
-		return 0;
+	// SO_RCVTIMEO/SO_SNDTIMEO are honored (see net_shim.c); every
+	// other option is still accept-and-ignore -- see sys_setsockopt()/
+	// sys_getsockopt() above.
+	case SYS_setsockopt: return sys_setsockopt(a1, a2, a3, a4, a5);
+	case SYS_getsockopt: return sys_getsockopt(a1, a2, a3, a4, a5);
 
 	// No real fd flags/locking to speak of; accept and ignore rather
 	// than fail callers (e.g. open(..., O_CLOEXEC)'s F_SETFD) that

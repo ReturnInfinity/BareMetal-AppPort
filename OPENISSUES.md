@@ -215,18 +215,26 @@ Not implemented (all fall through to `-ENOSYS`):
   configures (the fc `ip=` param's optional `dns0-ip`/`dns1-ip`
   fields, DHCP's DNS option, or -- if neither provides one -- a
   fallback to 8.8.8.8/1.1.1.1; see `dns_apply_fallback()`).
-- **All blocking socket calls (`connect`/`accept`/`send`/`recv`) have
-  a hard-coded 30s timeout**, not indefinite POSIX blocking. Deliberate
-  — there's no way to interrupt or recover a truly stuck call in a
-  single-threaded unikernel VM — but it means a legitimately
-  slow/idle connection (e.g. a server waiting hours for the next
-  client) will be torn down.
+- **Blocking socket calls (`connect`/`accept`/`send`/`recv`) default
+  to a 30s timeout, but it's now per-socket and overridable via
+  `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)`** (`net_shim.c`) — `accept`/
+  `recv`/`recvfrom` bound on `SO_RCVTIMEO`, `connect`/`send` on
+  `SO_SNDTIMEO` (`connect` has no dedicated timeout option in real
+  POSIX; this port ties it to `SO_SNDTIMEO` as the closest fit). A
+  value of `{0, 0}` means indefinite POSIX blocking, same as real
+  `SO_RCVTIMEO`/`SO_SNDTIMEO` semantics — safe to offer now that
+  threads exist (see "Process model" above): a call parked here no
+  longer risks wedging the whole VM, and another thread can still
+  break it out early via `pthread_kill()`/`pthread_cancel()`
+  (delivered through the same signal mechanism described above). The
+  30s default remains for any caller that never touches
+  `setsockopt()`.
 - **No non-blocking mode.** `SOCK_NONBLOCK`/`O_NONBLOCK` and
   `MSG_DONTWAIT` are accepted but not honored — every socket call
   blocks (up to the timeout above) regardless.
-- **`setsockopt`/`getsockopt` are accept-and-ignore stubs.** Nothing
-  like `SO_REUSEADDR`, `SO_RCVTIMEO`, or `TCP_NODELAY` actually takes
-  effect.
+- **`setsockopt`/`getsockopt` only honor `SO_RCVTIMEO`/`SO_SNDTIMEO`**
+  (above); every other option — `SO_REUSEADDR`, `TCP_NODELAY`, etc. —
+  is still an accept-and-ignore stub with no effect.
 - **Unaccepted connections are leaked on listener `close()`.** If a
   listening socket is closed while connections are sitting in its
   accept queue (arrived but not yet `accept()`ed), those `tcp_pcb`s
