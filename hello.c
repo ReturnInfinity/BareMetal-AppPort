@@ -1,7 +1,7 @@
 #include <stdio.h>
 
-int main()
+int main(void)
 {
-    printf("Hello from C!\n");
-    return 0;
+	printf("Hello from C!\n");
+	return 0;
 }
