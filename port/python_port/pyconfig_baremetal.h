@@ -305,28 +305,37 @@
 #undef HAVE_WORKING_TZSET
 
 /* ---------------------------------------------------------------------
- * Networking -- Modules/socketmodule.c's own getaddrinfo fallback
- * (Modules/socketmodule.c: "#if !defined(HAVE_GETADDRINFO) ... #include
- * "getaddrinfo.c"") is CPython's *own* bundled RFC-2553 emulation layer
- * for platforms without a real one, and it's built in terms of
- * gethostbyname() -- exactly the function dns_shim.c already provides
- * (OPENISSUES.md's Networking section), the same "shadow gethostbyname
- * instead of trusting musl's real getaddrinfo()/resolv.conf" choice
- * curl_config.h already documents making for curl. Leaving
- * HAVE_GETADDRINFO undefined costs nothing new here -- it makes
- * socket.getaddrinfo() Just Work off dns_shim.c's resolver instead of
- * needing a hand-written replacement the way OPENISSUES.md's
- * networking section originally implied Python-side sockets would.
- * socket() itself and friends would still need a small module-level
- * shim mapping socketmodule.c's raw socket()/connect()/send()/recv()
- * calls onto net_shim.c's (SOCK_MAX=16 sockets, 30s timeout, no
- * SO_REUSEADDR/nonblocking -- same limits every other app here lives
- * with) instead of straight syscalls, the same relationship
- * sqlite_vfs.c has to ext4_shim.c/posix_shim.c -- not yet written, see
- * PYTHON.md's Phase 2.
+ * Networking -- dns_shim.c now provides real getaddrinfo()/
+ * getnameinfo()/freeaddrinfo() of its own (backed by the same
+ * dns_gethostbyname()-via-lwIP resolver gethostbyname() already used,
+ * OPENISSUES.md's Networking section), so both are defined here
+ * rather than left cut. This replaces an earlier choice to leave
+ * HAVE_GETADDRINFO/HAVE_GETNAMEINFO undefined and let
+ * Modules/socketmodule.c fall back to its own bundled
+ * Modules/getaddrinfo.c/getnameinfo.c RFC-2553 emulation layer
+ * (itself built in terms of gethostbyname()) -- that emulation is
+ * old-style K&R C and produced -Wold-style-definition warnings on
+ * every build for no benefit once dns_shim.c can do the same job
+ * directly. Same "shadow gethostbyname/getaddrinfo instead of
+ * trusting musl's real ones/resolv.conf" choice curl_config.h already
+ * documents making for curl.
+ *
+ * dns_shim.c's getaddrinfo() only ever returns a single AF_INET
+ * result (always SOCK_STREAM unless hints.ai_socktype says
+ * otherwise -- there's no per-socktype enumeration), and its
+ * getnameinfo() is numeric-only (no reverse/PTR DNS support -- see
+ * that file's own header for why). Both are correct within that
+ * scope, which is all this port's apps need.
+ *
+ * socket() itself and friends need no shim of their own (PYTHON.md's
+ * Phase 2): Modules/socketmodule.c just calls ordinary socket()/
+ * connect()/send()/recv(), which posix_shim.c already dispatches to
+ * net_shim.c (SOCK_MAX=16 sockets, 30s timeout, no SO_REUSEADDR/
+ * nonblocking -- same limits every other app here lives with) for
+ * every caller, not just Python's.
  * --------------------------------------------------------------------- */
-#undef HAVE_GETADDRINFO
-#undef HAVE_GETNAMEINFO
+#define HAVE_GETADDRINFO 1
+#define HAVE_GETNAMEINFO 1
 #define HAVE_SYS_SOCKET_H 1
 
 /* ---------------------------------------------------------------------

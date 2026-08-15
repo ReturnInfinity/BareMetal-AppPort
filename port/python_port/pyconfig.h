@@ -497,7 +497,7 @@
 /* #undef HAVE_GDBM_NDBM_H */
 
 /* Define if you have the getaddrinfo function. */
-/* #define HAVE_GETADDRINFO 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_GETADDRINFO 1 /* dns_shim.c's own, not musl's/glibc's -- see pyconfig_baremetal.h */
 
 /* Define this if you have flockfile(), getc_unlocked(), and funlockfile() */
 #define HAVE_GETC_UNLOCKED 1
@@ -560,7 +560,7 @@
 /* #define HAVE_GETLOGIN 1  -- cut for this port, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the `getnameinfo' function. */
-/* #define HAVE_GETNAMEINFO 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_GETNAMEINFO 1 /* dns_shim.c's own, numeric-only -- see pyconfig_baremetal.h */
 
 /* Define if you have the 'getpagesize' function. */
 #define HAVE_GETPAGESIZE 1

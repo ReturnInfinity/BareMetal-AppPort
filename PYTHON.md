@@ -270,11 +270,16 @@ Compiled with **zero new C shim code**, only config work:
   `config.c` at all -- there it was built as a shared `.so`, since this
   port has no dynamic loading it needs the same static-linking
   treatment as every bootstrap module).
-- `HAVE_GETADDRINFO` was already undefined (Phase 1's `pyconfig.h`) --
-  `Modules/socketmodule.c` self-`#include`s its own bundled
-  `getaddrinfo.c`/`getnameinfo.c` fallback in that case, built on
-  `gethostbyname()`, so DNS resolution rides `dns_shim.c`'s real
-  resolver for free, no new code, exactly as guessed.
+- `HAVE_GETADDRINFO` was left undefined at first (Phase 1's
+  `pyconfig.h`) so `Modules/socketmodule.c` would self-`#include` its
+  own bundled `getaddrinfo.c`/`getnameinfo.c` fallback, built on
+  `gethostbyname()`, riding `dns_shim.c`'s real resolver for free with
+  no new code -- exactly as guessed. That fallback is old-style K&R C
+  and warned on every build, though, so `dns_shim.c` later grew its
+  own `getaddrinfo()`/`getnameinfo()`/`freeaddrinfo()` (same
+  `dns_gethostbyname()` resolver underneath) and `HAVE_GETADDRINFO`/
+  `HAVE_GETNAMEINFO` flipped to defined -- see `pyconfig_baremetal.h`'s
+  Networking section for the current state.
 - A new round of Linux-only `HAVE_*`/config macros needed cutting,
   found the same empirical way as Phase 1's -- `socketmodule.h`
   declares struct members and headers for every optional address
