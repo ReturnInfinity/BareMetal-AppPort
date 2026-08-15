@@ -345,25 +345,35 @@ role as every other section here:
   mechanism `Modules/Setup.bootstrap.in`'s own header comment
   describes. No `ctypes` (needs `dlopen`), no installable third-party
   packages, no compiled `.so` extension modules ever.
-- **Only a handful of C extension modules are built in**: the
+- **A curated set of C extension modules are built in**: the
   `Modules/Setup.bootstrap.in` mandatory set (`posix`, `_thread`,
   `_io`, `_signal`, `_codecs`, `_collections`, `itertools`, `_sre`,
   `time`, `_weakref`, `_abc`, `_functools`, `_locale`, `_operator`,
   `_stat`, `_symtable`, `_typing`, `_tracemalloc`, `gc`, ...) plus
-  `_socket`. Nothing from `Modules/Setup.stdlib.in` (`_datetime`,
-  `_json`, `_struct`, `array`, `_decimal`, ...) -- each would need its
-  own `HAVE_*` audit and a `setup.sh` addition, none attempted.
-- **Only a small slice of the pure-Python standard library is
-  present**, not the whole `Lib/` tree -- a handful of bootstrap
-  modules frozen into the binary (`importlib`/`os`/`site`/etc, plus
-  `encodings`/`encodings.aliases`/`encodings.utf_8`) and a precisely-
-  traced dependency closure for `json`/`re`/`collections`/
-  `encodings.ascii` installed onto the EXT2 disk image's `/pylib`
-  (`install-stdlib.sh`). `import` of anything else --
-  `import socket` (the pure-Python wrapper; only the low-level
-  `_socket` C module is built in), a different codec, most of the
-  standard library -- fails with `ModuleNotFoundError` until its own
-  files are added to `/pylib` the same way.
+  `_socket`, `select`, `math`, `_struct`, `binascii`, `_random`,
+  `_sha2`, `array`, and `unicodedata` (`config_baremetal.c`'s
+  `_PyImport_Inittab`) -- the latter group was added specifically to
+  unblock the `http.server`/`socketserver`/`threading` closure below.
+  Still nothing from `Modules/Setup.stdlib.in` beyond that
+  (`_datetime`, `_json`, `_decimal`, ...) -- each would need its own
+  `HAVE_*` audit and a `setup.sh` addition, none attempted.
+- **A curated slice of the pure-Python standard library is present**,
+  not the whole `Lib/` tree -- a handful of bootstrap modules frozen
+  into the binary (`importlib`/`os`/`site`/etc, plus
+  `encodings`/`encodings.aliases`/`encodings.utf_8`) plus two traced
+  dependency closures installed onto the EXT2 disk image's `/pylib`
+  (`install-stdlib.sh`): the original `json`/`re`/`collections`/
+  `encodings.ascii` closure, and a larger closure added later for
+  `import http.server, socketserver, threading` (`socket`,
+  `datetime` -- via a `_pydatetime` fallback that avoids needing
+  `_datetime` -- `email.*`, `html.*`, `http.*`, `urllib.parse`,
+  `random`, `ipaddress`, ...; `ssl`/`zlib` were skipped by relying on
+  their own try/except `ImportError` fallback already in the stdlib
+  source; see `install-stdlib.sh`'s comments for the full list and
+  reasoning). `import` of anything else -- a different codec, most of
+  the rest of the standard library -- still fails with
+  `ModuleNotFoundError` until its own files are added to `/pylib` the
+  same way.
 - **No hash randomization** -- equivalent to `PYTHONHASHSEED=0`,
   standard and documented, not a bug: `Python/bootstrap_hash.c` treats
   finding no entropy source as a fatal boot error otherwise. A real
