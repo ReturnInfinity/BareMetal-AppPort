@@ -191,6 +191,18 @@ LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -I $PORT -DCONFIG_USE_DEFA
 # matches setup.sh's SODIUM_CFLAGS -- an app's own #include <sodium.h>
 # needs the same define export.h does its SODIUM_EXPORT expansion on.
 #
+# -I $MBEDTLS_INC/-I $MBEDTLS_PORT/-DMBEDTLS_CONFIG_FILE are the
+# equivalent for an app that calls into mbedTLS's own API directly
+# (test-mbedtls.c) rather than only reaching it indirectly through
+# libcurl (curltest.c/https_crawler.c, which never #include an
+# mbedtls/*.h). Same three flags MBEDTLS_CFLAGS above passes
+# tls_shim.c, needed again here for the same reason: mbedtls/
+# build_info.h's quote-form #include MBEDTLS_CONFIG_FILE checks its
+# own directory (mbedTLS's include/mbedtls/) first, doesn't find
+# baremetal_mbedtls_config.h there (the whole point of that unique
+# filename -- see MBEDTLS_CFLAGS's comment), and only then falls
+# through to -I $MBEDTLS_PORT to resolve it.
+#
 # -I $PYTHON_PORT is for <Python.h> itself (port/python_port/pyconfig.h
 # -- see that file's own header) plus CPython's own Include/ and
 # Include/internal/ trees, needed by this port's own
@@ -205,7 +217,7 @@ LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -I $PORT -DCONFIG_USE_DEFA
 # needs). gcc's own freestanding headers (stdatomic.h) are added back
 # the same way setup.sh's PYTHON_CFLAGS does, for the same reason.
 PYTHON_GCC_FREESTANDING_INC="$(gcc -print-file-name=include)"
-APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal -DPy_BUILD_CORE"
+APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\" -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal -DPy_BUILD_CORE"
 
 echo "Building..."
 
