@@ -251,10 +251,17 @@ Not implemented (all fall through to `-ENOSYS`):
   isn't a shim limitation so much as a note that multi-NIC support
   would need kernel-side work first.
 - **Fixed socket table** (`SOCK_MAX` = 16 concurrent sockets).
-- **`getsockname()`/`getpeername()` aren't implemented.** Not in
-  `posix_shim.c`'s `SYS_` dispatch table at all — falls through to the
-  default `-ENOSYS` case, found running Python's `_socket` module
-  through its paces (see "Python" below) but not specific to Python.
+- **`getsockname()`/`getpeername()` are implemented** (`net_shim.c`),
+  found missing while boot-testing Python's `socketserver.TCPServer`
+  (`server_bind()` calls `getsockname()` right after `bind()` to learn
+  the port a bind to port 0 actually picked — see "Python" below) but
+  not specific to Python. No new state needed: `tcp_pcb`/`udp_pcb`
+  (both built on lwIP's `IP_PCB` base) already track
+  `local_ip`/`local_port` once `bind()` succeeds and
+  `remote_ip`/`remote_port` once a connection is established — these
+  just read them back out. `getpeername()` returns `-ENOTCONN` on a
+  `SOCK_DGRAM` socket or a `SOCK_STREAM` socket that isn't connected
+  yet, matching real POSIX semantics for an unconnected socket.
 
 ## libcurl (`port/curl_port/`)
 
