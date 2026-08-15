@@ -242,10 +242,15 @@ Not implemented (all fall through to `-ENOSYS`):
 - **`setsockopt`/`getsockopt` only honor `SO_RCVTIMEO`/`SO_SNDTIMEO`**
   (above); every other option — `SO_REUSEADDR`, `TCP_NODELAY`, etc. —
   is still an accept-and-ignore stub with no effect.
-- **Unaccepted connections are leaked on listener `close()`.** If a
-  listening socket is closed while connections are sitting in its
-  accept queue (arrived but not yet `accept()`ed), those `tcp_pcb`s
-  are never explicitly closed.
+- **Unaccepted connections are no longer leaked on listener `close()`.**
+  Closing a listening socket now walks its accept queue
+  (`net_shim.c`'s `close_queued_conn()`) and, for each connection lwIP
+  already handed over (`tcp_accepted()` called) but the app never
+  `accept()`ed, closes its `tcp_pcb` (falling back to `tcp_abort()`,
+  same as a normal connected socket's `close()`) and frees the `bsock`
+  slot `on_accept()` allocated for it — otherwise both would sit there
+  forever, eventually exhausting the fixed socket table (`SOCK_MAX`,
+  below) even though the app closed every fd it ever saw.
 - **Single NIC, hard-coded interface id 0** — matches the current
   kernel (`init_net` only brings up one virtio-net device), so this
   isn't a shim limitation so much as a note that multi-NIC support

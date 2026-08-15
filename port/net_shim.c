@@ -708,6 +708,34 @@ long net_shim_getsockopt(long fd, long level, long optname, void *optval, sockle
 	return 0;
 }
 
+// Tears down one already-accepted (tcp_accepted() called), not-yet-
+// accept()ed connection sitting in a listener's acceptq -- same
+// tcp_close()-falling-back-to-tcp_abort()-plus-rx_head-drain sequence
+// net_shim_close() below runs for a normal connected socket, just
+// applied directly to the queued bsock slot rather than through an fd.
+// ns->pcb can already be NULL here if on_err() fired while this
+// connection was still sitting in the queue (lwIP frees the pcb itself
+// before that callback runs) -- nothing left to close in that case.
+static void close_queued_conn(struct bsock *ns)
+{
+	if (ns->pcb) {
+		tcp_arg(ns->pcb, NULL);
+		tcp_recv(ns->pcb, NULL);
+		tcp_err(ns->pcb, NULL);
+		if (tcp_close(ns->pcb) != ERR_OK)
+			tcp_abort(ns->pcb);
+	}
+
+	while (ns->rx_head) {
+		struct pbuf *rest = ns->rx_head->next;
+		ns->rx_head->next = NULL;
+		pbuf_free(ns->rx_head);
+		ns->rx_head = rest;
+	}
+
+	ns->state = SK_FREE;
+}
+
 long net_shim_close(long fd)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
@@ -728,9 +756,22 @@ long net_shim_close(long fd)
 
 	if (s->pcb) {
 		tcp_arg(s->pcb, NULL);
-		if (s->state == SK_LISTENING)
+		if (s->state == SK_LISTENING) {
 			tcp_accept(s->pcb, NULL);
-		else {
+			// Connections lwIP already handed us (on_accept()
+			// called tcp_accepted()) but the app never got
+			// around to accept()ing -- see close_queued_conn()
+			// above. Without this, both the tcp_pcb and the
+			// bsock slot on_accept() allocated for it would be
+			// leaked for good: nothing else ever revisits an
+			// acceptq entry once its listener is gone.
+			while (s->acceptq_count > 0) {
+				int slot = s->acceptq[s->acceptq_head];
+				s->acceptq_head = (s->acceptq_head + 1) % ACCEPTQ_MAX;
+				s->acceptq_count--;
+				close_queued_conn(&socks[slot]);
+			}
+		} else {
 			tcp_recv(s->pcb, NULL);
 			tcp_err(s->pcb, NULL);
 		}
@@ -744,8 +785,6 @@ long net_shim_close(long fd)
 		pbuf_free(s->rx_head);
 		s->rx_head = rest;
 	}
-	// Any not-yet-accept()ed connections left in acceptq are leaked
-	// (never explicitly closed) -- acceptable gap for this first pass.
 
 	s->state = SK_FREE;
 	return 0;
