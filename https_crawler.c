@@ -11,13 +11,11 @@
 // This is also a valid *nix program of course.
 //
 // Unlike crawler.c (HTTP-only), this follows https:// links too, via
-// port/tls_shim.c's blocking mbedTLS wrapper. IMPORTANT: tls_shim.c
-// does no certificate verification (MBEDTLS_SSL_VERIFY_NONE, no CA
-// store, no clock to check validity periods against even if there
-// were one -- see its file header). That gets TLS's confidentiality
-// (nothing plaintext on the wire) but not the server-identity
-// guarantee HTTPS normally implies -- fine for a crawler just reading
-// public pages, not something to reuse where that distinction matters.
+// port/tls_shim.c's blocking mbedTLS wrapper, which verifies the peer
+// certificate against a real CA bundle (MBEDTLS_SSL_VERIFY_REQUIRED --
+// see tls_shim.c's file header) -- a page that fails verification just
+// fails to fetch (fetch() returns -1), the same as a DNS or TCP
+// connect failure, rather than being silently trusted.
 //
 // All storage here is static and fixed-size (queue, visited list, the
 // per-page read buffer) rather than malloc'd -- this is a memory-

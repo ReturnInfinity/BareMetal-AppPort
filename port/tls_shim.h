@@ -5,14 +5,15 @@
 
 // A blocking HTTPS-shaped TLS client connection: connect, then read/write
 // the plaintext application data (an HTTP request/response, typically),
-// then close. See tls_shim.c's file header for what this deliberately
-// does *not* do (certificate verification).
+// then close. See tls_shim.c's file header for the certificate
+// verification this performs and what it depends on.
 typedef struct tls_conn tls_conn;
 
 // Resolves host (via gethostbyname() -- see dns_shim.c), opens a TCP
 // connection to host:port, and performs a TLS handshake over it (SNI is
-// set from host). Returns NULL on any failure (DNS, TCP connect, or TLS
-// handshake).
+// set from host, and also checked against the peer certificate). Returns
+// NULL on any failure (DNS, TCP connect, TLS handshake, or certificate
+// verification).
 tls_conn *tls_connect(const char *host, int port);
 
 // Write/read plaintext application data over an established connection.

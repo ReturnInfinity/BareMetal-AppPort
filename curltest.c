@@ -15,10 +15,9 @@
 //
 // Same certificate-verification stance as tls_shim.c, and for the same
 // reason (see its file header): CURLOPT_SSL_VERIFYPEER/VERIFYHOST are
-// both off below. TLS still buys confidentiality on the wire, just not
-// server-identity assurance -- fine for hitting a known-good public
-// URL like this, not something to lift into anything security-
-// sensitive.
+// both on below, and CURLOPT_CAINFO points at CA_BUNDLE_PATH, the same
+// disk.img path tls_shim.c's TLS_CA_BUNDLE_PATH names (installed there
+// by port/mbedtls_port/install-cacert.sh).
 //
 // response_buf is static, not malloc'd or grown dynamically -- same
 // fixed-footprint reasoning https_crawler.c's page_buf gives (this is
@@ -35,6 +34,7 @@
 
 #define FETCH_URL      "https://example.com/"
 #define RESPONSE_BUF_SIZE (32 * 1024)
+#define CA_BUNDLE_PATH "/etc/ssl/cacert.pem"
 
 static char response_buf[RESPONSE_BUF_SIZE];
 static size_t response_len;
@@ -77,12 +77,14 @@ int main(void)
 	curl_easy_setopt(h, CURLOPT_USERAGENT, "BareMetal-curltest/1.0");
 	curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
 
-	// No CA store is vendored on this port (see this file's header) --
-	// without these two, mbedTLS's handshake would fail every https://
-	// fetch with "unable to get local issuer certificate" instead of
-	// completing one whose confidentiality is still real.
-	curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);
-	curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
+	// See this file's header -- CAINFO points curl's own mbedTLS vtls
+	// backend at the same CA bundle tls_shim.c loads. Without a CAINFO
+	// set, VERIFYPEER/VERIFYHOST=1 would fail every https:// fetch with
+	// "unable to get local issuer certificate" (no CA store is otherwise
+	// configured for mbedTLS to fall back to).
+	curl_easy_setopt(h, CURLOPT_CAINFO, CA_BUNDLE_PATH);
+	curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
+	curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
 
 	// net_shim.c's own blocking socket calls already cap at 30s each
 	// (see OPENISSUES.md) -- this just makes libcurl's own bookkeeping

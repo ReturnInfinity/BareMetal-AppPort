@@ -10,15 +10,18 @@
 // (vendored unmodified, see scripts/get-mbedtls.sh) for the handshake
 // and record layer.
 //
-// No certificate verification: MBEDTLS_SSL_VERIFY_NONE below, and no
-// trusted CA store is configured at all. This port has no clock (see
-// OPENISSUES.md -- no clock_gettime/gettimeofday/time), so there's no
-// way to check a certificate's validity period even if a CA store were
-// wired up; skipping verification entirely, rather than half-implementing
-// it, is the honest reflection of that limitation. Good enough to get
-// TLS's confidentiality (traffic isn't plaintext on the wire) for a
-// crawler; not good enough to trust the server's identity -- don't
-// reuse this for anything where that distinction matters.
+// Full certificate verification: MBEDTLS_SSL_VERIFY_REQUIRED below,
+// checked against a real trust store loaded from TLS_CA_BUNDLE_PATH
+// (Mozilla's CA bundle -- see scripts/get-cacert.sh -- installed onto
+// disk.img at that path by port/mbedtls_port/install-cacert.sh, which
+// the outer BareMetal-App repo's setup.sh runs once against a fresh
+// image). Validity-period checks work because posix_shim.c's
+// CLOCK_REALTIME (and so musl's time()) is backed by a live wallclock,
+// not a boot-time snapshot -- see baremetal_mbedtls_config.h's
+// MBEDTLS_HAVE_TIME/MBEDTLS_HAVE_TIME_DATE comments. If the CA bundle
+// is missing from disk.img, ensure_ready() fails closed: every
+// tls_connect() call fails rather than silently downgrading to no
+// verification.
 //
 // One shared mbedtls_ssl_config (handshake/cipher settings, RNG) across
 // all connections, per mbedTLS's own recommended usage -- only the much
@@ -40,10 +43,15 @@
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
+#include "mbedtls/x509_crt.h"
 
 #include "tls_shim.h"
 
 #define TLS_MAX_CONN 2
+
+// Where port/mbedtls_port/install-cacert.sh writes the CA bundle onto
+// disk.img -- see this file's header.
+#define TLS_CA_BUNDLE_PATH "/etc/ssl/cacert.pem"
 
 struct tls_conn {
 	int in_use;
@@ -56,12 +64,15 @@ static struct tls_conn conns[TLS_MAX_CONN];
 static mbedtls_entropy_context s_entropy;
 static mbedtls_ctr_drbg_context s_ctr_drbg;
 static mbedtls_ssl_config s_conf;
+static mbedtls_x509_crt s_cacert;
 static int s_ready;
 
 // Seeds the DRBG (via mbedtls_hardware_poll() -- see
-// port/mbedtls_port/entropy_hardware_poll.c) and builds the shared TLS
-// 1.2 client config, once. Idempotent/safe to call from every
-// tls_connect(), like net_glue.h's net_ensure_ready().
+// port/mbedtls_port/entropy_hardware_poll.c), loads the CA bundle off
+// disk.img (via mbedtls_x509_crt_parse_file() -- needs MBEDTLS_FS_IO,
+// which baremetal_mbedtls_config.h already has on), and builds the
+// shared TLS 1.2 client config, once. Idempotent/safe to call from
+// every tls_connect(), like net_glue.h's net_ensure_ready().
 static int ensure_ready(void)
 {
 	if (s_ready)
@@ -72,13 +83,18 @@ static int ensure_ready(void)
 	if (mbedtls_ctr_drbg_seed(&s_ctr_drbg, mbedtls_entropy_func, &s_entropy, NULL, 0) != 0)
 		return 0;
 
+	mbedtls_x509_crt_init(&s_cacert);
+	if (mbedtls_x509_crt_parse_file(&s_cacert, TLS_CA_BUNDLE_PATH) != 0)
+		return 0;
+
 	mbedtls_ssl_config_init(&s_conf);
 	if (mbedtls_ssl_config_defaults(&s_conf, MBEDTLS_SSL_IS_CLIENT,
 					 MBEDTLS_SSL_TRANSPORT_STREAM,
 					 MBEDTLS_SSL_PRESET_DEFAULT) != 0)
 		return 0;
 
-	mbedtls_ssl_conf_authmode(&s_conf, MBEDTLS_SSL_VERIFY_NONE);
+	mbedtls_ssl_conf_ca_chain(&s_conf, &s_cacert, NULL);
+	mbedtls_ssl_conf_authmode(&s_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
 	mbedtls_ssl_conf_rng(&s_conf, mbedtls_ctr_drbg_random, &s_ctr_drbg);
 
 	s_ready = 1;

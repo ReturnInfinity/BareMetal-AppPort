@@ -259,11 +259,11 @@ same lines as everything else here:
 - **HTTP and HTTPS only.** No FTP/FILE/TELNET/TFTP/RTSP/DICT/GOPHER/
   LDAP(S)/POP3/IMAP/SMTP/MQTT/WebSockets/IPFS -- all disabled at
   compile time (`CURL_DISABLE_*`).
-- **No certificate verification**, same stance and same reason as
-  `tls_shim.c` (see its file header): `CURLOPT_SSL_VERIFYPEER`/
-  `VERIFYHOST` are off in `curltest.c`. No CA store is vendored, and
-  there's still no clock to check a certificate's validity period
-  against even if one were.
+- **Certificate verification is on**, same stance as `tls_shim.c` (see
+  its file header): `CURLOPT_SSL_VERIFYPEER`/`VERIFYHOST` are on in
+  `curltest.c`, checked against `CURLOPT_CAINFO`'s CA bundle
+  (`scripts/get-cacert.sh`, installed onto disk.img by
+  `port/mbedtls_port/install-cacert.sh`).
 - **No proxy support** (`CURL_DISABLE_PROXY`) and **no alt-svc/HSTS/
   netrc** (all file- or wall-clock-expiry-based, neither of which fits
   this port well -- see `curl_config.h`).

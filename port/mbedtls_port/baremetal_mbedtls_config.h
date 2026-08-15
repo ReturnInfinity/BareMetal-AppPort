@@ -21,7 +21,13 @@
 // that exact name (see build-app.sh's MBEDTLS_CFLAGS comment for why
 // that collision is silent -- no warning, no error, just the wrong
 // config compiled in). Summary of what's changed:
-//   - MBEDTLS_HAVE_TIME / MBEDTLS_HAVE_TIME_DATE: off (no clock source)
+//   - MBEDTLS_HAVE_TIME / MBEDTLS_HAVE_TIME_DATE: on -- posix_shim.c's
+//     CLOCK_REALTIME is backed by b_system(WALLCLOCK) (the KVM paravirt
+//     wallclock, read live, not just at boot -- see posix_shim.c), so
+//     musl's time()/gmtime_r() (which mbedtls_time()/
+//     mbedtls_platform_gmtime_r() call straight through to, no alt
+//     implementation needed here) return real UTC, good enough to check
+//     a certificate's validity period against.
 //   - MBEDTLS_ENTROPY_HARDWARE_ALT: on, backed by port/mbedtls_port/
 //     entropy_hardware_poll.c (RDRAND -- no /dev/urandom, no getrandom())
 //   - MBEDTLS_NO_PLATFORM_ENTROPY: on (pairs with the above)
@@ -31,8 +37,9 @@
 //     which this port has; only used for DTLS timers/benchmarking)
 // Everything else (TLS 1.2 with the usual RSA/ECDHE/AES-GCM/ChaCha20
 // ciphersuites, X.509 parsing, etc.) is upstream's default. See
-// port/tls_shim.c for where MBEDTLS_SSL_VERIFY_NONE is set -- this port
-// does not verify server certificates (see its file header for why).
+// port/tls_shim.c for where MBEDTLS_SSL_VERIFY_REQUIRED is set and the
+// trust store it loads -- this port does verify server certificates
+// (see that file's header for what that relies on).
 
 /**
  * This is an optional version symbol that enables compatibility handling of
@@ -150,12 +157,12 @@
  *       regardless of the setting of MBEDTLS_HAVE_TIME, unless
  *       MBEDTLS_TIMING_ALT is used. See timing.c for more information.
  *
- * BareMetal-AppPort: disabled -- no clock source is exposed to apps (see
- * OPENISSUES.md: no clock_gettime/gettimeofday/time), so time() would
- * always fail. Cert validity-period checks are moot anyway since
- * tls_shim.c hard-codes MBEDTLS_SSL_VERIFY_NONE.
+ * BareMetal-AppPort: enabled -- posix_shim.c's CLOCK_REALTIME (and so
+ * musl's time()) is backed by b_system(WALLCLOCK), a live KVM paravirt
+ * wallclock read on every call, not a boot-time snapshot. See
+ * port/tls_shim.c for the certificate verification this enables.
  */
-//#define MBEDTLS_HAVE_TIME
+#define MBEDTLS_HAVE_TIME
 
 /**
  * \def MBEDTLS_HAVE_TIME_DATE
@@ -176,10 +183,11 @@
  * mbedtls_platform_gmtime_r() at compile-time by using the macro
  * MBEDTLS_PLATFORM_GMTIME_R_ALT.
  *
- * BareMetal-AppPort: disabled -- requires MBEDTLS_HAVE_TIME, which is
- * disabled above.
+ * BareMetal-AppPort: enabled -- see MBEDTLS_HAVE_TIME above. Whole
+ * seconds only (b_system(WALLCLOCK) has no sub-second component), which
+ * is all an X.509 notBefore/notAfter comparison needs.
  */
-//#define MBEDTLS_HAVE_TIME_DATE
+#define MBEDTLS_HAVE_TIME_DATE
 
 /**
  * \def MBEDTLS_PLATFORM_MEMORY

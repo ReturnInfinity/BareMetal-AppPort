@@ -30,13 +30,12 @@
 // channel's Settings -> Integrations -> Webhooks, then fill it in
 // before building. main() refuses to run with it left empty.
 //
-// Same certificate-verification stance as curltest.c/tls_shim.c, and
-// for the same reason (no CA store is vendored on this port):
-// CURLOPT_SSL_VERIFYPEER/VERIFYHOST are both off below. TLS still buys
-// confidentiality on the wire, just not server-identity assurance --
-// acceptable for hitting two known-good public endpoints like these,
-// but note the webhook URL itself is the only thing authenticating the
-// POST to Discord, so treat it like a password regardless.
+// Same certificate-verification stance as curltest.c/tls_shim.c:
+// CURLOPT_SSL_VERIFYPEER/VERIFYHOST are both on below, checked against
+// the CA bundle CURLOPT_CAINFO points at (see curltest.c's file
+// header) -- note the webhook URL itself is still the only thing
+// authenticating the POST to Discord, so treat it like a password
+// regardless.
 //
 // JSON handling is hand-rolled (see json_extract_string()/
 // json_escape_append() below), not a real parser/library -- same
@@ -61,6 +60,7 @@
 
 #define WIKI_SUMMARY_URL   "https://en.wikipedia.org/api/rest_v1/page/random/summary"
 #define DISCORD_WEBHOOK_URL "PUT_YOUR_WEBHOOK_HERE"
+#define CA_BUNDLE_PATH     "/etc/ssl/cacert.pem" // see curltest.c's file header
 
 #define USER_AGENT "BareMetal-wiki-discord/1.0 (https://github.com/ReturnInfinity/BareMetal-App)"
 
@@ -100,8 +100,9 @@ static void curl_common_opts(CURL *h)
 {
 	curl_easy_setopt(h, CURLOPT_USERAGENT, USER_AGENT);
 	curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-	curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L); // see file header
-	curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
+	curl_easy_setopt(h, CURLOPT_CAINFO, CA_BUNDLE_PATH);
+	curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
+	curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
 	curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L); // matches net_shim.c's own per-call cap
 }
 
