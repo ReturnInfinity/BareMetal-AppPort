@@ -18,8 +18,13 @@ one.
   minimal fake initial stack for musl's startup path with `argc=0` and
   an empty `envp`. Programs that read `argv`/`getenv()` will always see
   nothing, regardless of how the app was invoked.
-- **`getpid`/`getppid`/`uname`/`sysinfo`/`times` are unimplemented.**
-  Anything that queries "what process am I" will get `-ENOSYS`.
+- **`getpid`/`getppid`/`sysinfo`/`times` are unimplemented.** Anything
+  that queries "what process am I" will get `-ENOSYS`. `uname` *is*
+  implemented (`posix_shim.c`), returning fixed, honest placeholder
+  values (`sysname` "BareMetal", `machine` "x86_64", etc.) — unlike
+  `getpid`/`getuid`, a hostname/machine type is real, expected input to
+  ordinary code (e.g. Python's `platform` module), not something this
+  port's single-process model makes meaningless.
 - **Signal delivery (`kill`/`tkill`/`tgkill`/`rt_sigaction`/
   `rt_sigprocmask`) is real, but software-raised only, and delivered at
   timer-tick granularity, not truly asynchronously.** `thread_shim.c`'s
@@ -90,42 +95,6 @@ one.
 ## Missing common syscalls
 
 Not implemented (all fall through to `-ENOSYS`):
-- `clock_gettime` supports `CLOCK_MONOTONIC`/`CLOCK_MONOTONIC_RAW`/
-  `CLOCK_MONOTONIC_COARSE` (`posix_shim.c`), backed by
-  `b_system(TIMECOUNTER)` (nanoseconds since boot, the same source the
-  heap/TLS/lwIP code already used internally), and `CLOCK_REALTIME`/
-  `CLOCK_REALTIME_COARSE`, backed by `b_system(WALLCLOCK)` (seconds
-  since the Unix epoch, read from the RTC at boot — no sub-second
-  component). `time()` and `gettimeofday()` both go through musl's
-  `clock_gettime(CLOCK_REALTIME, ...)` so they work too (see
-  `clock.c`). Other `clk_id`s (e.g. `CLOCK_PROCESS_CPUTIME_ID`) still
-  return `-EINVAL`.
-- `nanosleep`/`clock_nanosleep` are implemented (`posix_shim.c`) on top
-  of `b_system(SLEEP, ns, 0)`, which HLTs the CPU until the APIC timer
-  fires rather than busy-spinning. The sleep is chained in
-  `NET_POLL_INTERVAL_NS` (10ms) chunks with `net_poll()` called between
-  each so lwIP's timers/retransmits keep getting serviced instead of
-  stalling for the whole sleep. A caught signal without `SA_RESTART`
-  now legitimately interrupts the sleep early (see the "Process model"
-  section above) — `rem`/`remain` is only left zeroed for the "slept
-  the full duration" case, reporting real remaining time on an `EINTR`
-  return. `clock_nanosleep`'s `TIMER_ABSTIME` deadline is exact
-  for `CLOCK_MONOTONIC` (its timeline *is* `TIMECOUNTER`), but there's
-  no wall-clock↔`TIMECOUNTER` conversion wired up yet, so a
-  `CLOCK_REALTIME` absolute deadline is treated the same way for
-  now — fine for "sleep until roughly now plus a bit", wrong otherwise.
-- `getrandom` is implemented (`posix_shim.c`), on the same
-  `rdrand`-with-`rdtsc`-fallback technique `crt0.c`'s `fill_random()`
-  already uses to seed musl's own internal entropy needs (stack canary,
-  mallocng's hardening secret), just generalized to an arbitrary-length
-  buffer and exposed as a real syscall — duplicated rather than shared
-  with `crt0.c` (which runs before `.bss` is zeroed, so can't call into
-  `posix_shim.c` yet) or the other `rdrand` call sites (`sqlite_vfs.c`,
-  `entropy_hardware_poll.c`, `randombytes_baremetal.c`), same
-  "duplicated rather than shared" choice those already make.
-  `GRND_RANDOM`/`GRND_NONBLOCK`/`GRND_INSECURE` are accepted and
-  ignored — `rdrand` itself never blocks, so there's no blocking
-  entropy pool here to distinguish between.
 - `epoll_*` — no way to multiplex across multiple fds and learn
   *which* is ready first. `poll`/`select` themselves are implemented
   (`posix_shim.c`), but not as a real wait: every fd this port
