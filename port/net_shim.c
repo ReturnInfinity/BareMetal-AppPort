@@ -34,6 +34,7 @@
 #include "libBareMetal.h"
 #include "net_glue.h"
 #include "net_shim.h"
+#include "thread_shim.h"
 
 #define SOCK_FD_BASE          100
 #define SOCK_MAX              16
@@ -343,6 +344,8 @@ long net_shim_accept(long fd, void *addr, socklen_t *addrlenp)
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -EAGAIN;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
+		if (thread_shim_take_eintr())
+			return -EINTR;
 	}
 
 	int slot = s->acceptq[s->acceptq_head];
@@ -402,6 +405,8 @@ long net_shim_connect(long fd, const void *addr, long addrlen)
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -ETIMEDOUT;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
+		if (thread_shim_take_eintr())
+			return -EINTR;
 	}
 
 	return s->state == SK_CONNECTED ? 0 : -ECONNREFUSED;
@@ -463,6 +468,8 @@ static long udp_wait_rx(struct bsock *s)
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -ETIMEDOUT;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
+		if (thread_shim_take_eintr())
+			return -EINTR;
 	}
 	return 0;
 }
@@ -496,6 +503,8 @@ long net_shim_recv(long fd, void *buf, size_t len, long flags)
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -ETIMEDOUT;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
+		if (thread_shim_take_eintr())
+			return -EINTR;
 	}
 }
 
@@ -596,6 +605,8 @@ long net_shim_send(long fd, const void *buf, size_t len, long flags)
 		if ((u32_t)(sys_now() - start) >= NET_BLOCK_TIMEOUT_MS)
 			return -ETIMEDOUT;
 		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
+		if (thread_shim_take_eintr())
+			return -EINTR;
 	}
 }
 

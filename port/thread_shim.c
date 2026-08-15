@@ -73,6 +73,8 @@
 #include <sched.h>
 #include <errno.h>
 #include <time.h>
+#include <signal.h>
+#include <ucontext.h>
 
 #include "libBareMetal.h"
 #include "thread_shim.h"
@@ -89,8 +91,9 @@ enum thread_state {
 
 enum wake_reason {
 	WOKEN_NONE = 0,
-	WOKEN_SIGNAL,
+	WOKEN_SIGNAL,	// FUTEX_WAKE -- unrelated to the POSIX signals below
 	WOKEN_TIMEOUT,
+	WOKEN_INTR,	// a deliverable POSIX signal arrived while parked
 };
 
 struct bmos_thread {
@@ -105,6 +108,13 @@ struct bmos_thread {
 	u64 wait_deadline_ns;		// TIMECOUNTER deadline, 0 = no timeout
 	enum wake_reason wake_reason;
 	struct bmos_thread *next;	// ready-queue link
+
+	// Signals -- see this file's "Signals" section. One bit per signal
+	// (1-64, bit sig-1), matching the kernel rt_sigprocmask/rt_sigaction
+	// ABI's fixed 8-byte mask, not musl's 128-byte app-facing sigset_t.
+	unsigned long sig_pending;
+	unsigned long sig_blocked;
+	int sig_eintr;			// one-shot flag, see thread_shim_take_eintr()
 
 	// FXSAVE/FXRSTOR image (x87/MMX/SSE state) -- bmos_ctx_switch()
 	// only ever saves/restores the general-purpose registers a `call`
@@ -260,11 +270,32 @@ static struct bmos_thread *thread_at(int i)
 }
 #define THREAD_SHIM_ALL_THREADS (THREAD_SHIM_MAX_THREADS + 1)
 
-// Promotes any T_BLOCKED thread whose timeout has passed to T_READY.
+static struct bmos_thread *find_thread_by_tid(int tid)
+{
+	// Before thread_shim_init() ever runs (no pthread_create() yet),
+	// g_main_thread.state is still T_FREE (BSS zero-init) even though
+	// it's the one and only real thread -- same "tid 1" convention
+	// thread_shim_current_tid() already uses for this exact window.
+	if (!g_active)
+		return tid == 1 ? &g_main_thread : 0;
+
+	for (int i = 0; i < THREAD_SHIM_ALL_THREADS; i++) {
+		struct bmos_thread *t = thread_at(i);
+		if (t->state != T_FREE && t->tid == tid)
+			return t;
+	}
+	return 0;
+}
+
+// Promotes any T_BLOCKED thread whose timeout has passed, or that now
+// has a deliverable (pending and not blocked) signal, to T_READY.
 // Called from the timer tick (so a sleeping FUTEX_WAIT/timedjoin/
-// timedwait eventually gives up even if nobody ever wakes it) and from
-// the idle-poll loop below (so the same happens even while every thread,
-// including the one driving that loop, is blocked).
+// timedwait/thread_shim_tkill() target eventually gets a chance to run
+// even if nobody explicitly wakes it) and from the idle-poll loops below
+// (so the same happens even while every thread, including the one
+// driving that loop, is blocked). The signal itself is *not* consumed
+// here -- see thread_shim_timer_tick_c()'s deliver_pending_signals(),
+// which runs the actual handler once this thread is running again.
 static void scan_timeouts(void)
 {
 	u64 now = 0;
@@ -273,7 +304,13 @@ static void scan_timeouts(void)
 	irq_disable();
 	for (int i = 0; i < THREAD_SHIM_ALL_THREADS; i++) {
 		struct bmos_thread *t = thread_at(i);
-		if (t->state == T_BLOCKED && t->wait_deadline_ns) {
+		if (t->state != T_BLOCKED)
+			continue;
+		if (t->sig_pending & ~t->sig_blocked) {
+			wake_thread_locked(t, WOKEN_INTR);
+			continue;
+		}
+		if (t->wait_deadline_ns) {
 			if (!have_now) {
 				now = b_system(TIMECOUNTER, 0, 0);
 				have_now = 1;
@@ -350,6 +387,161 @@ static void reschedule(int requeue)
 	}
 }
 
+// -----------------------------------------------------------------------
+// Signals
+//
+// Real POSIX signal delivery needs the kernel to rewrite an interrupted
+// hardware frame to detour into a handler and later sigreturn -- this
+// port has no such hook in general, but it has exactly one, for exactly
+// this purpose: b_system(CALLBACK_TIMER, ...) already inserts a
+// fabricated *call* at whatever instruction it interrupted (see this
+// file's header), on every thread, roughly every 1ms. That's the same
+// injection point thread_shim_timer_tick_c() already uses to preempt --
+// reused here to check the interrupted (i.e. currently running) thread's
+// pending signals and, if one is deliverable, call its handler directly
+// as an ordinary C function from right here. No hardware signal frame,
+// no rt_sigreturn: the handler just runs to completion and this
+// function's caller resumes normally afterward, exactly like any other
+// nested call reschedule() already makes safe to run from this same
+// call site (including a full context switch to a different thread and
+// back).
+//
+// Honest limits:
+//   - Delivery latency is bounded by the timer tick (~1ms), not
+//     instantaneous -- fine for pthread_kill()/raise()-style use, not
+//     for anything expecting sub-tick real-time semantics.
+//   - No hardware-fault-derived signals (a real SIGSEGV/SIGFPE/SIGBUS
+//     from an actual trap) -- this only covers software-raised signals
+//     (kill/tkill/tgkill/raise). Translating a real BareMetal-kernel
+//     fault into a signal would need kernel-side work, out of scope
+//     here.
+//   - SA_SIGINFO handlers get a real siginfo_t/ucontext_t, but with an
+//     all-zero mcontext (no meaningful uc_mcontext.MC_PC/gregs) -- there
+//     is no real interrupted-hardware-frame to expose the way a genuine
+//     signal trampoline would. musl's own SIGCANCEL handler
+//     (pthread_cancel.c's cancel_handler()) copes with this fine: its
+//     PC-in-cancellation-point-range check just always misses (falling
+//     through to its self-tkill "keep pending" path), and cross-thread
+//     pthread_cancel() actually takes effect via the EINTR path below
+//     instead -- see futex_wait()'s WOKEN_INTR case and
+//     __syscall_cp_asm's pre-call cancel check (musl-1.2.6/src/thread/
+//     x86_64/syscall_cp.s), which needs nothing extra from here.
+// -----------------------------------------------------------------------
+
+// Raw kernel rt_sigaction ABI (src/internal/ksigaction.h) -- what
+// musl's __libc_sigaction() actually marshals `act`/`oldact` into on
+// this arch, distinct from (and much smaller than) the app-facing
+// `struct sigaction`/128-byte sigset_t this file deliberately avoids
+// depending on.
+struct bmos_ksigaction {
+	void (*handler)(int);
+	unsigned long flags;
+	void (*restorer)(void);
+	unsigned mask[2];
+};
+
+// Process-wide -- there is exactly one process, ever, and real POSIX
+// signal dispositions are process-wide (shared across threads) too, so
+// this is not itself a per-thread thing the way pending/blocked are.
+// Index sig-1, signals 1-64 (_NSIG == 65 on this arch). handler encodes
+// SIG_DFL (0) / SIG_IGN (1) / a real function pointer, same as musl's
+// own k_sigaction.handler field.
+struct bmos_sigaction {
+	unsigned long handler;
+	unsigned long flags;
+	unsigned long mask;
+};
+static struct bmos_sigaction g_sigact[64];
+
+// Default (SIG_DFL) disposition for signals this port has any use for.
+// Matches real Linux defaults except job-control signals (SIGSTOP et
+// al), which are treated as ignored rather than actually stopping
+// anything -- there is no job control (no shell, no process group) on
+// this port for a stop to mean anything to. Everything else not listed
+// (SIGHUP/SIGINT/SIGQUIT/SIGABRT/SIGSEGV/SIGTERM/the realtime range/...)
+// defaults to terminating the process, same as real Linux.
+static int default_is_ignore(int sig)
+{
+	switch (sig) {
+	case SIGCHLD: case SIGURG: case SIGWINCH: case SIGCONT:
+	case SIGSTOP: case SIGTSTP: case SIGTTIN: case SIGTTOU:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+// Delivers at most one pending, unblocked signal to `t`, which must be
+// the currently running thread (only a running thread can safely have a
+// handler called on its behalf -- see this section's header). Called
+// from thread_shim_timer_tick_c() below.
+static void deliver_pending_signals(struct bmos_thread *t)
+{
+	unsigned long deliverable = t->sig_pending & ~t->sig_blocked;
+	if (!deliverable)
+		return;
+
+	// Lowest-numbered pending signal first, same tie-break real Linux
+	// uses when more than one is deliverable at once.
+	int sig = __builtin_ctzl(deliverable) + 1;
+
+	irq_disable();
+	t->sig_pending &= ~(1UL << (sig - 1));
+	irq_enable();
+
+	// SIGKILL can't be caught, blocked, or ignored -- terminate
+	// unconditionally regardless of g_sigact.
+	if (sig == SIGKILL)
+		thread_shim_terminate_process(128 + SIGKILL);
+
+	struct bmos_sigaction *sa = &g_sigact[sig - 1];
+
+	if (sa->handler == 1) // SIG_IGN
+		return;
+	if (sa->handler == 0) { // SIG_DFL
+		if (default_is_ignore(sig))
+			return;
+		thread_shim_terminate_process(128 + sig);
+	}
+
+	// A real handler installed -- block sa_mask (plus this signal
+	// itself, unless SA_NODEFER) for the duration, same as a real
+	// kernel would, and restore afterward.
+	unsigned long saved_blocked = t->sig_blocked;
+	t->sig_blocked |= sa->mask;
+	if (!(sa->flags & SA_NODEFER))
+		t->sig_blocked |= (1UL << (sig - 1));
+
+	// See sleep_until_ns()/net_shim.c's blocking loops (posix_shim.c/
+	// net_shim.c) -- SA_RESTART means "the interrupted blocking call
+	// should keep waiting", so this stays 0 for exactly the handlers
+	// that should surface as a real EINTR to the caller.
+	if (!(sa->flags & SA_RESTART))
+		t->sig_eintr = 1;
+
+	if (sa->flags & SA_SIGINFO) {
+		siginfo_t si;
+		ucontext_t uc;
+		__builtin_memset(&si, 0, sizeof si);
+		__builtin_memset(&uc, 0, sizeof uc); // see this section's header on uc_mcontext
+		si.si_signo = sig;
+		uc.uc_sigmask.__bits[0] = t->sig_blocked;
+		void (*fn)(int, siginfo_t *, void *) =
+			(void (*)(int, siginfo_t *, void *))(unsigned long)sa->handler;
+		fn(sig, &si, &uc);
+	} else {
+		void (*fn)(int) = (void (*)(int))(unsigned long)sa->handler;
+		fn(sig);
+	}
+
+	if (sa->flags & SA_RESETHAND) {
+		sa->handler = 0; // SIG_DFL
+		sa->flags = 0;
+	}
+
+	t->sig_blocked = saved_blocked;
+}
+
 // The timer tick registered with b_system(CALLBACK_TIMER, ...) -- see
 // this file's header. Only preempts a thread that's actually running
 // (never a thread another reschedule() call already parked as
@@ -359,6 +551,8 @@ static void thread_shim_timer_tick_c(void)
 	if (!g_active)
 		return;
 	scan_timeouts();
+	if (g_current)
+		deliver_pending_signals(g_current);
 	if (g_current && g_current->state == T_RUNNING && g_ready_head)
 		reschedule(1);
 }
@@ -476,6 +670,9 @@ long thread_shim_clone(long flags, long child_stack, long ptid, long ctid, long 
 	t->wait_addr = 0;
 	t->wait_deadline_ns = 0;
 	t->wake_reason = WOKEN_NONE;
+	t->sig_pending = 0;			// pending signals are per-thread, not inherited
+	t->sig_blocked = g_current->sig_blocked; // the mask itself is, same as real pthread_create()
+	t->sig_eintr = 0;
 
 	// Seed a legal FXSAVE image for this not-yet-run thread by
 	// capturing the creating thread's own current (live, therefore
@@ -626,6 +823,13 @@ static long futex_wait(volatile int *addr, int val, const struct timespec *timeo
 		return -EAGAIN;
 
 	struct bmos_thread *self = g_current;
+
+	// A signal already deliverable at entry never blocks at all, same
+	// as a real kernel's FUTEX_WAIT -- don't wait a whole tick for
+	// scan_timeouts() to notice what's already true right now.
+	if (self->sig_pending & ~self->sig_blocked)
+		return -EINTR;
+
 	u64 deadline = 0;
 	if (timeout) {
 		u64 rel_ns = (u64)timeout->tv_sec * 1000000000ULL + (u64)timeout->tv_nsec;
@@ -645,9 +849,11 @@ static long futex_wait(volatile int *addr, int val, const struct timespec *timeo
 
 	reschedule(0);
 
-	int timed_out = (self->wake_reason == WOKEN_TIMEOUT);
+	enum wake_reason why = self->wake_reason;
 	self->wait_deadline_ns = 0;
-	return timed_out ? -ETIMEDOUT : 0;
+	if (why == WOKEN_INTR)
+		return -EINTR;
+	return why == WOKEN_TIMEOUT ? -ETIMEDOUT : 0;
 }
 
 static long futex_wake(volatile int *addr, int n)
@@ -703,6 +909,108 @@ long thread_shim_futex(long uaddr, long op, long val, long timeout_or_val2, long
 	default:
 		return -ENOSYS;
 	}
+}
+
+// -----------------------------------------------------------------------
+// SYS_rt_sigaction / SYS_rt_sigprocmask / SYS_tkill / SYS_tgkill / SYS_kill
+//
+// posix_shim.c's dispatcher forwards these straight here -- see this
+// file's "Signals" section above for the delivery mechanism these feed.
+// -----------------------------------------------------------------------
+
+long thread_shim_rt_sigaction(long sig, long act, long oldact, long sigsetsize)
+{
+	if (sig < 1 || sig > 64 || sigsetsize != 8)
+		return -EINVAL;
+	if (sig == SIGKILL || sig == SIGSTOP) // can never be caught/ignored
+		return -EINVAL;
+
+	struct bmos_sigaction *sa = &g_sigact[sig - 1];
+
+	if (oldact) {
+		struct bmos_ksigaction *o = (struct bmos_ksigaction *)(unsigned long)oldact;
+		o->handler = (void (*)(int))(unsigned long)sa->handler;
+		o->flags = sa->flags;
+		o->mask[0] = (unsigned)sa->mask;
+		o->mask[1] = (unsigned)(sa->mask >> 32);
+	}
+	if (act) {
+		struct bmos_ksigaction *a = (struct bmos_ksigaction *)(unsigned long)act;
+		sa->handler = (unsigned long)(void *)a->handler;
+		sa->flags = a->flags;
+		sa->mask = (unsigned long)a->mask[0] | ((unsigned long)a->mask[1] << 32);
+	}
+	return 0;
+}
+
+long thread_shim_rt_sigprocmask(long how, long set, long oldset, long sigsetsize)
+{
+	if (sigsetsize != 8)
+		return -EINVAL;
+
+	struct bmos_thread *self = (g_active && g_current) ? g_current : &g_main_thread;
+
+	if (oldset)
+		*(unsigned long *)(unsigned long)oldset = self->sig_blocked;
+
+	if (set) {
+		unsigned long s = *(unsigned long *)(unsigned long)set;
+		s &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1))); // never blockable
+		irq_disable();
+		switch (how) {
+		case SIG_BLOCK:   self->sig_blocked |= s; break;
+		case SIG_UNBLOCK: self->sig_blocked &= ~s; break;
+		case SIG_SETMASK: self->sig_blocked = s; break;
+		default:
+			irq_enable();
+			return -EINVAL;
+		}
+		irq_enable();
+	}
+	return 0;
+}
+
+static long raise_pending(struct bmos_thread *t, long sig)
+{
+	if (sig < 0 || sig > 64)
+		return -EINVAL;
+	if (sig == 0)
+		return 0; // existence probe -- t was already found/is self, so always "alive"
+
+	irq_disable();
+	t->sig_pending |= (1UL << (sig - 1));
+	irq_enable();
+	return 0;
+}
+
+long thread_shim_tkill(long tid, long sig)
+{
+	// A signal marked pending is only ever actually delivered from the
+	// timer tick, which isn't registered until thread_shim_init() runs
+	// (normally on the first pthread_create()) -- bootstrap it here too,
+	// so raise()/pthread_kill(pthread_self(),...) in a program that
+	// never creates a second thread still works. Idempotent.
+	thread_shim_init();
+
+	struct bmos_thread *t = find_thread_by_tid((int)tid);
+	if (!t)
+		return -ESRCH;
+	return raise_pending(t, sig);
+}
+
+long thread_shim_kill(long pid, long sig)
+{
+	(void)pid; // see thread_shim.h's comment on this function
+	thread_shim_init(); // see thread_shim_tkill()'s comment
+	return raise_pending(g_current, sig);
+}
+
+int thread_shim_take_eintr(void)
+{
+	struct bmos_thread *self = (g_active && g_current) ? g_current : &g_main_thread;
+	int v = self->sig_eintr;
+	self->sig_eintr = 0;
+	return v;
 }
 
 // =============================================================================

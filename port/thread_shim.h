@@ -39,6 +39,50 @@ void thread_shim_exit_current(void) __attribute__((noreturn));
 // thread otherwise) -- SYS_set_tid_address reports this.
 long thread_shim_current_tid(void);
 
+// -----------------------------------------------------------------------
+// Signals -- per-thread pending/blocked sets plus a process-wide handler
+// table, delivered from the same CALLBACK_TIMER injection point that
+// already drives preemption. See thread_shim.c's "Signals" section for
+// the full design and its honest limits (tick-granularity delivery, no
+// hardware-fault-derived signals, no real ucontext_t).
+// -----------------------------------------------------------------------
+
+// SYS_rt_sigaction. `act`/`oldact` point at the kernel `struct k_sigaction`
+// layout musl's __libc_sigaction() marshals into (handler, flags,
+// restorer, mask[2]) -- not musl's app-facing `struct sigaction`.
+// `sigsetsize` must be 8 (the only value musl ever passes on this arch).
+long thread_shim_rt_sigaction(long sig, long act, long oldact, long sigsetsize);
+
+// SYS_rt_sigprocmask. Operates on the calling thread's own blocked set
+// (`set`/`oldset` point at a raw 64-bit mask, one bit per signal 1-64,
+// matching the kernel `sigsetsize=8` ABI -- again not musl's 128-byte
+// app-facing sigset_t).
+long thread_shim_rt_sigprocmask(long how, long set, long oldset, long sigsetsize);
+
+// SYS_tkill / SYS_tgkill (tgid ignored -- there is exactly one thread
+// group, ever). Marks `sig` pending on the thread with the given real
+// tid (thread_shim_current_tid()'s value), waking it if it's parked.
+long thread_shim_tkill(long tid, long sig);
+
+// SYS_kill. This port has exactly one process, so `pid` is not
+// meaningful as a target selector -- signals the calling thread, the
+// same thread raise()/pthread_kill(pthread_self(),...) would reach.
+long thread_shim_kill(long pid, long sig);
+
+// One-shot: true if a signal handler without SA_RESTART fired for the
+// calling thread since the last call. posix_shim.c's/net_shim.c's own
+// blocking loops (sleep_until_ns(), net_shim_recv() and friends) poll
+// this each iteration to return -EINTR instead of finishing their wait,
+// same as a real blocking syscall interrupted by a caught signal.
+int thread_shim_take_eintr(void);
+
+// Provided by posix_shim.c, not thread_shim.c: terminates the whole
+// process via the same path SYS_exit_group does. thread_shim.c's signal
+// delivery point (the timer tick) calls this for a signal whose
+// disposition is "terminate" (SIG_DFL on a signal that isn't
+// default-ignored, or SIGKILL, which cannot be caught or blocked).
+void thread_shim_terminate_process(long code) __attribute__((noreturn));
+
 #endif
 
 // =============================================================================

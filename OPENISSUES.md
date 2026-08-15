@@ -18,13 +18,39 @@ one.
   minimal fake initial stack for musl's startup path with `argc=0` and
   an empty `envp`. Programs that read `argv`/`getenv()` will always see
   nothing, regardless of how the app was invoked.
-- **`getpid`/`getppid`/`kill`/`uname`/`sysinfo`/`times` are unimplemented.**
-  Anything that queries "what process am I" or sends itself a signal
-  will get `-ENOSYS`.
-- **No signal delivery.** `rt_sigaction`, `rt_sigprocmask`, and
-  `sigaltstack` are accepted and silently ignored (`posix_shim.c`) —
-  handlers can be registered but will never actually fire, since
-  BareMetal has no mechanism to deliver a signal into running app code.
+- **`getpid`/`getppid`/`uname`/`sysinfo`/`times` are unimplemented.**
+  Anything that queries "what process am I" will get `-ENOSYS`.
+- **Signal delivery (`kill`/`tkill`/`tgkill`/`rt_sigaction`/
+  `rt_sigprocmask`) is real, but software-raised only, and delivered at
+  timer-tick granularity, not truly asynchronously.** `thread_shim.c`'s
+  "Signals" section reuses the same `b_system(CALLBACK_TIMER, ...)`
+  injection point that already drives thread preemption (see below): a
+  currently-running thread's pending, unblocked signals are checked and
+  its handler called directly, as an ordinary C call, on every timer
+  tick (~1ms) — no real hardware signal frame or `rt_sigreturn` needed.
+  A thread parked in `thread_shim_futex()`'s `FUTEX_WAIT` is woken early
+  (`-EINTR`) the same way; `sleep_until_ns()` (`posix_shim.c`, backing
+  `nanosleep`/`clock_nanosleep`) and every blocking call in
+  `net_shim.c` (`accept`/`connect`/`recv`/`send`) check for this too, so
+  a caught signal without `SA_RESTART` now genuinely interrupts them
+  with real remaining time reported back, rather than always running to
+  completion. See `signals.c` for a program exercising all of this.
+  Known limits:
+  - **No hardware-fault-derived signals.** A real `SIGSEGV`/`SIGFPE`/
+    `SIGBUS` from an actual trap needs BareMetal kernel-side work to
+    translate a fault into this mechanism, not attempted here — only
+    software-raised signals (`kill`/`raise`/`pthread_kill`) work.
+  - **`SA_SIGINFO` handlers get a real `siginfo_t`/`ucontext_t`, but
+    with an all-zero `uc_mcontext`** — there's no real interrupted-
+    hardware-frame to expose the way a genuine signal trampoline would.
+    Handlers that only look at the signal number (the common case) are
+    unaffected.
+  - **`sigaltstack` is accepted and ignored** — a handler always runs on
+    the victim thread's own stack, which the timer tick was already
+    running on.
+  - **No timer-/alarm-generated signals** (`alarm()`/`setitimer()`
+    aren't wired up) — every signal seen here has to be raised by some
+    thread explicitly.
 - **Threads (`pthread_create` and friends) work, but are cooperative
   user-level threads, not real kernel threads** (`thread_shim.c`,
   wired into `posix_shim.c`'s `SYS_clone`/`SYS_futex`/`SYS_sched_yield`
@@ -44,11 +70,17 @@ one.
   a program exercising all of the above. Known limits:
   - **Fixed thread table** (`THREAD_SHIM_MAX_THREADS` = 32 concurrent
     threads, `thread_shim.c`), same style as the EXT2/socket tables.
-  - **No `pthread_cancel`.** Deferred and async cancellation both
-    ultimately rely on signal delivery (`SIGCANCEL`) to interrupt a
-    blocked thread, which this port doesn't have (see below) —
-    `pthread_create`/`join`/mutexes/condvars/etc. don't need it and
-    work regardless.
+  - **`pthread_cancel` works for the cases this port's own blocking
+    primitives cover** (a target parked in `pthread_mutex_lock`/
+    `pthread_cond_wait`/`pthread_join`, or a running target checked at
+    its next cancellation-point call), via the signal delivery above —
+    `pthread_kill(t, SIGCANCEL)` now actually reaches `t`. musl's own
+    `__syscall_cp_asm` pre-call cancel check plus the `-EINTR` path
+    handles the rest without needing this port to replicate musl's
+    PC-redirect trick (`cancel_handler()`'s cancellation-point-address
+    check never matches here — see `thread_shim.c`'s "Signals" section
+    for why that's fine, not a bug). Not stress-tested beyond
+    `signals.c`'s single cross-thread case.
   - **`sched_setscheduler`/explicit `pthread_attr_setschedpolicy`
     aren't wired up** (`-ENOSYS`) — every thread is scheduled the same
     (timer-tick round-robin, no priorities); a program that asks
@@ -73,10 +105,11 @@ Not implemented (all fall through to `-ENOSYS`):
   fires rather than busy-spinning. The sleep is chained in
   `NET_POLL_INTERVAL_NS` (10ms) chunks with `net_poll()` called between
   each so lwIP's timers/retransmits keep getting serviced instead of
-  stalling for the whole sleep. Since there's no signal delivery on this
-  port (see below), a sleep can never legitimately be interrupted early,
-  so `rem`/`remain` is always left zeroed rather than tracking real
-  remaining time. `clock_nanosleep`'s `TIMER_ABSTIME` deadline is exact
+  stalling for the whole sleep. A caught signal without `SA_RESTART`
+  now legitimately interrupts the sleep early (see the "Process model"
+  section above) — `rem`/`remain` is only left zeroed for the "slept
+  the full duration" case, reporting real remaining time on an `EINTR`
+  return. `clock_nanosleep`'s `TIMER_ABSTIME` deadline is exact
   for `CLOCK_MONOTONIC` (its timeline *is* `TIMECOUNTER`), but there's
   no wall-clock↔`TIMECOUNTER` conversion wired up yet, so a
   `CLOCK_REALTIME` absolute deadline is treated the same way for
@@ -341,10 +374,15 @@ role as every other section here:
 - **Every other cut this port already makes elsewhere applies the same
   way to `os.*`**: no `os.fork`/`exec*`/`subprocess`/`multiprocessing`
   (no process model), no `os.chmod`/`chown`/`umask` (no uid/gid model),
-  no `os.pipe`/`dup`/`dup2`, no real `signal` delivery (handlers
-  register but never fire). None of these are Python-specific --
+  no `os.pipe`/`dup`/`dup2`. None of these are Python-specific --
   `Modules/posixmodule.c` just puts a name on each syscall this port
-  already doesn't have.
+  already doesn't have. `os.kill`/`signal.raise_signal`/`signal.signal`
+  itself now have a real syscall underneath (see "Process model"
+  above) -- CPython's own C-level `signal_handler()` trampoline
+  (`Modules/signalmodule.c`) is an ordinary `sa_handler(int)` callback
+  like any other, so it should reach Python-level handlers the same way
+  a plain C program's would, but this hasn't actually been exercised
+  from Python (`main_test.py` predates it).
 - **`_thread`/threading is real but only smoke-tested.**
   `_thread.start_new_thread()` plus `Lock` work correctly (see
   `port/python_port/main_test.py`), backed by the same

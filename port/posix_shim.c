@@ -309,10 +309,18 @@ static long sys_read(long fd, long buf, long len)
 	u8 c;
 
 	// Block for the first byte, then greedily drain whatever else
-	// is immediately available without blocking.
-	do {
+	// is immediately available without blocking. This spin stays
+	// T_RUNNING the whole time (b_input() never yields), so it's
+	// reached by thread_shim.c's ordinary running-thread signal
+	// delivery on the very next timer tick -- no separate wake needed,
+	// just poll for the resulting EINTR each time around.
+	for (;;) {
 		c = b_input();
-	} while (!c);
+		if (c)
+			break;
+		if (thread_shim_take_eintr())
+			return -EINTR;
+	}
 	p[0] = c;
 
 	long n = 1;
@@ -578,9 +586,12 @@ static long sys_clock_gettime(long clk_id, long ts_addr)
 // like any other, so other threads still make progress during a long
 // sleep here -- see that file's header.
 //
-// No signal delivery exists on this port (see OPENISSUES.md), so a
-// sleep can never legitimately be interrupted early -- *rem is always
-// left zeroed rather than tracking a real remaining time.
+// A caught signal without SA_RESTART now legitimately interrupts a
+// sleep early (see thread_shim.c's "Signals" section) -- checked once
+// per NET_POLL_INTERVAL_NS-sized chunk below via
+// thread_shim_take_eintr(), same granularity the sleep itself already
+// runs at. *rem is left zeroed only for the "slept the full duration"
+// case; an EINTR return reports real remaining time.
 #define NET_POLL_INTERVAL_NS 10000000ULL // 10ms
 
 static long sleep_until_ns(u64 target_ns, long rem_addr)
@@ -591,6 +602,16 @@ static long sleep_until_ns(u64 target_ns, long rem_addr)
 		u64 remaining_ns = target_ns - now_ns;
 		b_system(SLEEP, remaining_ns < NET_POLL_INTERVAL_NS ? remaining_ns : NET_POLL_INTERVAL_NS, 0);
 		net_poll();
+		if (thread_shim_take_eintr()) {
+			now_ns = b_system(TIMECOUNTER, 0, 0);
+			if (rem_addr) {
+				struct timespec *rem = (struct timespec *)rem_addr;
+				u64 left_ns = now_ns < target_ns ? target_ns - now_ns : 0;
+				rem->tv_sec = left_ns / 1000000000ULL;
+				rem->tv_nsec = left_ns % 1000000000ULL;
+			}
+			return -EINTR;
+		}
 	}
 
 	if (rem_addr) {
@@ -852,6 +873,19 @@ static long sys_exit(long code)
 	__builtin_unreachable();
 }
 
+// thread_shim.c's signal delivery (see its "Signals" section) calls
+// this for a signal whose disposition is "terminate" -- reached from
+// deep inside a CALLBACK_TIMER-driven call chain (possibly several
+// thread_shim.c frames down), but that's fine: sys_exit() resets RSP to
+// __bmos_entry_sp directly and never returns through them, the same way
+// a bare exit() call from arbitrarily deep inside any app callback
+// already unwinds cleanly today.
+void thread_shim_terminate_process(long code)
+{
+	sys_exit(code);
+	__builtin_unreachable();
+}
+
 // -----------------------------------------------------------------------
 // Dispatcher
 // -----------------------------------------------------------------------
@@ -972,11 +1006,21 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 			return -EINVAL;
 		return 0;
 
-	// No signal delivery, no thread list, on this port -- accept
-	// and ignore rather than fail programs that merely try to set
-	// these up defensively at startup.
-	case SYS_rt_sigaction:
-	case SYS_rt_sigprocmask:
+	// Signals -- see thread_shim.c's "Signals" section for the
+	// delivery mechanism (the same CALLBACK_TIMER injection point
+	// thread_shim.c already uses for preemption).
+	case SYS_rt_sigaction:  return thread_shim_rt_sigaction(a1, a2, a3, a4);
+	case SYS_rt_sigprocmask: return thread_shim_rt_sigprocmask(a1, a2, a3, a4);
+	case SYS_kill:           return thread_shim_kill(a1, a2);
+	case SYS_tkill:          return thread_shim_tkill(a1, a2);
+	case SYS_tgkill:         return thread_shim_tkill(a2, a3); // tgid (a1) ignored -- one thread group
+
+	// No alternate signal stack (SA_ONSTACK is accepted but not acted
+	// on -- deliver_pending_signals() calls handlers on the victim
+	// thread's own stack regardless) and no robust-mutex list (this
+	// port's mutexes aren't PTHREAD_MUTEX_ROBUST, see thread_shim.c's
+	// header); accept and ignore rather than fail programs that merely
+	// set these up defensively at startup.
 	case SYS_sigaltstack:
 	case SYS_set_robust_list:
 		return 0;
