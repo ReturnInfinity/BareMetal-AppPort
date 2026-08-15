@@ -218,6 +218,16 @@ for src in "$MBEDTLS_DIR"/library/*.c; do
 	gcc $MBEDTLS_CFLAGS -o "$obj" "$src"
 done
 
+# build/cacert.pem (scripts/get-cacert.sh) as a NUL-terminated C byte
+# array -- see port/mbedtls_port/gen-cacert-data.sh's own header. This
+# is the in-binary fallback tls_shim.c/curltest.c/wiki_discord.c use
+# when disk.img's own /etc/ssl/cacert.pem
+# (port/mbedtls_port/install-cacert.sh) isn't available, e.g. no disk
+# attached at all. Plain $CFLAGS is enough -- no #includes of its own.
+echo "- Generating embedded CA bundle"
+"$SCRIPT_DIR/port/mbedtls_port/gen-cacert-data.sh"
+gcc $CFLAGS -o "$BUILD_DIR/cacert_data.o" "$BUILD_DIR/cacert_data.c"
+
 # Like mbedTLS above (and unlike lwIP's hand-picked LWIP_SRCS list):
 # every curl lib/*.c file -- protocol handlers (ftp.c, telnet.c, ...),
 # TLS backends (vtls/openssl.c, vtls/gtls.c, ...), everything -- is

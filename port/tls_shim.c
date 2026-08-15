@@ -18,10 +18,13 @@
 // image). Validity-period checks work because posix_shim.c's
 // CLOCK_REALTIME (and so musl's time()) is backed by a live wallclock,
 // not a boot-time snapshot -- see baremetal_mbedtls_config.h's
-// MBEDTLS_HAVE_TIME/MBEDTLS_HAVE_TIME_DATE comments. If the CA bundle
-// is missing from disk.img, ensure_ready() fails closed: every
-// tls_connect() call fails rather than silently downgrading to no
-// verification.
+// MBEDTLS_HAVE_TIME/MBEDTLS_HAVE_TIME_DATE comments. If disk.img's copy
+// isn't there (no disk attached at all, or just not installed),
+// ensure_ready() falls back to cacert_pem/cacert_pem_len -- the same
+// bundle, compiled directly into this binary (see
+// port/mbedtls_port/gen-cacert-data.sh) -- so tls_connect() still
+// verifies rather than either failing outright or silently downgrading
+// to no verification.
 //
 // One shared mbedtls_ssl_config (handshake/cipher settings, RNG) across
 // all connections, per mbedTLS's own recommended usage -- only the much
@@ -53,6 +56,12 @@
 // disk.img -- see this file's header.
 #define TLS_CA_BUNDLE_PATH "/etc/ssl/cacert.pem"
 
+// The same bundle, generated into build/cacert_data.c by
+// port/mbedtls_port/gen-cacert-data.sh and linked into every app (see
+// build-app.sh) -- the no-disk fallback, see this file's header.
+extern const unsigned char cacert_pem[];
+extern const unsigned int cacert_pem_len;
+
 struct tls_conn {
 	int in_use;
 	mbedtls_net_context net;
@@ -68,11 +77,12 @@ static mbedtls_x509_crt s_cacert;
 static int s_ready;
 
 // Seeds the DRBG (via mbedtls_hardware_poll() -- see
-// port/mbedtls_port/entropy_hardware_poll.c), loads the CA bundle off
-// disk.img (via mbedtls_x509_crt_parse_file() -- needs MBEDTLS_FS_IO,
-// which baremetal_mbedtls_config.h already has on), and builds the
-// shared TLS 1.2 client config, once. Idempotent/safe to call from
-// every tls_connect(), like net_glue.h's net_ensure_ready().
+// port/mbedtls_port/entropy_hardware_poll.c), loads the CA bundle --
+// off disk.img if it's there (mbedtls_x509_crt_parse_file() -- needs
+// MBEDTLS_FS_IO, which baremetal_mbedtls_config.h already has on),
+// falling back to the copy compiled into this binary otherwise -- and
+// builds the shared TLS 1.2 client config, once. Idempotent/safe to
+// call from every tls_connect(), like net_glue.h's net_ensure_ready().
 static int ensure_ready(void)
 {
 	if (s_ready)
@@ -84,7 +94,8 @@ static int ensure_ready(void)
 		return 0;
 
 	mbedtls_x509_crt_init(&s_cacert);
-	if (mbedtls_x509_crt_parse_file(&s_cacert, TLS_CA_BUNDLE_PATH) != 0)
+	if (mbedtls_x509_crt_parse_file(&s_cacert, TLS_CA_BUNDLE_PATH) != 0 &&
+	    mbedtls_x509_crt_parse(&s_cacert, cacert_pem, cacert_pem_len) != 0)
 		return 0;
 
 	mbedtls_ssl_config_init(&s_conf);

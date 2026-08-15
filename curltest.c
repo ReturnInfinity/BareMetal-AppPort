@@ -15,9 +15,14 @@
 //
 // Same certificate-verification stance as tls_shim.c, and for the same
 // reason (see its file header): CURLOPT_SSL_VERIFYPEER/VERIFYHOST are
-// both on below, and CURLOPT_CAINFO points at CA_BUNDLE_PATH, the same
-// disk.img path tls_shim.c's TLS_CA_BUNDLE_PATH names (installed there
-// by port/mbedtls_port/install-cacert.sh).
+// both on below. CA_BUNDLE_PATH is the same disk.img path
+// tls_shim.c's TLS_CA_BUNDLE_PATH names (installed there by
+// port/mbedtls_port/install-cacert.sh); set_ca_bundle() below prefers
+// it via CURLOPT_CAINFO when it's actually there, falling back to
+// CURLOPT_CAINFO_BLOB with the same bundle compiled into this binary
+// (cacert_pem/cacert_pem_len -- see
+// port/mbedtls_port/gen-cacert-data.sh) otherwise, the same two-source
+// fallback tls_shim.c's ensure_ready() does.
 //
 // response_buf is static, not malloc'd or grown dynamically -- same
 // fixed-footprint reasoning https_crawler.c's page_buf gives (this is
@@ -29,6 +34,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <curl/curl.h>
 
@@ -36,8 +42,24 @@
 #define RESPONSE_BUF_SIZE (32 * 1024)
 #define CA_BUNDLE_PATH "/etc/ssl/cacert.pem"
 
+// See this file's header. cacert_pem/cacert_pem_len come from
+// build/cacert_data.c (port/mbedtls_port/gen-cacert-data.sh), linked
+// into every app the same way tls_shim.c's own fallback is.
+extern const unsigned char cacert_pem[];
+extern const unsigned int cacert_pem_len;
+
 static char response_buf[RESPONSE_BUF_SIZE];
 static size_t response_len;
+
+static void set_ca_bundle(CURL *h)
+{
+	if (access(CA_BUNDLE_PATH, R_OK) == 0) {
+		curl_easy_setopt(h, CURLOPT_CAINFO, CA_BUNDLE_PATH);
+	} else {
+		struct curl_blob blob = { (void *)cacert_pem, cacert_pem_len, CURL_BLOB_NOCOPY };
+		curl_easy_setopt(h, CURLOPT_CAINFO_BLOB, &blob);
+	}
+}
 
 // libcurl's CURLOPT_WRITEFUNCTION contract: return anything other than
 // size*nmemb and curl treats it as a hard write error, aborting the
@@ -77,12 +99,13 @@ int main(void)
 	curl_easy_setopt(h, CURLOPT_USERAGENT, "BareMetal-curltest/1.0");
 	curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
 
-	// See this file's header -- CAINFO points curl's own mbedTLS vtls
-	// backend at the same CA bundle tls_shim.c loads. Without a CAINFO
-	// set, VERIFYPEER/VERIFYHOST=1 would fail every https:// fetch with
-	// "unable to get local issuer certificate" (no CA store is otherwise
-	// configured for mbedTLS to fall back to).
-	curl_easy_setopt(h, CURLOPT_CAINFO, CA_BUNDLE_PATH);
+	// See this file's header -- points curl's own mbedTLS vtls backend
+	// at a CA bundle, disk.img's copy if there is one, this binary's
+	// own compiled-in copy otherwise. Without one of the two, VERIFYPEER/
+	// VERIFYHOST=1 would fail every https:// fetch with "unable to get
+	// local issuer certificate" (no CA store is otherwise configured
+	// for mbedTLS to fall back to).
+	set_ca_bundle(h);
 	curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
 	curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
 

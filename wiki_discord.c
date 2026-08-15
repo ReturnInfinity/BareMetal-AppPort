@@ -32,10 +32,10 @@
 //
 // Same certificate-verification stance as curltest.c/tls_shim.c:
 // CURLOPT_SSL_VERIFYPEER/VERIFYHOST are both on below, checked against
-// the CA bundle CURLOPT_CAINFO points at (see curltest.c's file
-// header) -- note the webhook URL itself is still the only thing
-// authenticating the POST to Discord, so treat it like a password
-// regardless.
+// disk.img's CA bundle if it's there, this binary's own compiled-in
+// copy otherwise (see curltest.c's file header) -- note the webhook
+// URL itself is still the only thing authenticating the POST to
+// Discord, so treat it like a password regardless.
 //
 // JSON handling is hand-rolled (see json_extract_string()/
 // json_escape_append() below), not a real parser/library -- same
@@ -61,6 +61,11 @@
 #define WIKI_SUMMARY_URL   "https://en.wikipedia.org/api/rest_v1/page/random/summary"
 #define DISCORD_WEBHOOK_URL "PUT_YOUR_WEBHOOK_HERE"
 #define CA_BUNDLE_PATH     "/etc/ssl/cacert.pem" // see curltest.c's file header
+
+// See curltest.c's set_ca_bundle() -- same disk-first, compiled-in-
+// fallback CA bundle source.
+extern const unsigned char cacert_pem[];
+extern const unsigned int cacert_pem_len;
 
 #define USER_AGENT "BareMetal-wiki-discord/1.0 (https://github.com/ReturnInfinity/BareMetal-App)"
 
@@ -100,7 +105,12 @@ static void curl_common_opts(CURL *h)
 {
 	curl_easy_setopt(h, CURLOPT_USERAGENT, USER_AGENT);
 	curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-	curl_easy_setopt(h, CURLOPT_CAINFO, CA_BUNDLE_PATH);
+	if (access(CA_BUNDLE_PATH, R_OK) == 0) {
+		curl_easy_setopt(h, CURLOPT_CAINFO, CA_BUNDLE_PATH);
+	} else {
+		struct curl_blob blob = { (void *)cacert_pem, cacert_pem_len, CURL_BLOB_NOCOPY };
+		curl_easy_setopt(h, CURLOPT_CAINFO_BLOB, &blob);
+	}
 	curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
 	curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
 	curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L); // matches net_shim.c's own per-call cap

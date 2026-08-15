@@ -261,9 +261,12 @@ same lines as everything else here:
   compile time (`CURL_DISABLE_*`).
 - **Certificate verification is on**, same stance as `tls_shim.c` (see
   its file header): `CURLOPT_SSL_VERIFYPEER`/`VERIFYHOST` are on in
-  `curltest.c`, checked against `CURLOPT_CAINFO`'s CA bundle
-  (`scripts/get-cacert.sh`, installed onto disk.img by
-  `port/mbedtls_port/install-cacert.sh`).
+  `curltest.c`/`wiki_discord.c`, checked against disk.img's CA bundle
+  (`CURLOPT_CAINFO`, `scripts/get-cacert.sh`, installed by
+  `port/mbedtls_port/install-cacert.sh`) if it's there, or the same
+  bundle compiled directly into the binary (`CURLOPT_CAINFO_BLOB`,
+  `port/mbedtls_port/gen-cacert-data.sh`) if it's not -- e.g. no disk
+  attached at all.
 - **No proxy support** (`CURL_DISABLE_PROXY`) and **no alt-svc/HSTS/
   netrc** (all file- or wall-clock-expiry-based, neither of which fits
   this port well -- see `curl_config.h`).
