@@ -246,6 +246,7 @@ gcc $MBEDTLS_CFLAGS -o "$BUILD_DIR/tls_shim.o" "$PORT/tls_shim.c"
 gcc $MBEDTLS_CFLAGS -o "$BUILD_DIR/entropy_hardware_poll.o" "$MBEDTLS_PORT/entropy_hardware_poll.c"
 gcc $CFLAGS -I "$SQLITE_INC" -o "$BUILD_DIR/sqlite_vfs.o" "$SQLITE_PORT/sqlite_vfs.c"
 gcc $CFLAGS -I "$SODIUM_INC" -I "$SODIUM_INC/sodium" -o "$BUILD_DIR/randombytes_baremetal.o" "$SODIUM_PORT/randombytes_baremetal.c"
+gcc $CFLAGS -o "$BUILD_DIR/dlfcn_shim.o" "$PORT/dlfcn_shim.c"
 gcc $CFLAGS -o "$BUILD_DIR/libBareMetal.o" "$PORT/libBareMetal.c"
 
 APP_OBJS=""
@@ -332,7 +333,7 @@ echo "Linking..."
 ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -o "$BUILD_DIR/$APP_NAME.elf" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" "$BUILD_DIR/thread_shim.o" \
 	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" "$BUILD_DIR/cacert_data.o" \
-	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" \
+	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" "$BUILD_DIR/dlfcn_shim.o" \
 	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
