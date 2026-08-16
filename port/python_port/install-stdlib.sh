@@ -128,6 +128,7 @@ urllib/parse.py:urllib
 "
 
 CMDFILE="$(mktemp)"
+LOG="/tmp/install-stdlib-debugfs.log"
 trap 'rm -f "$CMDFILE"' EXIT
 
 {
@@ -155,5 +156,20 @@ trap 'rm -f "$CMDFILE"' EXIT
 } > "$CMDFILE"
 
 echo "Writing $(grep -c '^write' "$CMDFILE") files into $DISK under /pylib ..."
-debugfs -w -f "$CMDFILE" "$DISK"
-echo "Done. Verify with: debugfs -R 'ls -l /pylib' \"$DISK\""
+# mkdir/write "already exists" errors are expected on every run after
+# the first -- the curated file list rarely changes, so re-deploying
+# just skips re-creating what's already there. debugfs has no
+# -f-script-wide way to ignore a single failing command and continue,
+# so this relies on debugfs's own behavior of reporting the error and
+# moving on to the next command in the file rather than aborting the
+# whole run. That transcript goes to a log file instead of the screen
+# (same approach as install-main.sh) since this script runs on every
+# deploy and the "already exists" noise would otherwise scroll past
+# every single time.
+debugfs -w -f "$CMDFILE" "$DISK" > "$LOG" 2>&1 || true
+if ! debugfs -R 'stat /pylib/json/__init__.py' "$DISK" 2>/dev/null | grep -q '^Inode:'; then
+	echo "error: /pylib doesn't look populated on $DISK after the write -- see $LOG" >&2
+	cat "$LOG" >&2
+	exit 1
+fi
+echo "Done (debugfs log: $LOG). Verify with: debugfs -R 'ls -l /pylib' \"$DISK\""
