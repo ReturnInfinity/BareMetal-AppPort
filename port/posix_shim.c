@@ -112,6 +112,39 @@ static long sys_brk(long addr)
 	return (long)heap_cur;
 }
 
+// Reports how far a failed allocation overshot the remaining arena, so
+// an OOM in the field says how many more bytes were needed instead of
+// just that it happened.
+static void report_oom(u64 short_by)
+{
+	char buf[80];
+	size_t len = 0;
+
+	static const char pre[] = "posix_shim: out of memory (short by ";
+	memcpy(buf, pre, sizeof(pre) - 1);
+	len += sizeof(pre) - 1;
+
+	char digits[20];
+	int n = 0;
+	u64 v = short_by;
+	if (v == 0) {
+		digits[n++] = '0';
+	} else {
+		while (v) {
+			digits[n++] = (char)('0' + (v % 10));
+			v /= 10;
+		}
+	}
+	while (n > 0)
+		buf[len++] = digits[--n];
+
+	static const char post[] = " bytes)\n";
+	memcpy(buf + len, post, sizeof(post) - 1);
+	len += sizeof(post) - 1;
+
+	b_output(buf, len);
+}
+
 // Bump-allocate n bytes from the tail of the same arena brk() grows.
 // Returns 0 (never a valid heap address here) on exhaustion.
 static void *heap_alloc(size_t n)
@@ -147,14 +180,12 @@ static void *heap_alloc(size_t n)
 	// would otherwise underflow this subtraction into a huge bogus
 	// "remaining" instead of correctly reporting exhaustion.
 	if ((u64)p > (u64)heap_end) {
-		static const char msg[] = "posix_shim: out of memory\n";
-		b_output(msg, sizeof(msg) - 1);
+		report_oom((u64)p - (u64)heap_end);
 		return 0;
 	}
 	u64 remaining = (u64)heap_end - (u64)p;
 	if (n > remaining) {
-		static const char msg[] = "posix_shim: out of memory\n";
-		b_output(msg, sizeof(msg) - 1);
+		report_oom((u64)n - remaining);
 		return 0;
 	}
 
