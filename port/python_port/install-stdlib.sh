@@ -64,6 +64,7 @@ enum.py:.
 functools.py:.
 keyword.py:.
 operator.py:.
+platform.py:.
 reprlib.py:.
 types.py:.
 collections/__init__.py:collections
