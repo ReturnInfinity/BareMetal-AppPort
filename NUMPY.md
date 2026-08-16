@@ -1,11 +1,14 @@
 # NumPy Port — Scoping
 
 **Status: `numpy.linalg.lapack_lite` builds, links, and `import`s cleanly
-on real target hardware (Phase 1 symbol discovery + Phase 4, done);
-`_multiarray_umath`'s symbol surface is discovered (Phase 1) but not yet
-compiled (Phase 3); everything else not started.** This is a roadmap, not
-a full build log — most of what's below isn't built yet. It exists so a
-future session can pick up where this leaves off without re-deriving it
+on real target hardware (Phase 1 + Phase 4, done). `_multiarray_umath`
+(Phase 3): all 105 pure-C source files compile with zero errors; blocked
+on linking until `build-module.sh` gets C++ support for 11 load-bearing
+`.cpp` files (numpy's core turns out to be genuinely mixed C/C++, not
+C-plus-one-exception as originally assumed). Everything else not
+started.** This is a roadmap, not a full build log — most of what's
+below isn't built yet. It exists so a future session can pick up where
+this leaves off without re-deriving it
 from scratch, the same way `PYTHON.md` records *why* each piece of the
 Python port is the way it is, not just *that* it works.
 
@@ -174,21 +177,90 @@ reached, per the original plan below.
   resolved.
 
 ### Phase 3 — cross-compile `numpy.core._multiarray_umath`
-The largest, highest-risk single piece — dozens of files, heavy
-macro/template use, the first thing of numpy's scale this toolchain has
-ever compiled. Build via `build-module.sh` (already supports pass-through
-`-I`/`-D`/`-isystem` flags) with:
-```
--I numpy/core/include -I numpy/core/src/common -I numpy/core/src/multiarray \
--I numpy/core/src/umath -I build/Python-3.12.8/Include -I port/python_port \
--isystem "$(gcc -print-file-name=include)"
-```
-SSE2-baseline-only per the SIMD note above. Milestone:
-`import numpy.core._multiarray_umath` succeeds (every relocation
-resolves). Expect a slow, iterative "hits an unresolved symbol → add it
-to `dl_exports[]` → rebuild → retry" loop, exactly like this port's own
-`_PyArg_ParseTuple_SizeT` discovery during the dlopen() work, just at much
-larger scale.
+
+**All 105 pure-C source files compile cleanly; only C++ stands between
+here and a linkable `.so`.** The largest, highest-risk piece in this
+plan turned out to be tractable faster than expected, once three
+real, non-obvious blockers were found and fixed (all empirically, by
+actually compiling numpy 1.26.4's real source, fetched as a plain sdist
+tarball -- `files.pythonhosted.org`, no `pip` needed, same as
+Phase 4's approach):
+
+1. **Numpy's core needs its own host-side code generation before
+   anything else**, beyond just `.c.src`→`.c` (`conv_template.py`,
+   already used for CPython's own generated sources): the public
+   `numpy/core/include/numpy/__multiarray_api.h`/`__ufunc_api.h`
+   headers (and their `.c` companions, `#include`d directly by
+   `multiarraymodule.c`/`umathmodule.c` -- not compiled standalone) come
+   from `code_generators/generate_numpy_api.py`/`generate_ufunc_api.py`
+   (pure Python, ran directly, no numpy install needed); `__umath_generated.c`/
+   `_umath_doc_generated.h` come from `generate_umath.py`/
+   `generate_umath_doc.py` the same way; and `numpy/core/config.h` (an
+   *internal* build config, separate from the public `_numpyconfig.h`
+   Phase 1 already needed) has to be hand-filled from `config.h.in`'s
+   `#mesondefine` template, same as `_numpyconfig.h` was.
+2. **Every flag in that `config.h` had to be classified by actual usage
+   pattern, not assumed** -- found the hard way, via real compile
+   errors, that `#mesondefine` + meson's `set10()` does *not* mean
+   "always `#define FOO 0`-or-`1`": nearly everything in numpy's C
+   source tests these via `#ifdef`/`#ifndef`/`defined()`, where a
+   falsy value must be a genuinely undefined macro (commented out), not
+   `#define FOO 0` (which `#ifdef` sees as defined regardless of
+   value) -- confirmed systematically by grepping every flag's real
+   usage across `numpy/core/src`+`include` rather than guessing per
+   flag. The one confirmed exception, found via a direct compile error,
+   is `NPY_RELAXED_STRIDES_DEBUG` (`if (count < 0 ||
+   NPY_RELAXED_STRIDES_DEBUG)` in `ctors.c` -- a plain C boolean
+   expression, needs a real value or the identifier is undeclared).
+   Same fix applied retroactively to Phase 1's `_numpyconfig.h`
+   (`NPY_NO_SIGNAL`/`NPY_NO_SMP`, which happened to already be correct
+   by luck of how they're individually tested).
+3. **`NPY_DISABLE_OPTIMIZATION` is numpy's own official escape hatch
+   for exactly the "SSE2 baseline only, no runtime CPU dispatch"
+   simplification this plan already called for** -- not a hack this
+   port had to invent. Defining it makes `npy_cpu_dispatch.h` skip
+   including the meson-generated per-file dispatch-config headers
+   entirely, and collapses the `NPY_CPU_DISPATCH_CALL`/`_DECLARE`
+   macros to plain, unsuffixed baseline calls. This meant the 14
+   `.dispatch.c.src` files (`loops_arithmetic`, `loops_trigonometric`,
+   `argfunc`, etc.) could just be template-expanded and compiled once
+   each, normally, alongside everything else -- no separate multi-target
+   static library, no per-file `-march=` flags, no reverse-engineering
+   meson's `mod_features.multi_targets()` machinery at all.
+
+Compiled via `build-module.sh` (already supports pass-through
+`-I`/`-D`/`-isystem` flags) with `-I numpy/core -I numpy/core/include -I
+numpy/core/src/{common,multiarray,npymath,umath}` plus the usual Python
+include flags and `-DNPY_DISABLE_OPTIMIZATION -DHAVE_NPY_CONFIG_H
+-DNPY_INTERNAL_BUILD -DNPY_NO_DEPRECATED_API=NPY_API_VERSION`, on all of
+`src_multiarray_umath_common` + `src_multiarray` + `src_umath` from
+`numpy/core/meson.build` (105 files) -- **zero compile errors.**
+
+**New, real finding this plan hadn't accounted for: numpy 1.26's core is
+a genuinely mixed C/C++ codebase, not "C plus just `_umath_linalg`."**
+11 `.cpp` files are load-bearing for `_multiarray_umath` itself: all 7 of
+`numpy/core/src/npysort/*.cpp` (quicksort/mergesort/timsort/heapsort/
+radixsort/selection/binsearch -- every dtype's actual sort
+implementation), `multiarray/textreading/tokenize.cpp`, `umath/clip.cpp`,
+`umath/string_ufuncs.cpp`, and `npymath/halffloat.cpp` (float16
+conversions, needed broadly). Excluding all 11 for this pass and
+attempting the link surfaced **exactly** the undefined symbols those
+files provide and nothing else -- confirmed by listing every undefined
+symbol from the failed link: 100% are sort-function variants
+(`quicksort_double`, `aheapsort_string`, `atimsort_datetime`, ~140 total
+across every dtype) plus one, `_umath_strings_richcompare`, from
+`string_ufuncs.cpp`. No other gaps, no missing `dl_exports[]` entries
+found yet (the link never got far enough to need any -- that's still
+pending, blocked on these 11 files).
+
+**Not yet done, and now the clear next step:** add C++ support to
+`build-module.sh` (it currently only invokes `gcc`; needs a `g++`-driven
+compile path for these 11 files, `-fPIC -fno-exceptions -fno-rtti -shared`,
+matching numpy's own `cpp_args_common` choices) and compile them
+alongside the 105 C files. Once that links, the *actual* Phase 1-style
+symbol-by-symbol `dl_exports[]` iteration (this plan's original
+expectation for this phase) begins for real -- genuinely not reached yet,
+since the build has never gotten past the linker.
 
 ### Phase 4 — linalg, fft, random
 
