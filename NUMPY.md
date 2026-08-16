@@ -1,10 +1,11 @@
 # NumPy Port — Scoping
 
-**Status: not started.** This is a roadmap, not a build log — nothing
-below is built yet. It exists so a future session can pick up Phase 1
-without re-deriving this from scratch, the same way `PYTHON.md` records
-*why* each piece of the Python port is the way it is, not just *that* it
-works.
+**Status: Phase 1 (symbol discovery) done for `_multiarray_umath`;
+everything else not started.** This is a roadmap, not a full build log —
+most of what's below isn't built yet. It exists so a future session can
+pick up where this leaves off without re-deriving it from scratch, the
+same way `PYTHON.md` records *why* each piece of the Python port is the
+way it is, not just *that* it works.
 
 `test_numpy.py` in the repo root is the acceptance test this whole effort
 targets: a pass/fail suite covering array creation, reshape/indexing,
@@ -111,20 +112,53 @@ That's the foundation numpy rides on. What follows is new work.
 - Resolve the Cython gap (see above) — can be deferred/parallelized,
   doesn't block Phase 1 or the non-`random` phases.
 
-### Phase 1 — symbol surface discovery (do this first)
-- On any machine with `pip`, install/build numpy 1.26.4 against a real
-  CPython 3.12, then `nm -D --undefined-only` its
-  `_multiarray_umath*.so` (start with just this one) for the exact,
-  complete external-symbol list.
-- Partition into libc/libm entries (~40-80, straightforward additions),
-  CPython C-API *function* entries (hundreds, mechanical — all already
-  compiled into `python.app`'s core per `setup.sh`'s `PYTHON_SRCS`), and
-  CPython C-API *data* entries (`PyExc_*`, `PyLong_Type`/`PyFloat_Type`/
-  etc., `_Py_NoneStruct` — need the `(void*)&Symbol` address-of
-  convention `dlfcn_shim.c`'s export-table comment already documents,
-  not a plain function-pointer entry).
-- Repeat per additional submodule once each is reached in Phase 4 — no
-  need to front-load all of them.
+### Phase 1 — symbol surface discovery (done for `_multiarray_umath`)
+No `pip` on this build host, so no local numpy build was needed either:
+downloaded numpy 1.26.4's real PyPI wheel
+(`numpy-1.26.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl`)
+directly from `files.pythonhosted.org` and unzipped it — a wheel already
+*is* the compiled `.so` files, no install step needed to inspect them.
+`nm -D --undefined-only` + `readelf -sW` on
+`numpy/core/_multiarray_umath.cpython-312-x86_64-linux-gnu.so` gave 528
+undefined symbols; cross-checking every `Py*`/`_Py*` name against
+`build/Python-3.12.8/Include`'s own `PyAPI_FUNC()`/`PyAPI_DATA()` macros
+(not guessed) split them into 246 functions + 51 data symbols, on top of
+180 libc/libm entries and 22 `cblas_*`/`LAPACKE_*` entries (excluded --
+see below). All ~430 real additions are now in `port/dlfcn_shim.c`'s
+`dl_exports[]`, declared via a `DL_FUNC_DECL`/`DL_DATA_DECL` macro pair
+(generic `extern void NAME(void)`/`extern char NAME` — real prototypes
+for ~300 symbols would've been a lot of busywork for no benefit, since
+nothing in that file ever calls through these, only takes their
+address) and populated via matching `F()`/`D()` table-entry macros.
+**Verified, not just compiled:** every one of those ~430 symbols already
+exists as a real symbol in `python.app`'s own linked image (confirmed by
+successfully rebuilding `hello.c` — `python_*.o` is unconditionally
+linked into every app regardless of Python use, so this is really testing
+against the same symbol set `_multiarray_umath` will need). `main_test.py`
+still passes 11/11 afterward, no regression.
+
+Two things intentionally excluded, both explained in `dl_exports[]`'s own
+comment:
+- The 22 `cblas_*`/`LAPACKE_*` symbols — the wheel links real OpenBLAS
+  for `_multiarray_umath`'s own BLAS-backed `dot`/`matmul`; this port's
+  plan is lapack_lite's no-external-BLAS fallback (see Phase 4), which
+  numpy's own build only emits when no BLAS is found, so these
+  shouldn't be needed once built that way -- not confirmed until Phase 3
+  actually compiles from source, flagged here rather than assumed.
+- A handful of glibc-specific artifacts that won't appear once compiled
+  fresh against musl headers (`_IO_getc`/`fseeko64`/`ftello64`/`lseek64`
+  are glibc's getc-macro/LFS64 internals for plain
+  `getc`/`fseeko`/`ftello`/`lseek`, already added under their ordinary
+  names instead) or that are omitted outright as out of scope for now
+  (`__ctype_b_loc`/`__ctype_tolower_loc`/`__cxa_finalize`/
+  `__gmon_start__`/`_ITM_*`/`backtrace`/`dladdr`/`__popcountdi2` — the
+  last is a libgcc helper `build-module.sh`'s own module link should
+  pull in directly when it's actually needed, not something to route
+  through `dl_exports[]`).
+
+Not yet done: the same pass for `_umath_linalg`/`lapack_lite`/
+`_pocketfft_internal`/the `random` set — Phase 4's job, once each is
+reached, per the original plan below.
 
 ### Phase 2 — host-side code generation
 - Run `numpy/distutils/conv_template.py` over
