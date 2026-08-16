@@ -203,6 +203,15 @@ LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -I $PORT -DCONFIG_USE_DEFA
 # filename -- see MBEDTLS_CFLAGS's comment), and only then falls
 # through to -I $MBEDTLS_PORT to resolve it.
 #
+# -I $LWIP_INC/-I $LWIP_PORT are the equivalent for an app that calls
+# into lwIP's own API directly (test-lwip.c) rather than only reaching
+# it indirectly through the POSIX socket calls net_shim.c/dns_shim.c
+# implement (every other net_test.c/tcp_test.c/udp_test.c-style app,
+# which never #includes a lwip/*.h). Same two flags LWIP_CFLAGS above
+# passes net_glue.c/net_shim.c/dns_shim.c: lwip/opt.h's quote-form
+# #include "lwipopts.h" only resolves via -I $LWIP_PORT, and lwIP's
+# own headers (lwip/pbuf.h etc) only resolve via -I $LWIP_INC.
+#
 # -I $PYTHON_PORT is for <Python.h> itself (port/python_port/pyconfig.h
 # -- see that file's own header) plus CPython's own Include/ and
 # Include/internal/ trees, needed by this port's own
@@ -217,7 +226,7 @@ LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -I $PORT -DCONFIG_USE_DEFA
 # needs). gcc's own freestanding headers (stdatomic.h) are added back
 # the same way setup.sh's PYTHON_CFLAGS does, for the same reason.
 PYTHON_GCC_FREESTANDING_INC="$(gcc -print-file-name=include)"
-APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\" -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal -DPy_BUILD_CORE"
+APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\" -I $LWIP_INC -I $LWIP_PORT -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal -DPy_BUILD_CORE"
 
 echo "Building..."
 
