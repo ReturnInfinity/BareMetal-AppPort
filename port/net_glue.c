@@ -372,6 +372,16 @@ int net_wait_ready(unsigned timeout_ms)
 
 	dns_apply_fallback();
 
+	// Reported here rather than only in net_init()'s static-address
+	// path, so a DHCP-bound lease (whose ip/mask/gw aren't known until
+	// dhcp_bind() completes, sometime after net_init() returns) gets
+	// the same "ready" notice as the fc static path does.
+	char ip_s[IP4ADDR_STRLEN_MAX], mask_s[IP4ADDR_STRLEN_MAX], gw_s[IP4ADDR_STRLEN_MAX];
+	ip4addr_ntoa_r(netif_ip4_addr(&bmos_netif), ip_s, sizeof(ip_s));
+	ip4addr_ntoa_r(netif_ip4_netmask(&bmos_netif), mask_s, sizeof(mask_s));
+	ip4addr_ntoa_r(netif_ip4_gw(&bmos_netif), gw_s, sizeof(gw_s));
+	printf("net: ready ip=%s mask=%s gw=%s\n", ip_s, mask_s, gw_s);
+
 	return 1;
 }
 
