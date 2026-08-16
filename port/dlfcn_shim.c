@@ -42,11 +42,46 @@
 
 #include "libBareMetal.h"
 
+// Minimal hand-written declarations for the three CPython C-API entries
+// dl_exports[] below needs the addresses of -- deliberately not
+// #include <Python.h>: this file is compiled into *every* app
+// (build-app.sh), Python or not, and Python.h/pyconfig.h assume a build
+// setup (an -I onto Python's Include tree, PY_SSIZE_T_CLEAN, etc) a
+// generic shim like this one shouldn't force onto unrelated apps. These
+// just need to be ABI-compatible enough to take an address from --
+// port/python_port/ itself (and any real extension module, e.g.
+// ../pyexttest.c) is what actually calls through them against the real
+// Python.h declarations.
+struct _object;
+typedef struct _object PyObject;
+struct PyModuleDef;
+extern int PyArg_ParseTuple(PyObject *args, const char *format, ...);
+// PY_SSIZE_T_CLEAN (the recommended, increasingly default-assumed way to
+// write an extension -- see ../pyexttest.c) makes PyArg_ParseTuple a
+// macro for this real symbol instead, so both need exporting: which one
+// a given module's calls actually resolve to at link time depends on
+// whether that module itself defined PY_SSIZE_T_CLEAN before #include
+// <Python.h>, not on anything dlfcn_shim.c controls.
+extern int _PyArg_ParseTuple_SizeT(PyObject *args, const char *format, ...);
+extern PyObject *PyModule_Create2(struct PyModuleDef *module, int module_api_version);
+extern PyObject *PyLong_FromLong(long v);
+
 // -----------------------------------------------------------------------
 // Curated export table -- symbols a loaded module is allowed to bind
 // against for anything it doesn't define itself. Add entries as modules
 // need more of the host surface; a module referencing something not
 // listed here fails dlopen() with that symbol's name in dlerror().
+//
+// Function vs. data exports are NOT interchangeable here. A function
+// export's table entry is just the function's own address -- a call
+// through the GOT loads that address and jumps straight to it. A *data*
+// symbol (e.g. a Python C-extension module doing `extern PyObject
+// *PyExc_ValueError` and reading it) instead needs the table entry to be
+// the address *of* the variable -- (void *)&PyExc_ValueError, not
+// (void *)PyExc_ValueError -- since compiled PIC code dereferences the
+// GOT slot once to get the variable's address, then dereferences again
+// to read its current value. Every entry below is a function; there are
+// no data exports yet.
 // -----------------------------------------------------------------------
 
 struct dl_export {
@@ -70,6 +105,18 @@ static const struct dl_export dl_exports[] = {
 	{ "strcpy",  (void *)strcpy },
 	{ "strcat",  (void *)strcat },
 	{ "b_output", (void *)b_output },
+	// CPython C-API entries -- enough for a hand-written extension
+	// module (see ../pyexttest.c) to prove Python/dynload_shlib.c's
+	// dlopen()/dlsym() path end-to-end. All three are already real
+	// symbols in the linked python.app binary (Python/getargs.c,
+	// Python/modsupport.c, Objects/longobject.c are all in setup.sh's
+	// PYTHON_SRCS). Extend this as more extensions need more of the
+	// C API -- see this table's header comment for data vs. function
+	// exports before adding a PyExc_*/PyType_Type-style symbol.
+	{ "PyArg_ParseTuple", (void *)PyArg_ParseTuple },
+	{ "_PyArg_ParseTuple_SizeT", (void *)_PyArg_ParseTuple_SizeT },
+	{ "PyModule_Create2", (void *)PyModule_Create2 },
+	{ "PyLong_FromLong",  (void *)PyLong_FromLong },
 };
 
 static void *dl_export_lookup(const char *name)

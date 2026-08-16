@@ -132,36 +132,98 @@
  * getpath.c does). */
 
 /* ---------------------------------------------------------------------
- * No dynamic linking at all (OPENISSUES.md's "General" section, c.ld's
- * single flat binary at a fixed load address). This is CPython's own
- * documented degraded mode, not something this port has to invent:
- * Python/dynload_stub.c ("necessary stubs for when dynamic loading is
- * not present") is exactly the file CPython already ships for a
- * platform with HAVE_DYNAMIC_LOADING left undefined -- pick it as
- * Python/dynload_*.c instead of dynload_shlib.c in the port's own
- * build script (there is no configure to pick it automatically).
- * Consequence: no importable .so extension modules, ever -- every
- * module a program needs (see Modules/Setup.bootstrap.in and
- * PYTHON.md's Phase 1/2 module lists) must be linked in statically
- * and registered in the frozen/builtin table Modules/config.c.in
- * generates, the same *static* mechanism Modules/Setup.bootstrap.in's
- * own header comment describes ("Built-in modules required to get a
- * functioning interpreter; cannot be built as shared!"). ctypes is a
- * casualty of this too (its whole purpose is dlopen()-ing arbitrary
- * shared libraries) -- not attempted.
+ * Dynamic loading of extension modules -- originally cut entirely (c.ld's
+ * single flat binary at a fixed load address, no real ld.so anywhere in
+ * this port) but re-enabled once port/dlfcn_shim.c existed: a hand-rolled
+ * ELF64 loader that reads a real ET_DYN .so off the ext4 disk, processes
+ * its .rela.dyn/.rela.plt by hand (there's still no ld.so to do it), and
+ * resolves external symbols against a small curated export table
+ * (dl_exports[] in that file) rather than the module's full host symbol
+ * table -- see that file's own header for why. Python/dynload_shlib.c
+ * (CPython's real dlopen()/dlsym()-based loader) just calls straight into
+ * that -- swapped in for Python/dynload_stub.c ("necessary stubs for when
+ * dynamic loading is not present") in the port's own build script (there
+ * is no configure to pick it automatically).
+ *
+ * Consequence of the curated-export-table design: an extension module can
+ * only call back into whatever dlfcn_shim.c's dl_exports[] lists -- add
+ * entries there as modules need more of the CPython C API/libc/libm.
+ * Function exports are just the function's own address; a *data* symbol
+ * (extern PyObject *PyExc_ValueError-style) instead needs
+ * (void*)&PyExc_ValueError -- the address of the variable, not its
+ * current value -- see dlfcn_shim.c's comment for why.
+ *
+ * Modules/Setup.bootstrap.in's mandatory-static set is unaffected either
+ * way ("Built-in modules required to get a functioning interpreter;
+ * cannot be built as shared!") -- those still go through
+ * Modules/config.c.in's static frozen/builtin table
+ * (config_baremetal.c here), which coexists with dynamic loading by
+ * module name, not by exclusivity. ctypes remains a casualty regardless
+ * of dlopen() now existing -- it needs far more of libffi/the C API than
+ * one export table entry, not attempted.
  * --------------------------------------------------------------------- */
-#undef HAVE_DYNAMIC_LOADING
-#undef HAVE_DLOPEN
-#undef HAVE_DLFCN_H
-#undef HAVE_DECL_RTLD_LAZY
-#undef HAVE_DECL_RTLD_NOW
-#undef HAVE_DECL_RTLD_GLOBAL
-#undef HAVE_DECL_RTLD_LOCAL
-#undef HAVE_DECL_RTLD_NODELETE
-#undef HAVE_DECL_RTLD_NOLOAD
+#define HAVE_DYNAMIC_LOADING 1
+#define HAVE_DLOPEN 1
+#define HAVE_DLFCN_H 1
+#define HAVE_DECL_RTLD_LAZY 1
+#define HAVE_DECL_RTLD_NOW 1
+#define HAVE_DECL_RTLD_GLOBAL 1
+#define HAVE_DECL_RTLD_LOCAL 1
+#define HAVE_DECL_RTLD_NODELETE 1
+#define HAVE_DECL_RTLD_NOLOAD 1
+/* musl's dlfcn.h doesn't declare either of these two -- left cut, matching reality: */
 #undef HAVE_DECL_RTLD_DEEPBIND
 #undef HAVE_DECL_RTLD_MEMBER
 #define Py_NO_ENABLE_SHARED 1   /* build the interpreter itself as one static binary, no libpython*.so */
+
+/* FIXED (was a real, deterministic bug -- not a hypervisor/hardware
+ * issue, despite looking exactly like one at first): importing any
+ * dynamically-loaded extension module used to corrupt every CPython
+ * C-API call the loaded module's own code made afterward -- e.g.
+ * PyModule_Create2 (called from ../pyexttest.c's PyInit_pyexttest)
+ * would segfault deep inside Objects/obmalloc.c's pymalloc_alloc(),
+ * with its `state` argument coming back as exactly
+ * offsetof(PyInterpreterState, obmalloc). Traced to get_state() ->
+ * _PyInterpreterState_GET() -> _PyThreadState_GET() reading
+ * _Py_tss_tstate (a `_Thread_local`/__thread variable, `mov %fs:-8,
+ * %reg`) as a bogus pointer whose ->interp field happened to be NULL.
+ *
+ * Root cause, confirmed via readelf -S on the linked binary: port/c.ld
+ * had no explicit .tdata/.tbss output-section rule (only .bss had one
+ * -- *(.bss .bss.*) -- to glob -fdata-sections's separate per-symbol
+ * sections back together). Without it, ld placed CPython's two
+ * `_Thread_local` variables -- _Py_tss_tstate (Python/pystate.c, "the
+ * current thread state") and pkgcontext (Python/import.c,
+ * "_Py_PackageContext", the module name mid-import) -- at the exact
+ * same address (both .tbss.pkgcontext and .tbss._Py_tss_tstate showed
+ * identical VMAs). _PyImport_SwapPackageContext() writes pkgcontext
+ * (a plain module-name string pointer) right before calling the
+ * loaded module's PyInit_* function -- since that write landed on the
+ * SAME memory as _Py_tss_tstate, every CPython C-API call the module
+ * made afterward read a string pointer back where it expected a
+ * PyThreadState*.
+ *
+ * This is why it looked so much like a %fs/hypervisor bug during
+ * investigation: FS_BASE itself (read directly via rdmsr on
+ * IA32_FS_BASE, bypassing the compiler's own TLS-access instruction
+ * entirely) was proven byte-identical in both the working and broken
+ * contexts, deterministically, across repeated boots -- ruling out any
+ * register/virtualization explanation and pointing at the *memory*
+ * two fixed, correct addresses resolved to actually being one and the
+ * same. No PT_TLS program header or runtime TLS-copy machinery was
+ * ever involved -- musl's own PT_TLS-walking init (Python-3.12.8's
+ * vendored env/__init_tls.c, via aux[AT_PHDR]) is dead code on this
+ * port regardless (crt0.c's fabricated auxv carries only
+ * AT_PAGESZ/AT_RANDOM), since x86-64 Local-Exec TLS access computes
+ * its offset entirely at *link* time -- the fix is purely giving ld
+ * one correctly-sized, non-overlapping .tdata/.tbss pair to place,
+ * the same way .bss's own rule already does for everything else.
+ * Verified fixed: readelf -S now shows one 16-byte .tbss holding both
+ * variables contiguously (was two separate, colliding 8-byte
+ * sections), _Py_tss_tstate reads correctly from inside a dlopen()'d
+ * module, and ../pyexttest.c's real PyModule_Create2/PyArg_ParseTuple/
+ * PyLong_FromLong path runs end-to-end with no crash.
+ */
 
 /* ---------------------------------------------------------------------
  * Threading -- the one section that's *good* news. thread_shim.c

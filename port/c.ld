@@ -40,6 +40,56 @@ SECTIONS
 	. = ALIGN(16);
 
 	/*
+	 * -fdata-sections (build-app.sh's CFLAGS) puts each __thread/
+	 * _Thread_local variable in its own uniquely-named .tdata.NAME/
+	 * .tbss.NAME input section, same as it already does for .data/
+	 * .bss's own per-symbol sections above -- so without an explicit
+	 * rule to glob them all into one
+	 * output section the way .bss's *(.bss .bss.*) already does,
+	 * each one is left an orphan section for ld to place on its own.
+	 * Found the hard way: with no rule here at all, ld placed
+	 * .tbss._Py_tss_tstate (CPython's "current thread state" pointer)
+	 * and .tbss.pkgcontext (CPython's "current package name during an
+	 * extension-module import" pointer) at the exact same address --
+	 * confirmed via readelf -S, both showing identical VMAs. Once
+	 * TWO thread-local variables collide, %fs-relative Local-Exec TLS
+	 * access (a compile-time-fixed negative offset from the thread
+	 * pointer -- see thread_shim.c's own TLS notes) reads/writes the
+	 * SAME memory for what the compiler thinks are two independent
+	 * variables: importing any dynamically-loaded extension module
+	 * (port/dlfcn_shim.c) overwrites _Py_tss_tstate with pkgcontext's
+	 * value (a plain `const char *` module-name string, not a
+	 * PyThreadState*) as a side effect of _PyImport_SwapPackageContext
+	 * writing to what it thinks is its own separate variable --
+	 * corrupting every CPython C-API call the loaded module's own code
+	 * makes afterward, well past that one import returning.
+	 *
+	 * This didn't need a PT_TLS program header or any runtime TLS
+	 * setup to go wrong -- Local-Exec offsets are baked in entirely at
+	 * link time. musl's own PT_TLS-parsing (Python-3.12.8/../
+	 * __init_tls.c's static_init_tls(), walking aux[AT_PHDR]) is
+	 * already dead code here regardless (crt0.c's fabricated auxv
+	 * carries only AT_PAGESZ/AT_RANDOM -- see this file's _DYNAMIC
+	 * comment below), so this fix is purely about giving ld one
+	 * correctly-sized, non-overlapping output section per TLS input
+	 * section group, mirroring .bss's existing pattern -- nothing
+	 * about actually copying/initializing a TLS template at runtime
+	 * needs to exist for Local-Exec mode to be correct once the
+	 * addresses themselves stop colliding.
+	 */
+	.tdata : {
+		*(.tdata .tdata.*)
+	}
+
+	. = ALIGN(16);
+
+	.tbss : {
+		*(.tbss .tbss.*)
+	}
+
+	. = ALIGN(16);
+
+	/*
 	 * musl's startup/exit path (__libc_start_main.c, exit.c) walks
 	 * these bounds to run any __attribute__((constructor))/
 	 * ((destructor)) functions. Nothing currently uses them, but

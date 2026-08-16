@@ -161,6 +161,24 @@ def test_thread_module():
 	assert result == [42]
 
 
+def test_pyexttest_module():
+	# pyexttest.so (repo root) is a real dynamically-loaded C extension
+	# -- not frozen, not static/config_baremetal.c-registered. Proves
+	# Python/dynload_shlib.c's dlopen()/dlsym() (port/dlfcn_shim.c) end
+	# to end: PyInit_pyexttest is found and run by the normal import
+	# machinery, same as any real .so extension.
+	import pyexttest
+	assert pyexttest.add(1, 2) == 3
+	print("  pyexttest.add(1, 2):", pyexttest.add(1, 2))
+
+	try:
+		import does_not_exist_pyexttest
+	except ModuleNotFoundError:
+		pass
+	else:
+		raise AssertionError("expected ModuleNotFoundError for a missing extension module")
+
+
 check("core language", test_core_language)
 check("sys module", test_sys_module)
 check("os module (real EXT2 file I/O)", test_os_module)
@@ -171,6 +189,7 @@ check("collections module (real /pylib file)", test_collections_module)
 check("encodings.ascii (real /pylib file, frozen-package __path__ fix)", test_encodings_ascii)
 check("_socket module (socket/bind/close)", test_socket_module)
 check("_thread module", test_thread_module)
+check("pyexttest module (real dlopen()'d C extension)", test_pyexttest_module)
 
 passed = sum(1 for _, ok, _ in results if ok)
 print("")

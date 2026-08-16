@@ -177,6 +177,16 @@ PYTHON_BUILTIN_CFLAGS="$PYTHON_CFLAGS -DPy_BUILD_CORE_BUILTIN"
 # runtime.
 PYTHON_GETPATH_DEFINES='-DPREFIX="/" -DEXEC_PREFIX="/" -DVERSION="3.12" -DVPATH="" -DPLATLIBDIR="lib"'
 
+# Python/dynload_shlib.c normally gets SOABI/PYTHON_ABI_STRING from the
+# Makefile (in turn from configure) -- it string-concatenates them
+# straight into _PyImport_DynLoadFiletab's entries ("." SOABI ".so" etc),
+# so leaving either undefined doesn't just leave a suffix out, it fails
+# to compile at all. The actual values are arbitrary tags, not meaningful
+# here: _PyImport_DynLoadFiletab's last entry is always the bare ".so"
+# fallback, so a module just needs to be named foo.so to be found
+# regardless of what these say.
+PYTHON_DYNLOAD_DEFINES='-DSOABI="baremetal" -DPYTHON_ABI_STRING="3"'
+
 mkdir -p "$BUILD_DIR"
 
 echo -e "${BOLD}Building libraries${NORMAL}"
@@ -389,7 +399,7 @@ PYTHON_SRCS="
 	Python/traceback.c Python/tracemalloc.c Python/getopt.c
 	Python/pystrcmp.c Python/pystrtod.c Python/pystrhex.c Python/dtoa.c
 	Python/formatter_unicode.c Python/fileutils.c Python/suggestions.c
-	Python/perf_trampoline.c Python/dynload_stub.c
+	Python/perf_trampoline.c
 
 	Objects/abstract.c Objects/boolobject.c Objects/bytes_methods.c
 	Objects/bytearrayobject.c Objects/bytesobject.c Objects/call.c
@@ -436,6 +446,15 @@ done
 # -DVERSION/etc placeholders (PYTHON_GETPATH_DEFINES, see its own
 # comment) only belong on this one file.
 gcc $PYTHON_CORE_CFLAGS $PYTHON_GETPATH_DEFINES -o "$BUILD_DIR/python_Modules_getpath.o" "$PYTHON_DIR/Modules/getpath.c"
+
+# Python/dynload_shlib.c isn't in PYTHON_SRCS above either, for the same
+# reason as getpath.c just above -- its own -DSOABI/-DPYTHON_ABI_STRING
+# placeholders (PYTHON_DYNLOAD_DEFINES, see its own comment) only belong
+# on this one file. This is what makes HAVE_DYNAMIC_LOADING (pyconfig.h)
+# real: it replaces Python/dynload_stub.c's always-fails stub with the
+# actual dlopen()/dlsym()-based loader, calling straight into
+# port/dlfcn_shim.c (linked into every app already -- see build-app.sh).
+gcc $PYTHON_CORE_CFLAGS $PYTHON_DYNLOAD_DEFINES -o "$BUILD_DIR/python_Python_dynload_shlib.o" "$PYTHON_DIR/Python/dynload_shlib.c"
 
 for src in $PYTHON_BUILTIN_SRCS; do
 	obj="$BUILD_DIR/python_$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')"

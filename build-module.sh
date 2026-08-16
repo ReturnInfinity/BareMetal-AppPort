@@ -5,7 +5,18 @@ set -e
 # BareMetal app -- see port/dlfcn_shim.c for the runtime loader this
 # targets, and the top-level README for how dlopen() support works here.
 #
-# Usage: ./build-module.sh yourmodule.c [otherfile.c ...] -o yourmodule.so
+# Usage: ./build-module.sh [-Ixxx|-Dxxx|-isystem xxx|...] yourmodule.c [otherfile.c ...] -o yourmodule.so
+#
+# Any argument starting with "-" other than "-o" is passed straight
+# through to gcc, appended after this script's own CFLAGS -- e.g. for a
+# Python C-extension module (see ../pyexttest.c), which needs Python's
+# own Include tree plus this port's own pyconfig.h on the search path:
+#   ./build-module.sh -I build/Python-3.12.8/Include -I port/python_port \
+#       -isystem "$(gcc -print-file-name=include)" \
+#       pyexttest.c -o build/pyexttest.so
+# Most modules aren't Python extensions, so those paths aren't baked into
+# this script's own CFLAGS below -- pass them explicitly when they're
+# needed instead.
 #
 # Unlike build-app.sh, a module is NOT linked against musl (no libc.a,
 # no crt0.o/posix_shim.o/etc) and is NOT flattened with objcopy -O binary
@@ -32,11 +43,26 @@ fi
 
 SRCS=()
 OUT=""
+EXTRA_FLAGS=()
 while [ $# -gt 0 ]; do
 	case "$1" in
 	-o)
 		OUT="$2"
 		shift 2
+		;;
+	-isystem|-I|-D|-include)
+		# Two-token flags (flag, then its argument, as a separate
+		# shell word) -- gcc accepts -Ixxx attached too, but -I xxx
+		# with a space is common enough (this script's own usage
+		# comment above uses it) that it needs handling here, or
+		# the path silently falls through to the "*)" source-file
+		# case below instead of being attached to the flag.
+		EXTRA_FLAGS+=("$1" "$2")
+		shift 2
+		;;
+	-*)
+		EXTRA_FLAGS+=("$1")
+		shift
 		;;
 	*)
 		SRCS+=("$1")
@@ -46,7 +72,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ ${#SRCS[@]} -eq 0 ] || [ -z "$OUT" ]; then
-	echo "usage: $0 yourmodule.c [otherfile.c ...] -o yourmodule.so" >&2
+	echo "usage: $0 [-Ixxx|-Dxxx|-isystem xxx|...] yourmodule.c [otherfile.c ...] -o yourmodule.so" >&2
 	exit 1
 fi
 
@@ -73,7 +99,7 @@ echo "Building module..."
 OBJS=()
 for src in "${SRCS[@]}"; do
 	obj="$BUILD_DIR/$(basename "$src" .c).mod.o"
-	gcc $CFLAGS -o "$obj" "$src"
+	gcc $CFLAGS "${EXTRA_FLAGS[@]}" -o "$obj" "$src"
 	OBJS+=("$obj")
 done
 

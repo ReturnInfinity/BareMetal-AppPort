@@ -55,6 +55,13 @@ trap 'rm -f "$CMDFILE"' EXIT
 		path="$path/$part"
 		echo "mkdir $path"
 	done
+	# debugfs's `write` creates a new inode rather than overwriting an
+	# existing one in place -- without removing $DEST first, a repeat
+	# install silently leaves the OLD file's contents in place under
+	# the same name (same failure mode install-main.sh's own header
+	# comment already documents for /pylib/main.py, hence its `rm`
+	# before `write` -- this needs the same fix).
+	echo "rm $DEST"
 	echo "write $SRC $DEST"
 } > "$CMDFILE"
 

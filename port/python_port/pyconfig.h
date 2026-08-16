@@ -265,35 +265,35 @@
 
 /* Define to 1 if you have the declaration of `RTLD_DEEPBIND', and to 0 if you
    don't. */
-/* #define HAVE_DECL_RTLD_DEEPBIND 1  -- cut for this port, see pyconfig_baremetal.h */
+/* #define HAVE_DECL_RTLD_DEEPBIND 1  -- musl's dlfcn.h doesn't declare this one, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the declaration of `RTLD_GLOBAL', and to 0 if you
    don't. */
-/* #define HAVE_DECL_RTLD_GLOBAL 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_DECL_RTLD_GLOBAL 1 /* musl's dlfcn.h declares it -- dlopen() support, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the declaration of `RTLD_LAZY', and to 0 if you
    don't. */
-/* #define HAVE_DECL_RTLD_LAZY 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_DECL_RTLD_LAZY 1 /* musl's dlfcn.h declares it -- dlopen() support, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the declaration of `RTLD_LOCAL', and to 0 if you
    don't. */
-/* #define HAVE_DECL_RTLD_LOCAL 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_DECL_RTLD_LOCAL 1 /* musl's dlfcn.h declares it -- dlopen() support, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the declaration of `RTLD_MEMBER', and to 0 if you
    don't. */
-/* #define HAVE_DECL_RTLD_MEMBER 0  -- cut for this port, see pyconfig_baremetal.h */
+/* #define HAVE_DECL_RTLD_MEMBER 0  -- musl's dlfcn.h doesn't declare this one, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the declaration of `RTLD_NODELETE', and to 0 if you
    don't. */
-/* #define HAVE_DECL_RTLD_NODELETE 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_DECL_RTLD_NODELETE 1 /* musl's dlfcn.h declares it -- dlopen() support, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the declaration of `RTLD_NOLOAD', and to 0 if you
    don't. */
-/* #define HAVE_DECL_RTLD_NOLOAD 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_DECL_RTLD_NOLOAD 1 /* musl's dlfcn.h declares it -- dlopen() support, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the declaration of `RTLD_NOW', and to 0 if you
    don't. */
-/* #define HAVE_DECL_RTLD_NOW 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_DECL_RTLD_NOW 1 /* musl's dlfcn.h declares it -- dlopen() support, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the declaration of `tzname', and to 0 if you don't.
    */
@@ -322,10 +322,10 @@
 #define HAVE_DIRFD 1
 
 /* Define to 1 if you have the <dlfcn.h> header file. */
-/* #define HAVE_DLFCN_H 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_DLFCN_H 1 /* musl provides one -- dlopen() support, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the `dlopen' function. */
-/* #define HAVE_DLOPEN 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_DLOPEN 1 /* port/dlfcn_shim.c's real implementation, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the `dup' function. */
 /* #define HAVE_DUP 1  -- cut for this port, see pyconfig_baremetal.h */
@@ -340,7 +340,7 @@
 /* #undef HAVE_DYLD_SHARED_CACHE_CONTAINS_PATH */
 
 /* Defined when any dynamic module loading is enabled. */
-/* #define HAVE_DYNAMIC_LOADING 1  -- cut for this port, see pyconfig_baremetal.h */
+#define HAVE_DYNAMIC_LOADING 1 /* Python/dynload_shlib.c on port/dlfcn_shim.c, see pyconfig_baremetal.h */
 
 /* Define to 1 if you have the <editline/readline.h> header file. */
 /* #undef HAVE_EDITLINE_READLINE_H */
