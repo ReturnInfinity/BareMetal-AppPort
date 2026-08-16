@@ -1,11 +1,13 @@
 # NumPy Port — Scoping
 
-**Status: Phase 1 (symbol discovery) done for `_multiarray_umath`;
-everything else not started.** This is a roadmap, not a full build log —
-most of what's below isn't built yet. It exists so a future session can
-pick up where this leaves off without re-deriving it from scratch, the
-same way `PYTHON.md` records *why* each piece of the Python port is the
-way it is, not just *that* it works.
+**Status: `numpy.linalg.lapack_lite` builds, links, and `import`s cleanly
+on real target hardware (Phase 1 symbol discovery + Phase 4, done);
+`_multiarray_umath`'s symbol surface is discovered (Phase 1) but not yet
+compiled (Phase 3); everything else not started.** This is a roadmap, not
+a full build log — most of what's below isn't built yet. It exists so a
+future session can pick up where this leaves off without re-deriving it
+from scratch, the same way `PYTHON.md` records *why* each piece of the
+Python port is the way it is, not just *that* it works.
 
 `test_numpy.py` in the repo root is the acceptance test this whole effort
 targets: a pass/fail suite covering array creation, reshape/indexing,
@@ -189,11 +191,61 @@ to `dl_exports[]` → rebuild → retry" loop, exactly like this port's own
 larger scale.
 
 ### Phase 4 — linalg, fft, random
-- `numpy.linalg.lapack_lite` + `_umath_linalg`: plain C, same
-  `build-module.sh` pattern, no new host tooling.
-- `numpy.fft._pocketfft_internal`: same, portable C (pocketfft).
-- `numpy.random`'s 8 modules: needs Phase 2's Cython-generated `.c`;
-  otherwise the same compile/link pattern.
+
+**`numpy.linalg.lapack_lite`: done, verified on real target hardware.**
+Fetched numpy 1.26.4's real sdist (`files.pythonhosted.org`, no `pip`
+needed — a plain tarball, same as `get-python.sh`'s own approach) for
+`numpy/linalg/lapack_litemodule.c` + `numpy/linalg/lapack_lite/`'s f2c
+fallback sources (`f2c.c`, `f2c_c_lapack.c`, `f2c_d_lapack.c`,
+`f2c_s_lapack.c`, `f2c_z_lapack.c`, `f2c_blas.c`, `f2c_config.c`,
+`f2c_lapack.c`) plus `python_xerbla.c` — confirmed via
+`numpy/linalg/meson.build` that this exact file set is what numpy's own
+build uses `if not have_lapack` (the no-external-BLAS fallback path this
+plan already targets).
+
+Compiling `lapack_litemodule.c` needs `numpy/core/include/numpy/
+arrayobject.h`, which needs three headers numpy's own build normally
+generates (`__multiarray_api.h`, `__ufunc_api.h`, `_numpyconfig.h`) --
+produced by running `numpy/core/code_generators/generate_numpy_api.py`/
+`generate_ufunc_api.py` directly (pure Python, no numpy install needed)
+plus hand-filling `_numpyconfig.h.in`'s `#mesondefine` template with
+ordinary x86-64 Linux values and the exact `NPY_ABI_VERSION`/
+`NPY_API_VERSION` numpy 1.26.4 uses (`0x01000009`/`0x00000011`, from
+`numpy/core/setup_common.py`) -- this is Phase 2's header-generation
+piece, done just for this module rather than up front.
+
+Built via `build-module.sh` with `-I numpy/core/include -I
+numpy/core/src/common` (for `npy_cblas.h`) alongside the usual Python
+include flags -- compiled and linked with **zero errors on the first
+try**. `nm -D --undefined-only` on the result: only **38** undefined
+symbols (not the ~500 the wheel's own prebuilt `lapack_lite.so` has --
+that one links real OpenBLAS and skips the fallback sources entirely,
+so its symbol table has Fortran-mangled BLAS/LAPACK names like
+`dgelsd_64_` that never appear once those fallback sources are actually
+compiled in, confirming the exclusion `dlfcn_shim.c`'s Phase 1 comment
+already flagged as unconfirmed). No `PyArray_*`/`cblas_*` symbols at
+all -- numpy's own C-API is reached through a function-pointer table
+`import_array()` populates at runtime, not ELF-level symbol relocation,
+so `lapack_lite.so` doesn't need any of that in `dl_exports[]`.
+
+Of the 38, only 5 were genuinely new (the rest already added during
+Phase 1): `PyErr_NewException`, `abort`/`exit`/`putc` (libc), `stderr`
+(data). All five now in `dl_exports[]`.
+
+**Verified on real target hardware, not just compiled:** installed
+`lapack_lite.so` at `/pylib/lapack_lite.so` and ran `import lapack_lite`
+on-target. It loaded, ran its real `PyInit_lapack_lite` (calling real
+`PyModule_Create2`/`PyErr_NewException`/etc.), reached its
+`import_array()` bootstrap, and failed with a **clean Python
+`ImportError`** ("numpy.core.multiarray failed to import") -- exactly
+the correct, expected outcome, since Phase 3's `_multiarray_umath`
+doesn't exist yet. No crash. `main_test.py` still 11/11 afterward.
+
+Not yet done: `_umath_linalg` (note: it's `umath_linalg.cpp` -- **C++**,
+a new wrinkle this plan hadn't accounted for, needs its own look before
+attempting), `numpy.fft._pocketfft_internal` (portable C, same pattern
+expected), and `numpy.random`'s 8 Cython-derived modules (blocked on
+Phase 0's Cython gap).
 
 ### Phase 5 — on-disk package layout
 - Extend `port/python_port/install-stdlib.sh`'s exact pattern (or add a

@@ -364,6 +364,17 @@ DL_FUNC_DECL(_PyUnicode_IsWhitespace);
 DL_FUNC_DECL(_Py_BuildValue_SizeT);
 DL_FUNC_DECL(_Py_Dealloc);
 DL_FUNC_DECL(_Py_HashDouble);
+// numpy.linalg.lapack_lite (see ../NUMPY.md Phase 4) -- found by
+// actually compiling lapack_litemodule.c + the f2c-translated fallback
+// sources with build-module.sh and checking the result's own
+// nm -D --undefined-only, not by reasoning about numpy's source: the
+// PyPI wheel's own lapack_lite.so is misleading here since it links
+// real OpenBLAS and skips the fallback sources entirely, so its
+// symbol table has Fortran-mangled BLAS/LAPACK names (dgelsd_64_ etc.)
+// that never appear once those fallback sources are actually compiled
+// in -- they resolve internally, within the same .so, same as every
+// other lapack_lite/f2c_*.c internal call.
+DL_FUNC_DECL(PyErr_NewException);
 
 DL_DATA_DECL(PyBaseObject_Type);
 DL_DATA_DECL(PyBool_Type);
@@ -592,6 +603,11 @@ static const struct dl_export dl_exports[] = {
 	F(_PyObject_GC_New) F(_PyObject_New) F(_PyUnicode_IsWhitespace)
 	F(_Py_BuildValue_SizeT) F(_Py_Dealloc) F(_Py_HashDouble)
 
+	// libc + CPython C-API -- numpy.linalg.lapack_lite (see ../NUMPY.md
+	// Phase 4), on top of the Phase 1 additions above (lapack_lite needs
+	// most of those too -- PyErr_Format/PyEval_SaveThread/etc.)
+	F(abort) F(exit) F(putc) F(PyErr_NewException)
+
 	// CPython C-API data -- numpy (see ../NUMPY.md Phase 1). Address-of,
 	// not a plain function-pointer entry -- see this table's header
 	// comment for why.
@@ -611,6 +627,10 @@ static const struct dl_export dl_exports[] = {
 	D(PySlice_Type) D(PyTuple_Type) D(PyType_Type) D(PyUnicode_Type)
 	D(_Py_EllipsisObject) D(_Py_FalseStruct) D(_Py_NoneStruct)
 	D(_Py_NotImplementedStruct) D(_Py_TrueStruct) D(_Py_ascii_whitespace)
+
+	// numpy.linalg.lapack_lite (see ../NUMPY.md Phase 4) -- python_xerbla.c's
+	// error handler prints to it directly.
+	D(stderr)
 
 #undef F
 #undef D
