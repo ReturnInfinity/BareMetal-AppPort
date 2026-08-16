@@ -2,12 +2,16 @@
 
 **Status: `numpy.linalg.lapack_lite` builds, links, and `import`s cleanly
 on real target hardware (Phase 1 + Phase 4, done). `_multiarray_umath`
-(Phase 3): all 105 pure-C source files compile with zero errors; blocked
-on linking until `build-module.sh` gets C++ support for 11 load-bearing
-`.cpp` files (numpy's core turns out to be genuinely mixed C/C++, not
-C-plus-one-exception as originally assumed). Everything else not
-started.** This is a roadmap, not a full build log — most of what's
-below isn't built yet. It exists so a future session can pick up where
+(Phase 3): all 105 pure-C source files compile with zero errors.
+`build-module.sh` now has real, working C++ support (Phase 3b), but the
+11 C++ files still can't compile against this system's `g++` --
+`<complex>` unconditionally drags in a `<sstream>`/`<locale>` chain
+hard-coded to assume glibc, which musl doesn't provide (a toolchain-level
+mismatch, not a numpy source issue). Blocked on either a musl-targeting
+C++ toolchain or a careful libstdc++ patch -- deliberately not attempted
+this pass, see Phase 3b. Everything else not started.** This is a
+roadmap, not a full build log — most of what's below isn't built yet.
+It exists so a future session can pick up where
 this leaves off without re-deriving it
 from scratch, the same way `PYTHON.md` records *why* each piece of the
 Python port is the way it is, not just *that* it works.
@@ -253,14 +257,78 @@ across every dtype) plus one, `_umath_strings_richcompare`, from
 found yet (the link never got far enough to need any -- that's still
 pending, blocked on these 11 files).
 
-**Not yet done, and now the clear next step:** add C++ support to
-`build-module.sh` (it currently only invokes `gcc`; needs a `g++`-driven
-compile path for these 11 files, `-fPIC -fno-exceptions -fno-rtti -shared`,
-matching numpy's own `cpp_args_common` choices) and compile them
-alongside the 105 C files. Once that links, the *actual* Phase 1-style
-symbol-by-symbol `dl_exports[]` iteration (this plan's original
-expectation for this phase) begins for real -- genuinely not reached yet,
-since the build has never gotten past the linker.
+### Phase 3b — C++ support in `build-module.sh`
+
+**Done, working, and genuinely useful -- but not sufficient by itself to
+finish Phase 3.** `build-module.sh` now detects `.cpp`/`.cc`/`.cxx`
+sources and compiles them with `g++` (`-fPIC -fno-plt` + the same
+freestanding flags as C, plus `-fno-exceptions -fno-rtti` matching
+numpy's own `cpp_args_common`), auto-discovering this machine's real
+`g++` C++ standard-header search dirs (via its own `-Wp,-v` verbose
+preprocessor output, no version number hardcoded) since `-nostdinc`
+blocks those the same way it already blocks musl's own headers.
+Verified against the actual system (not assumed): regression-checked
+against `modtest.c` (plain C still works unchanged), and got real numpy
+C++ files further than they'd go with no C++ support at all.
+
+Two real, non-obvious things had to be fixed to get there:
+- **`-ffreestanding` (part of the shared C/C++ flag set, needed for
+  musl) is actively harmful for C++.** It sets `__STDC_HOSTED__` to 0,
+  which makes libstdc++'s `bits/functexcept.h` hide its
+  `__throw_length_error()`-and-friends *declarations* behind `#if
+  _GLIBCXX_HOSTED` (`#define _GLIBCXX_HOSTED __STDC_HOSTED__`) -- but
+  `<string>`'s own inline bodies reference them regardless of that
+  guard, a real gap in libstdc++'s freestanding-mode headers, not
+  something specific to numpy's code. Since `-nodefaultlibs
+  -nostdlib` already keep this port from linking against libstdc++'s
+  actual runtime either way, `-ffreestanding` wasn't buying anything
+  for C++ compiles -- dropped for `.cpp`/`.cc`/`.cxx` sources
+  specifically, kept for C.
+- **`<string>` was a genuinely unused include** in numpy's own
+  `numpy/core/src/common/npstd.hpp` (grepped: zero `std::string`
+  references in that file) -- removed as a real, minimal port-local
+  patch (this port's established pattern for vendored deps that need
+  environment-specific fixes, same as musl's own patch file), harmless
+  and still worth keeping even though it turned out not to be the main
+  blocker (see below).
+
+**The real, remaining blocker, found by tracing the actual `#include`
+chain through a real compile failure, not guessed at: this system's
+`g++`/libstdc++ (Ubuntu's stock `g++ 15`) is hard-coded to assume
+glibc underneath it, and `<complex>` unconditionally drags in that
+assumption for every translation unit that uses `std::complex<T>`.**
+`<complex>` (`/usr/include/c++/15/complex:50`) unconditionally
+`#include`s `<sstream>` (needed for `std::complex`'s
+`operator<<`/`operator>>`, even though nothing here ever calls them) --
+which pulls in `<locale>`, whose `bits/c++locale.h` directly references
+`__locale_t` (glibc-internal, `typedef __locale_t __c_locale`),
+`__GLIBC_PREREQ(...)` (a glibc version-check macro musl simply doesn't
+define -- `#if __GLIBC_PREREQ(2,15)` fails as "missing binary operator
+before token '('" since the macro doesn't exist to expand), and
+`__BEGIN_DECLS`/`__END_DECLS`. None of these exist against musl's
+headers. This isn't confined to one or two files: `numpy/core/src/
+npymath/npy_math_private.h` (a small, widely shared header almost every
+numpy C++ file includes for `std::complex`-based float128/etc support)
+pulls this in too -- confirmed by testing `umath/clip.cpp` and
+`umath/string_ufuncs.cpp` in isolation (neither includes
+`common.hpp`/`npstd.hpp` directly, yet both hit the identical error
+chain through this one shared header). Realistically all 11 C++ files
+identified in Phase 3 are affected, not just the 8 that go through
+`common.hpp`/`npstd.hpp`.
+
+This is a genuine toolchain-level mismatch, not a numpy source issue --
+patching it away safely would mean either building a musl-targeting
+C++ toolchain (the way musl-based distros like Alpine ship their own
+`g++` built without the glibc coupling -- a real, separate undertaking,
+not a quick fix), or hand-patching libstdc++'s own system `<complex>`
+header to drop its unused stream operators (invasive, and now known to
+be needed in more than one place, so worth getting right once rather
+than patching reactively file by file). Deliberately not attempted this
+pass -- the risk of a subtly-wrong `libstdc++`/locale-related patch
+without proper time to verify it is higher than the value of forcing
+this through today. `build-module.sh`'s C++ support itself is solid,
+real, reusable infrastructure regardless of how this specific numpy
+blocker gets resolved.
 
 ### Phase 4 — linalg, fft, random
 

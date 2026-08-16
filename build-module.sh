@@ -5,7 +5,22 @@ set -e
 # BareMetal app -- see port/dlfcn_shim.c for the runtime loader this
 # targets, and the top-level README for how dlopen() support works here.
 #
-# Usage: ./build-module.sh [-Ixxx|-Dxxx|-isystem xxx|...] yourmodule.c [otherfile.c ...] -o yourmodule.so
+# Usage: ./build-module.sh [-Ixxx|-Dxxx|-isystem xxx|...] yourmodule.c [otherfile.cpp ...] -o yourmodule.so
+#
+# .cpp/.cc/.cxx sources are compiled with g++ instead of gcc (see
+# CXXFLAGS below) -- added for numpy's _multiarray_umath (see
+# ../NUMPY.md's Phase 3), several of whose files (npysort's
+# quicksort/heapsort/timsort/etc, string_ufuncs.cpp, halffloat.cpp) are
+# C++. -fno-exceptions -fno-rtti (matching numpy's own cpp_args_common
+# choice) rules out needing any exception-unwinding/RTTI runtime
+# support; the specific files this was built for use neither
+# new/delete, throw, nor virtual functions either (checked directly),
+# so plain `ld -shared` linking the resulting .o files together with
+# the C ones needs no libstdc++ and no operator new/delete stubs. If a
+# future C++ module *does* need any of that, it'll show up as a
+# concrete missing symbol at link time -- same iterative,
+# verify-empirically approach as dl_exports[] itself, not something to
+# guess at and build in ahead of time.
 #
 # Any argument starting with "-" other than "-o" is passed straight
 # through to gcc, appended after this script's own CFLAGS -- e.g. for a
@@ -72,7 +87,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ ${#SRCS[@]} -eq 0 ] || [ -z "$OUT" ]; then
-	echo "usage: $0 [-Ixxx|-Dxxx|-isystem xxx|...] yourmodule.c [otherfile.c ...] -o yourmodule.so" >&2
+	echo "usage: $0 [-Ixxx|-Dxxx|-isystem xxx|...] yourmodule.c [otherfile.cpp ...] -o yourmodule.so" >&2
 	exit 1
 fi
 
@@ -94,12 +109,50 @@ mkdir -p "$BUILD_DIR"
 # (nothing here relies on the hash table itself, just that one count).
 CFLAGS="-c -m64 -fPIC -fno-plt -nostdlib -nostartfiles -nodefaultlibs -ffreestanding -fno-stack-protector -mno-red-zone -fno-builtin -falign-functions=16 -fomit-frame-pointer -nostdinc -isystem $MUSL_INC"
 
+# -nostdinc (above) blocks g++'s own C++ standard-library header dirs
+# too, same as it does musl's -- needed back explicitly here for
+# header-only things like <cstdlib>/<algorithm>/<type_traits> that
+# C++ template code (numpy's npysort/*.cpp) uses at compile time, same
+# spirit as the plain -isystem "$(gcc -print-file-name=include)" a
+# caller already passes for gcc's own freestanding C headers
+# (stdatomic.h etc). No version number hardcoded: g++'s own verbose
+# preprocessor output lists its real search dirs for this exact g++,
+# on this exact machine, whatever version that is. This is
+# header-only -- no libstdc++.so/.a gets linked in, matching this
+# file's own header comment on why that's fine for the specific C++
+# files this was built for (no new/delete/throw/virtual).
+CXX_STD_INC=()
+while read -r dir; do
+	CXX_STD_INC+=("-isystem" "$dir")
+done < <(echo | g++ -E -Wp,-v -x c++ - 2>&1 | sed -n '/^ /p' | sed 's/^ //')
+
+# -ffreestanding (part of CFLAGS, kept for C/musl) sets __STDC_HOSTED__
+# to 0, which makes libstdc++'s bits/functexcept.h hide its
+# __throw_length_error()-and-friends *declarations* behind
+# `#if _GLIBCXX_HOSTED` (`#define _GLIBCXX_HOSTED __STDC_HOSTED__`) --
+# but <string>/<sstream>'s own inline bodies reference them regardless,
+# a real libstdc++ freestanding-mode gap, not something specific to
+# numpy's code. -ffreestanding is redundant here anyway: -nodefaultlibs
+# -nostdlib already keep us from linking against libstdc++'s actual
+# runtime (matching this file's own no-libstdc++-needed reasoning
+# above) -- it isn't buying anything for header-only STL usage, only
+# breaking it, so it's dropped for C++ compiles specifically.
+CXXFLAGS="${CFLAGS/-ffreestanding /} -fno-exceptions -fno-rtti ${CXX_STD_INC[*]}"
+
 echo "Building module..."
 
 OBJS=()
 for src in "${SRCS[@]}"; do
-	obj="$BUILD_DIR/$(basename "$src" .c).mod.o"
-	gcc $CFLAGS "${EXTRA_FLAGS[@]}" -o "$obj" "$src"
+	case "$src" in
+	*.cpp|*.cc|*.cxx)
+		obj="$BUILD_DIR/$(basename "$src" | sed -E 's/\.(cpp|cc|cxx)$//').mod.o"
+		g++ $CXXFLAGS "${EXTRA_FLAGS[@]}" -o "$obj" "$src"
+		;;
+	*)
+		obj="$BUILD_DIR/$(basename "$src" .c).mod.o"
+		gcc $CFLAGS "${EXTRA_FLAGS[@]}" -o "$obj" "$src"
+		;;
+	esac
 	OBJS+=("$obj")
 done
 
