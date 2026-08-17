@@ -68,7 +68,6 @@ platform.py:.
 reprlib.py:.
 types.py:.
 collections/__init__.py:collections
-collections/abc.py:collections
 json/__init__.py:json
 json/decoder.py:json
 json/encoder.py:json
@@ -98,10 +97,11 @@ selectors.py:.
 shutil.py:.
 socket.py:.
 socketserver.py:.
-string.py:.
+string/__init__.py:string
 struct.py:.
 threading.py:.
 warnings.py:.
+_py_warnings.py:.
 weakref.py:.
 email/__init__.py:email
 email/_encoded_words.py:email
@@ -141,6 +141,7 @@ trap 'rm -f "$CMDFILE"' EXIT
 	echo "mkdir /pylib/html"
 	echo "mkdir /pylib/http"
 	echo "mkdir /pylib/urllib"
+	echo "mkdir /pylib/string"
 	while IFS= read -r line; do
 		[ -z "$line" ] && continue
 		src="${line%%:*}"
@@ -167,6 +168,11 @@ echo "Writing $(grep -c '^write' "$CMDFILE") files into $DISK under /pylib ..."
 # deploy and the "already exists" noise would otherwise scroll past
 # every single time.
 debugfs -w -f "$CMDFILE" "$DISK" > "$LOG" 2>&1 || true
+if grep -q 'No such file or directory while opening' "$LOG"; then
+	echo "error: a source file in FILES above is missing from $LIB (stdlib layout changed upstream?) -- see $LOG" >&2
+	cat "$LOG" >&2
+	exit 1
+fi
 if ! debugfs -R 'stat /pylib/json/__init__.py' "$DISK" 2>/dev/null | grep -q '^Inode:'; then
 	echo "error: /pylib doesn't look populated on $DISK after the write -- see $LOG" >&2
 	cat "$LOG" >&2
