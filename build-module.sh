@@ -11,7 +11,7 @@ set -e
 # through to gcc, appended after this script's own CFLAGS -- e.g. for a
 # Python C-extension module (see ../pyexttest.c), which needs Python's
 # own Include tree plus this port's own pyconfig.h on the search path:
-#   ./build-module.sh -I build/Python-3.12.8/Include -I port/python_port \
+#   ./build-module.sh -I build/Python-3.14.7/Include -I port/python_port \
 #       -isystem "$(gcc -print-file-name=include)" \
 #       pyexttest.c -o build/pyexttest.so
 # Most modules aren't Python extensions, so those paths aren't baked into

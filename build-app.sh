@@ -54,7 +54,7 @@ LWEXT4_DIR="$BUILD_DIR/lwext4-58bcf89"
 LWEXT4_INC="$LWEXT4_DIR/include"
 LWEXT4_PORT="port/lwext4_port"
 
-PYTHON_DIR="$BUILD_DIR/Python-3.12.8"
+PYTHON_DIR="$BUILD_DIR/Python-3.14.7"
 PYTHON_PORT="port/python_port"
 
 PORT="port"

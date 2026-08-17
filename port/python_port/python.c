@@ -22,6 +22,7 @@
 // here needs to change.
 #include "Python.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 extern void baremetal_install_frozen_modules(void);
 
@@ -29,7 +30,47 @@ extern void baremetal_install_frozen_modules(void);
 // into this binary. port/python_port/install-main.sh writes it there.
 #define PYMAIN_SCRIPT_PATH "/pylib/main.py"
 
+// CPython 3.14 added a real C-stack-overflow guard (Python/ceval.c's
+// hardware_stack_limits()/tstate_set_stack(), absent in 3.12.8) that
+// measures the *actual* machine stack via __builtin_frame_address(0)
+// -- unlike 3.12.8's simple recursion-depth counter, which never cared
+// how much real stack was behind it. BareMetal's own kernel/monitor
+// stack (BareMetal-Firecracker's kernel.asm: `mov rax, [os_StackBase]
+// / add rax, 65536`) is a fixed 64 KiB, which left just enough room to
+// pass pyconfig.h's _Py_LINKER_THREAD_STACK_SIZE sizing but not enough
+// to actually run: importlib._bootstrap alone hit "RecursionError:
+// Stack overflow (used 37 kB)" against that budget's ~32 KiB soft
+// limit. Rather than shrink every other app's shared crt0.c stack,
+// python.app switches to this dedicated, much larger one before doing
+// any real work -- safe because exit()/_exit() (posix_shim.c's
+// sys_exit(), see crt0.c's own __bmos_entry_sp comment) never unwinds
+// back through main()'s call frames; it restores RSP from the
+// original entry point directly, so main() never needs to "return"
+// through whatever stack it happened to be using (the pushed return
+// address below is never used -- python_main() is noreturn -- but
+// `call`, not `jmp`, is what leaves RSP at the SysV ABI's required
+// 8-mod-16 offset for a function's own prologue; `jmp` would leave it
+// 16-aligned instead, which faulted (#GP) the first real MOVAPS
+// python_main() ran against it). python_main() is deliberately
+// non-static (like crt0.c's _start_c()) so the `call` below resolves
+// to a real relocation instead of being eligible for --gc-sections to
+// drop as unreferenced.
+#define PY_C_STACK_BYTES (1 * 1024 * 1024)
+static unsigned char python_c_stack[PY_C_STACK_BYTES] __attribute__((aligned(16)));
+
+void python_main(void) __attribute__((noreturn));
+
 int main(void)
+{
+	__asm__ volatile(
+		"leaq python_c_stack+%c0(%%rip), %%rsp\n\t"
+		"call python_main\n\t"
+		:: "i" (PY_C_STACK_BYTES) : "memory"
+	);
+	__builtin_unreachable();
+}
+
+void python_main(void)
 {
 	PyStatus status;
 	PyConfig config;
@@ -120,7 +161,14 @@ int main(void)
 		rc = 1;
 	}
 
-	return (Py_FinalizeEx() < 0 || rc != 0) ? 1 : 0;
+	// A plain `return` here would try to unwind back through main()'s
+	// call frame the normal way -- but main() abandoned that frame's
+	// stack for good the moment it jumped to python_main() (see this
+	// function's own header comment), so there's nothing valid to
+	// return into. exit() is the same path a normal `return rc` from
+	// main() would end up at anyway (via __libc_start_main), just
+	// taken directly.
+	exit((Py_FinalizeEx() < 0 || rc != 0) ? 1 : 0);
 
 fail:
 	PyConfig_Clear(&config);

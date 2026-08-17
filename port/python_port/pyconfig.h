@@ -1,15 +1,18 @@
-/* pyconfig.h -- this port's build config for CPython 3.12.8 (see
+/* pyconfig.h -- this port's build config for CPython 3.14.7 (see
  * PYTHON.md), the same role curl_config.h/sqlite_baremetal_config.h
  * play for curl/SQLite.
  *
- * Base: a *real* ./configure run's pyconfig.h, from a plain native
- * x86-64 Linux build of this same CPython 3.12.8 release (built only
- * so this port has a working "build Python" for freezing importlib/
+ * Base: a *real* ./configure run's pyconfig.h, originally from a
+ * plain native x86-64 Linux build of CPython 3.12.8 (built only so
+ * this port has a working "build Python" for freezing importlib/
  * generating codegen headers -- see PYTHON.md). That build is
  * glibc-based, not musl, but the ~300 mechanical answers (does
  * <sys/foo.h> exist, is off_t 64-bit, does struct stat have
  * st_blksize, the ALIGNOF_ and SIZEOF_ macros) are architecture-level,
- * not libc-level, and apply here unchanged.
+ * not libc-level, and apply here unchanged -- carried forward as-is
+ * through the 3.14.7 bump (scripts/get-python.sh) and re-validated the
+ * same empirical way described below, rather than regenerated from a
+ * fresh 3.14.7 host run.
  *
  * Overrides: every line ending "-- cut for this port, see
  * pyconfig_baremetal.h" (commented out below) or freshly appended at
@@ -1979,5 +1982,25 @@
  * defines it (to _POSIX_VERSION); defining it again here just produced
  * a harmless-but-noisy macro-redefined warning on every file. */
 #define HAVE_STAT 1
+
+/* _Py_LINKER_THREAD_STACK_SIZE: new in 3.13+ (Python/ceval.c's
+ * hardware_stack_limits()/tstate_set_stack() -- see PYTHON.md). With
+ * none of WIN32/__APPLE__/HAVE_PTHREAD_GETATTR_NP defined here (this
+ * port has no real pthreads), CPython falls back to guessing the C
+ * stack's bounds from the *current* stack pointer minus a hardcoded
+ * Py_C_STACK_SIZE (4,000,000 bytes on x86-64 by default). BareMetal's
+ * own kernel/monitor stack (BareMetal-Firecracker's kernel.asm: `mov
+ * rax, [os_StackBase] / add rax, 65536` -- a fixed 64 KiB) is nowhere
+ * near that big -- the unsigned subtraction wrapped and tripped
+ * tstate_set_stack()'s `assert(base < top)` on every boot, and even
+ * once sized correctly, 64 KiB left too little real headroom above
+ * _PyOS_MIN_STACK_SIZE's 48 KiB floor to get through importlib
+ * bootstrap ("RecursionError: Stack overflow (used 37 kB)"). 3.12.8
+ * never measured real stack depth at all, so this mismatch didn't
+ * exist before this port's CPython 3.14 bump. python.c's own main()
+ * now switches to a dedicated PY_C_STACK_BYTES-sized static buffer
+ * before running any real code (see its own comment for why that's
+ * safe here) -- this must match that constant exactly. */
+#define _Py_LINKER_THREAD_STACK_SIZE (1 * 1024 * 1024)
 
 #endif /*Py_PYCONFIG_H*/

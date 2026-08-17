@@ -12,7 +12,7 @@ set -e
 #
 # Called from setup.sh alongside the other get-*.sh scripts; also
 # runnable standalone the same way they are.
-VERSION="3.12.8"
+VERSION="3.14.7"
 URL="https://www.python.org/ftp/python/${VERSION}/Python-${VERSION}.tar.xz"
 TARBALL="Python-${VERSION}.tar.xz"
 PYTHON_DIR="Python-${VERSION}"

@@ -44,6 +44,12 @@ extern PyObject* PyInit__tokenize(void);
 extern PyObject* _PyWarnings_Init(void);
 extern PyObject* PyInit__string(void);
 
+/* This lives in Python/_contextvars.c -- already part of PYTHON_SRCS
+ * (compiled in like _warnings/_ast/_tokenize above), just missing its
+ * _PyImport_Inittab entry. Needed by warnings.py's own _py_warnings
+ * fallback (contextvars.ContextVar use in _filters_mutated_lock_held). */
+extern PyObject* PyInit__contextvars(void);
+
 /* Not part of a normal native build's own config.c at all -- there,
  * _socket is built as a shared extension (Modules/_socket.so), so it
  * never needs an _PyImport_Inittab entry. This port has no dynamic
@@ -135,6 +141,9 @@ struct _inittab _PyImport_Inittab[] = {
 
 	/* This lives in _warnings.c */
 	{"_warnings", _PyWarnings_Init},
+
+	/* This lives in Python/_contextvars.c */
+	{"_contextvars", PyInit__contextvars},
 
 	/* This lives in Objects/unicodeobject.c */
 	{"_string", PyInit__string},

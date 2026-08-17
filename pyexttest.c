@@ -6,7 +6,7 @@
 // Include/internal -- same as any real extension author would write.
 //
 // Build with:
-//   ./build-module.sh -I build/Python-3.12.8/Include -I port/python_port \
+//   ./build-module.sh -I build/Python-3.14.7/Include -I port/python_port \
 //       -isystem "$(gcc -print-file-name=include)" \
 //       pyexttest.c -o build/pyexttest.so
 // (port/python_port is needed too -- Python.h's #include "pyconfig.h" is
