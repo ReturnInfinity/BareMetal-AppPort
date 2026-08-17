@@ -53,7 +53,7 @@ LWEXT4_DIR="$BUILD_DIR/lwext4-58bcf89"
 LWEXT4_INC="$LWEXT4_DIR/include"
 LWEXT4_PORT="port/lwext4_port"
 
-PYTHON_DIR="$BUILD_DIR/Python-3.12.8"
+PYTHON_DIR="$BUILD_DIR/Python-3.14.7"
 PYTHON_HOST_BUILD="$BUILD_DIR/host-python-build"
 PYTHON_PORT="port/python_port"
 
@@ -161,7 +161,15 @@ LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -DCONFIG_USE_DEFAULT_CFG=0
 # which it does provide, still win) -- see PYTHON.md for how this was
 # found; nothing else built by this script needed it.
 PYTHON_GCC_FREESTANDING_INC="$(gcc -print-file-name=include)"
-PYTHON_CFLAGS="$CFLAGS -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal"
+# -std=c11 matches CPython's own ./configure-generated Makefile (see
+# the native host build above) -- without it, GCC leaves __STRICT_ANSI__
+# undefined, which flips Include/pymacro.h's Py_ARRAY_LENGTH over to a
+# branch that folds a _Static_assert into a comma expression used as a
+# static initializer (Modules/faulthandler.c's faulthandler_nsignals,
+# among others). That's not a legal constant expression in ISO C, so
+# GCC rejects it ("initializer element is not constant") outside the
+# __STRICT_ANSI__ branch's simpler, always-safe sizeof/sizeof form.
+PYTHON_CFLAGS="$CFLAGS -std=c11 -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal"
 PYTHON_CORE_CFLAGS="$PYTHON_CFLAGS -DPy_BUILD_CORE"
 PYTHON_BUILTIN_CFLAGS="$PYTHON_CFLAGS -DPy_BUILD_CORE_BUILTIN"
 
@@ -175,7 +183,7 @@ PYTHON_BUILTIN_CFLAGS="$PYTHON_CFLAGS -DPy_BUILD_CORE_BUILTIN"
 # values are placeholders only needed to satisfy getpath.c's #error/
 # undeclared-identifier checks at compile time, not meaningful at
 # runtime.
-PYTHON_GETPATH_DEFINES='-DPREFIX="/" -DEXEC_PREFIX="/" -DVERSION="3.12" -DVPATH="" -DPLATLIBDIR="lib"'
+PYTHON_GETPATH_DEFINES='-DPREFIX="/" -DEXEC_PREFIX="/" -DVERSION="3.14" -DVPATH="" -DPLATLIBDIR="lib"'
 
 # Python/dynload_shlib.c normally gets SOABI/PYTHON_ABI_STRING from the
 # Makefile (in turn from configure) -- it string-concatenates them
@@ -327,7 +335,9 @@ done
 # parser tables in Parser/parser.c, the AST node definitions in
 # Python/Python-ast.c, the bytecode dispatch table in Python/
 # generated_cases.c.h, and the frozen importlib/os/site/getpath/etc
-# bytecode in Python/deepfreeze/deepfreeze.c). Those generated files
+# bytecode headers in Python/frozen_modules/*.h -- Python/frozen.c
+# itself, which #includes them, ships as a regular source file since
+# 3.14 dropped the old deepfreeze.c code-generation step). Those generated files
 # are architecture-independent C/data, not target-specific, so a plain
 # native ./configure && make here produces everything this port's own
 # musl/freestanding build needs verbatim -- see PYTHON.md for the full
@@ -347,14 +357,12 @@ fi
 # CPython's own Makefile, not this port's doing): the pegen parser/AST/
 # bytecode-dispatch files generated in-tree, directly under
 # $PYTHON_DIR (found already there, nothing to copy); the frozen
-# bytecode headers and deepfreeze.c generated into the *build*
-# directory instead (VPATH out-of-tree build), copied into $PYTHON_DIR
-# here so every generated file this port's own compile below needs
-# ends up in one place, the same tree get-python.sh unpacked.
+# bytecode headers generated into the *build* directory instead (VPATH
+# out-of-tree build), copied into $PYTHON_DIR here so every generated
+# file this port's own compile below needs ends up in one place, the
+# same tree get-python.sh unpacked.
 echo "- Copying Python's generated sources into $PYTHON_DIR"
 cp "$PYTHON_HOST_BUILD"/Python/frozen_modules/*.h "$PYTHON_DIR/Python/frozen_modules/"
-mkdir -p "$PYTHON_DIR/Python/deepfreeze"
-cp "$PYTHON_HOST_BUILD/Python/deepfreeze/deepfreeze.c" "$PYTHON_DIR/Python/deepfreeze/deepfreeze.c"
 
 # The core interpreter (parser + Python/ + Objects/) plus
 # Modules/Setup.bootstrap.in's mandatory static module set plus
@@ -377,29 +385,40 @@ echo "- Building Python"
 PYTHON_SRCS="
 	Parser/token.c Parser/pegen.c Parser/pegen_errors.c
 	Parser/action_helpers.c Parser/parser.c Parser/string_parser.c
-	Parser/peg_api.c Parser/myreadline.c Parser/tokenizer.c
+	Parser/peg_api.c Parser/myreadline.c
+	Parser/lexer/buffer.c Parser/lexer/lexer.c Parser/lexer/state.c
+	Parser/tokenizer/file_tokenizer.c Parser/tokenizer/readline_tokenizer.c
+	Parser/tokenizer/string_tokenizer.c Parser/tokenizer/utf8_tokenizer.c
+	Parser/tokenizer/helpers.c
 
-	Python/_warnings.c Python/Python-ast.c Python/Python-tokenize.c
-	Python/asdl.c Python/assemble.c Python/ast.c Python/ast_opt.c
-	Python/ast_unparse.c Python/bltinmodule.c Python/ceval.c
-	Python/codecs.c Python/compile.c Python/context.c
-	Python/dynamic_annotations.c Python/errors.c Python/flowgraph.c
-	Python/frame.c Python/frozenmain.c Python/future.c Python/getargs.c
-	Python/getcompiler.c Python/getcopyright.c Python/getplatform.c
-	Python/getversion.c Python/ceval_gil.c Python/hamt.c
-	Python/hashtable.c Python/import.c Python/importdl.c
-	Python/initconfig.c Python/instrumentation.c Python/intrinsics.c
-	Python/legacy_tracing.c Python/marshal.c Python/modsupport.c
-	Python/mysnprintf.c Python/mystrtoul.c Python/pathconfig.c
-	Python/preconfig.c Python/pyarena.c Python/pyctype.c Python/pyfpe.c
-	Python/pyhash.c Python/pylifecycle.c Python/pymath.c
-	Python/pystate.c Python/pythonrun.c Python/pytime.c
-	Python/bootstrap_hash.c Python/specialize.c Python/structmember.c
-	Python/symtable.c Python/sysmodule.c Python/thread.c
-	Python/traceback.c Python/tracemalloc.c Python/getopt.c
-	Python/pystrcmp.c Python/pystrtod.c Python/pystrhex.c Python/dtoa.c
+	Python/_contextvars.c Python/_warnings.c Python/Python-ast.c
+	Python/Python-tokenize.c Python/asdl.c Python/assemble.c Python/ast.c
+	Python/ast_preprocess.c Python/ast_unparse.c Python/bltinmodule.c
+	Python/brc.c Python/ceval.c Python/codecs.c Python/codegen.c
+	Python/compile.c Python/context.c Python/critical_section.c
+	Python/crossinterp.c Python/dynamic_annotations.c Python/errors.c
+	Python/flowgraph.c Python/frame.c Python/frozenmain.c Python/future.c
+	Python/gc.c Python/gc_free_threading.c Python/gc_gil.c
+	Python/getargs.c Python/getcompiler.c Python/getcopyright.c
+	Python/getplatform.c Python/getversion.c Python/ceval_gil.c
+	Python/hamt.c Python/hashtable.c Python/import.c Python/importdl.c
+	Python/index_pool.c Python/initconfig.c Python/interpconfig.c
+	Python/instrumentation.c Python/instruction_sequence.c
+	Python/intrinsics.c Python/jit.c Python/legacy_tracing.c Python/lock.c
+	Python/marshal.c Python/modsupport.c Python/mysnprintf.c
+	Python/mystrtoul.c Python/object_stack.c Python/optimizer.c
+	Python/optimizer_analysis.c Python/optimizer_symbols.c
+	Python/parking_lot.c Python/pathconfig.c Python/preconfig.c
+	Python/pyarena.c Python/pyctype.c Python/pyfpe.c Python/pyhash.c
+	Python/pylifecycle.c Python/pymath.c Python/pystate.c
+	Python/pythonrun.c Python/pytime.c Python/qsbr.c
+	Python/bootstrap_hash.c Python/specialize.c Python/stackrefs.c
+	Python/structmember.c Python/symtable.c Python/sysmodule.c
+	Python/thread.c Python/traceback.c Python/tracemalloc.c
+	Python/uniqueid.c Python/getopt.c Python/pystrcmp.c
+	Python/pystrtod.c Python/pystrhex.c Python/dtoa.c
 	Python/formatter_unicode.c Python/fileutils.c Python/suggestions.c
-	Python/perf_trampoline.c
+	Python/perf_trampoline.c Python/remote_debugging.c
 
 	Objects/abstract.c Objects/boolobject.c Objects/bytes_methods.c
 	Objects/bytearrayobject.c Objects/bytesobject.c Objects/call.c
@@ -408,31 +427,34 @@ PYTHON_SRCS="
 	Objects/enumobject.c Objects/exceptions.c
 	Objects/genericaliasobject.c Objects/genobject.c
 	Objects/fileobject.c Objects/floatobject.c Objects/frameobject.c
-	Objects/funcobject.c Objects/interpreteridobject.c
+	Objects/funcobject.c Objects/interpolationobject.c
 	Objects/iterobject.c Objects/listobject.c Objects/longobject.c
 	Objects/dictobject.c Objects/odictobject.c Objects/memoryobject.c
 	Objects/methodobject.c Objects/moduleobject.c
 	Objects/namespaceobject.c Objects/object.c Objects/obmalloc.c
 	Objects/picklebufobject.c Objects/rangeobject.c Objects/setobject.c
-	Objects/sliceobject.c Objects/structseq.c Objects/tupleobject.c
-	Objects/typeobject.c Objects/typevarobject.c
+	Objects/sliceobject.c Objects/structseq.c Objects/templateobject.c
+	Objects/tupleobject.c Objects/typeobject.c Objects/typevarobject.c
 	Objects/unicodeobject.c Objects/unicodectype.c
 	Objects/unionobject.c Objects/weakrefobject.c
 
-	Python/deepfreeze/deepfreeze.c Python/frozen.c Modules/getbuildinfo.c
+	Python/frozen.c Modules/getbuildinfo.c
 "
 
 PYTHON_BUILTIN_SRCS="
 	Modules/atexitmodule.c Modules/faulthandler.c Modules/posixmodule.c
-	Modules/signalmodule.c Modules/_tracemalloc.c Modules/_codecsmodule.c
+	Modules/signalmodule.c Modules/_tracemalloc.c Modules/_suggestions.c
+	Modules/_datetimemodule.c Modules/_codecsmodule.c
 	Modules/_collectionsmodule.c Modules/errnomodule.c
 	Modules/_io/_iomodule.c Modules/_io/iobase.c Modules/_io/fileio.c
 	Modules/_io/bytesio.c Modules/_io/bufferedio.c Modules/_io/textio.c
 	Modules/_io/stringio.c Modules/itertoolsmodule.c Modules/_sre/sre.c
-	Modules/_threadmodule.c Modules/timemodule.c Modules/_typingmodule.c
+	Modules/_sysconfig.c Modules/_threadmodule.c Modules/timemodule.c
+	Modules/_typesmodule.c Modules/_typingmodule.c
 	Modules/_weakref.c Modules/_abc.c Modules/_functoolsmodule.c
-	Modules/_localemodule.c Modules/_operator.c Modules/_stat.c
-	Modules/symtablemodule.c Modules/gcmodule.c Modules/socketmodule.c
+	Modules/_localemodule.c Modules/_opcode.c Modules/_operator.c
+	Modules/_stat.c Modules/symtablemodule.c Modules/gcmodule.c
+	Modules/socketmodule.c
 	Modules/selectmodule.c Modules/mathmodule.c Modules/_struct.c
 	Modules/binascii.c Modules/_randommodule.c Modules/arraymodule.c
 	Modules/unicodedata.c

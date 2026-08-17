@@ -1,6 +1,6 @@
 /* pyconfig_baremetal.h -- see PYTHON.md.
  *
- * Hand-written build config for CPython 3.12.8 on this port (see
+ * Hand-written build config for CPython 3.14.7 on this port (see
  * scripts/get-python.sh), the same role curl_config.h/
  * sqlite_baremetal_config.h play for curl/SQLite: CPython's own build
  * generates pyconfig.h by running ./configure, which can't run against
@@ -486,5 +486,26 @@
  * -- same AF_CAN cut, musl vendors no linux/can/raw.h regardless. */
 #undef HAVE_LINUX_CAN_RAW_FD_FRAMES
 #undef HAVE_LINUX_CAN_RAW_JOIN_FILTERS
+
+/* ---------------------------------------------------------------------
+ * CPython 3.14 bump (see PYTHON.md) -- Python/ceval.c's new C-stack-
+ * overflow guard (hardware_stack_limits()/tstate_set_stack(), absent
+ * in 3.12.8) sizes itself from Py_C_STACK_SIZE, a hardcoded 4,000,000-
+ * byte guess on x86-64 with none of WIN32/__APPLE__/
+ * HAVE_PTHREAD_GETATTR_NP defined (no real pthreads here). BareMetal's
+ * own kernel/monitor stack (BareMetal-Firecracker's kernel.asm: `mov
+ * rax, [os_StackBase] / add rax, 65536`) is a fixed 64 KiB -- nowhere
+ * near 4 MB -- so subtracting the default guess underflowed and
+ * tripped tstate_set_stack()'s `assert(base < top)` on every boot.
+ * _Py_LINKER_THREAD_STACK_SIZE is CPython's own documented override
+ * knob for exactly this (an embedder with a known, non-default thread
+ * stack size). 64 KiB itself turned out too tight once actually sized
+ * correctly (only just over _PyOS_MIN_STACK_SIZE's 48 KiB floor --
+ * importlib bootstrap alone hit "RecursionError: Stack overflow (used
+ * 37 kB)"), so python.c's own main() now switches to a dedicated
+ * static buffer before running any real code instead of using
+ * BareMetal's kernel stack at all; this must match that buffer's size
+ * exactly. */
+#define _Py_LINKER_THREAD_STACK_SIZE (1 * 1024 * 1024)
 
 #endif

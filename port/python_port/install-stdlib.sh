@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Writes a curated set of real, unmodified Lib/*.py files from
-# build/Python-3.12.8/ directly into an EXT2 disk image, under /pylib,
+# build/Python-3.14.7/ directly into an EXT2 disk image, under /pylib,
 # using debugfs -w (part of e2fsprogs) -- deploying the disk-image
 # content python.app needs is a per-deployment step, not a build step,
 # so this is a standalone script rather than something setup.sh/
@@ -31,7 +31,7 @@ fi
 DISK="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPPORT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-LIB="$APPPORT_DIR/build/Python-3.12.8/Lib"
+LIB="$APPPORT_DIR/build/Python-3.14.7/Lib"
 
 if [ ! -f "$DISK" ]; then
 	echo "error: $DISK not found" >&2
