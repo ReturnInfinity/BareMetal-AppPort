@@ -31,6 +31,9 @@ u64 b_nvs_write(void *mem, u64 start, u64 num, u64 drivenum);
 // System
 u64 b_system(u64 function, u64 var1, u64 var2);
 
+// Exit (never returns -- see libBareMetal.c)
+__attribute__((noreturn)) void b_exit(void);
+
 // Index for b_config calls
 #define TIMECOUNTER		0x00
 #define FREE_MEMORY		0x01
