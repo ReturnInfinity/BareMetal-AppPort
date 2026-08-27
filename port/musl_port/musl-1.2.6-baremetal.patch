@@ -101,7 +101,7 @@
  #define IPC_64 0
 --- musl-1.2.6/src/thread/x86_64/__set_thread_area.s
 +++ musl-1.2.6/src/thread/x86_64/__set_thread_area.s
-@@ -1,11 +1,24 @@
+@@ -1,11 +1,19 @@
 -/* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
 +/*
 + * BareMetal-Firecracker port.
