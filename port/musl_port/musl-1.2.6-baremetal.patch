@@ -238,7 +238,7 @@
  	jmp __cancel
 --- musl-1.2.6/src/thread/x86_64/__unmapself.s
 +++ musl-1.2.6/src/thread/x86_64/__unmapself.s
-@@ -1,10 +1,43 @@
+@@ -1,10 +1,58 @@
  /* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
 +/*
 + * BareMetal-Firecracker port.
@@ -269,6 +269,14 @@
 + * from here (it disables interrupts itself immediately) and only
 + * re-enables them once execution has moved to a different thread's
 + * stack entirely.
++ *
++ * `cli` is ring-0-only -- the app runs in ring 3 (see libBareMetal.c's
++ * header), so this goes through the kernel's IRQ_DISABLE b_system()
++ * call (see libBareMetal.h) instead, the same fix thread_shim.c's own
++ * irq_disable() needed. a1/a2 (base/size, still needed for the munmap
++ * call below) are saved across it -- safe to push onto this
++ * about-to-be-unmapped stack for the same reason `call __bmos_syscall`
++ * already is, per this comment's second paragraph.
 + */
  .text
  .global __unmapself
@@ -279,7 +287,14 @@
 -	xor %rdi,%rdi   /* exit() args: always return success */
 -	movl $60,%eax   /* SYS_exit */
 -	syscall         /* exit(0) */
-+	cli
++	push %rdi       /* save a1 = base across the b_system() call below */
++	push %rsi       /* save a2 = size */
++	mov $0x50,%edi  /* IRQ_DISABLE */
++	xor %esi,%esi
++	xor %edx,%edx
++	call b_system
++	pop %rsi
++	pop %rdi
 +	mov %rsi,%rdx   /* a2 = size */
 +	mov %rdi,%rsi   /* a1 = base */
 +	mov $11,%edi    /* n = SYS_munmap */

@@ -605,23 +605,18 @@ static long sys_clock_gettime(long clk_id, long ts_addr)
 	}
 }
 
-// nanosleep()/clock_nanosleep() -- b_system(SLEEP, ns, 0) (see
-// libBareMetal.h) HLTs the CPU until the APIC timer fires ns
-// nanoseconds out instead of spinning, so this chains that in
-// NET_POLL_INTERVAL_NS-sized chunks -- net_poll() is still called
-// between chunks so lwIP's timers/retransmits keep getting serviced
-// during a long sleep instead of stalling for its whole duration. This
-// predates thread_shim.c's scheduler and doesn't explicitly yield to
-// it, but doesn't need to: thread_shim.c's timer tick (the same APIC
-// timer this HLT wakes for) transparently preempts a sleeping thread
-// like any other, so other threads still make progress during a long
-// sleep here -- see that file's header.
+// nanosleep()/clock_nanosleep() -- thread_shim_sleep_until() (see that
+// function's comment for why this can't just chain raw b_system(SLEEP,
+// ...) HLTs: that would stop every other thread from running for the
+// entire sleep) in NET_POLL_INTERVAL_NS-sized chunks -- net_poll() is
+// still called between chunks so lwIP's timers/retransmits keep getting
+// serviced during a long sleep instead of stalling for its whole
+// duration.
 //
-// A caught signal without SA_RESTART now legitimately interrupts a
-// sleep early (see thread_shim.c's "Signals" section) -- checked once
-// per NET_POLL_INTERVAL_NS-sized chunk below via
-// thread_shim_take_eintr(), same granularity the sleep itself already
-// runs at. *rem is left zeroed only for the "slept the full duration"
+// A caught signal now legitimately interrupts a sleep early (see
+// thread_shim_sleep_until()'s own comment on why that's correct
+// regardless of SA_RESTART) -- reported via that function's -EINTR
+// return. *rem is left zeroed only for the "slept the full duration"
 // case; an EINTR return reports real remaining time.
 #define NET_POLL_INTERVAL_NS 10000000ULL // 10ms
 
@@ -631,9 +626,10 @@ static long sleep_until_ns(u64 target_ns, long rem_addr)
 
 	while ((now_ns = b_system(TIMECOUNTER, 0, 0)) < target_ns) {
 		u64 remaining_ns = target_ns - now_ns;
-		b_system(SLEEP, remaining_ns < NET_POLL_INTERVAL_NS ? remaining_ns : NET_POLL_INTERVAL_NS, 0);
+		u64 chunk_ns = remaining_ns < NET_POLL_INTERVAL_NS ? remaining_ns : NET_POLL_INTERVAL_NS;
+		long rc = thread_shim_sleep_until(now_ns + chunk_ns);
 		net_poll();
-		if (thread_shim_take_eintr()) {
+		if (rc == -EINTR) {
 			now_ns = b_system(TIMECOUNTER, 0, 0);
 			if (rem_addr) {
 				struct timespec *rem = (struct timespec *)rem_addr;

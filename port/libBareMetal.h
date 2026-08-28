@@ -41,8 +41,8 @@ __attribute__((noreturn)) void b_exit(void);
 #define TSC			0x1F
 #define NET_STATUS		0x30
 #define NET_CONFIG		0x31
-#define BUS_READ		0x50
-#define BUS_WRITE		0x51
+#define IRQ_ENABLE		0x50
+#define IRQ_DISABLE		0x51
 #define STDOUT_SET		0x52
 #define STDOUT_GET		0x53
 #define CALLBACK_TIMER		0x60
