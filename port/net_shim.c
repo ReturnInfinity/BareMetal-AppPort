@@ -58,12 +58,15 @@
 #define NET_BLOCK_TIMEOUT_MS  30000
 
 // Each blocking loop below calls net_poll() to drain the NIC/service
-// lwIP's timers, then -- if still not ready -- HLTs for one interval
-// via b_system(SLEEP, ...) rather than immediately looping back to
+// lwIP's timers, then -- if still not ready -- waits one interval via
+// thread_shim_sleep_until() rather than immediately looping back to
 // net_poll() again. Without this a blocking accept()/connect()/recv()/
 // send() with nothing to do (e.g. an idle listening server) spins at
 // 100% CPU for up to NET_BLOCK_TIMEOUT_MS on every call. Matches the
-// same HLT-based wait posix_shim.c's nanosleep() already uses.
+// same scheduler-aware wait posix_shim.c's nanosleep() already uses --
+// a raw b_system(SLEEP, ...) HLT here would, same as it did there,
+// starve every other thread for the whole interval instead of just
+// this one socket's caller (see thread_shim_sleep_until()'s comment).
 #define NET_POLL_INTERVAL_NS  10000000ULL // 10ms
 
 enum { SK_FREE = 0, SK_CLOSED, SK_CONNECTING, SK_CONNECTED, SK_LISTENING, SK_ERROR };
@@ -374,8 +377,7 @@ long net_shim_accept(long fd, void *addr, socklen_t *addrlenp)
 			break;
 		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -EAGAIN;
-		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
-		if (thread_shim_take_eintr())
+		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
 			return -EINTR;
 	}
 
@@ -435,8 +437,7 @@ long net_shim_connect(long fd, const void *addr, long addrlen)
 			break;
 		if (block_timed_out(start, s->snd_timeout_ms))
 			return -ETIMEDOUT;
-		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
-		if (thread_shim_take_eintr())
+		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
 			return -EINTR;
 	}
 
@@ -498,8 +499,7 @@ static long udp_wait_rx(struct bsock *s)
 			break;
 		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -ETIMEDOUT;
-		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
-		if (thread_shim_take_eintr())
+		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
 			return -EINTR;
 	}
 	return 0;
@@ -533,8 +533,7 @@ long net_shim_recv(long fd, void *buf, size_t len, long flags)
 			continue;
 		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -ETIMEDOUT;
-		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
-		if (thread_shim_take_eintr())
+		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
 			return -EINTR;
 	}
 }
@@ -635,8 +634,7 @@ long net_shim_send(long fd, const void *buf, size_t len, long flags)
 		net_poll();
 		if (block_timed_out(start, s->snd_timeout_ms))
 			return -ETIMEDOUT;
-		b_system(SLEEP, NET_POLL_INTERVAL_NS, 0);
-		if (thread_shim_take_eintr())
+		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
 			return -EINTR;
 	}
 }
