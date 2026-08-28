@@ -546,7 +546,13 @@ static void deliver_pending_signals(struct bmos_thread *t)
 // this file's header. Only preempts a thread that's actually running
 // (never a thread another reschedule() call already parked as
 // T_BLOCKED on this same stack, e.g. the idle-poll loop above).
-static void thread_shim_timer_tick_c(void)
+// __attribute__((used)): the only call site is the raw "call
+// thread_shim_timer_tick_c" in thread_shim_timer_tick()'s inline asm
+// below -- invisible to the compiler's normal call-graph analysis, so
+// at -O2 this static function otherwise looks unreferenced and gets
+// eliminated before the linker ever sees it (undefined reference at
+// link time, not a warning).
+__attribute__((used)) static void thread_shim_timer_tick_c(void)
 {
 	if (!g_active)
 		return;
