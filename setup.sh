@@ -84,7 +84,7 @@ run_quiet() {
 # small fraction of what setup.sh builds here. musl's own libc.a
 # already builds this way (see port/musl_port/musl-1.2.6-config.mak's
 # CFLAGS_AUTO); this makes lwIP/mbedTLS/curl match it.
-CFLAGS="-c -m64 -nostdlib -nostartfiles -nodefaultlibs -ffreestanding -fno-pic -fno-pie -mcmodel=large -falign-functions=16 -fomit-frame-pointer -mno-red-zone -fno-builtin -fno-stack-protector -ffunction-sections -fdata-sections -nostdinc -isystem $MUSL_INC"
+CFLAGS="-c -m64 -O2 -nostdlib -nostartfiles -nodefaultlibs -ffreestanding -fno-pic -fno-pie -mcmodel=large -falign-functions=16 -fomit-frame-pointer -mno-red-zone -fno-builtin -fno-stack-protector -ffunction-sections -fdata-sections -nostdinc -isystem $MUSL_INC"
 LWIP_CFLAGS="$CFLAGS -I $LWIP_INC -I $LWIP_PORT"
 MBEDTLS_CFLAGS="$CFLAGS -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\""
 
