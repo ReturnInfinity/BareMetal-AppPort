@@ -177,12 +177,13 @@
  * *called* unconditionally as time.process_time()'s last-resort
  * fallback, so leaving HAVE_CLOCK undefined fails the build, not just
  * a runtime call. musl does provide a real clock() (found empirically
- * running this port's build (setup.sh/build-app.sh)) -- whether it returns anything meaningful
- * on this port depends on times()/CLOCK_PROCESS_CPUTIME_ID, neither of
- * which posix_shim.c backs (OPENISSUES.md's Process model section), so
- * time.process_time() likely returns garbage or a constant at runtime.
- * Same "let it link, fail/misbehave at the call site rather than the
- * build" choice this file makes elsewhere (e.g. HAVE_SIGACTION). */
+ * running this port's build (setup.sh/build-app.sh)) -- it calls
+ * __clock_gettime(CLOCK_PROCESS_CPUTIME_ID, ...), which posix_shim.c
+ * now backs (wall time since boot via TIMECOUNTER, same approximation
+ * CLOCK_MONOTONIC uses -- there's no real per-process CPU-only
+ * accounting to back it with, OPENISSUES.md's Process model section),
+ * so time.process_time()'s clock() fallback works, modulo that same
+ * approximation. */
 #define HAVE_CLOCK 1
 
 /* Define to 1 if you have the `clock_getres' function. */

@@ -580,6 +580,19 @@ static long sys_ioctl(long fd, long req, long arg)
 // b_system(WALLCLOCK, ...) returns seconds since the Unix epoch (read
 // from the RTC at boot); there is no sub-second component wired up,
 // so tv_nsec is always 0. CLOCK_REALTIME is backed by that.
+//
+// CLOCK_PROCESS_CPUTIME_ID -- there's no real per-process CPU-time
+// accounting to back this with (see OPENISSUES.md's "Process model"
+// section: no process table, and thread_shim.c doesn't track
+// scheduled-vs-blocked time per thread either), but returning -EINVAL
+// here means musl's clock() (src/time/clock.c) always fails, which
+// silently breaks anything timing itself this way (e.g. CPython's
+// time.process_time() fallback -- see pyconfig_baremetal.h). Since
+// this port is single-process, wall time since boot is at least a
+// reasonable stand-in, so this is wired to the same TIMECOUNTER
+// source as CLOCK_MONOTONIC -- same "static but real" approximation
+// WALLCLOCK-backed clocks already make above, not true CPU-only
+// accounting (it keeps advancing through sleeps/blocking calls too).
 // -----------------------------------------------------------------------
 
 static long sys_clock_gettime(long clk_id, long ts_addr)
@@ -594,7 +607,8 @@ static long sys_clock_gettime(long clk_id, long ts_addr)
 		return 0;
 	case CLOCK_MONOTONIC:
 	case CLOCK_MONOTONIC_RAW:
-	case CLOCK_MONOTONIC_COARSE: {
+	case CLOCK_MONOTONIC_COARSE:
+	case CLOCK_PROCESS_CPUTIME_ID: {
 		u64 ns = b_system(TIMECOUNTER, 0, 0);
 		ts->tv_sec = (long)(ns / 1000000000ULL);
 		ts->tv_nsec = (long)(ns % 1000000000ULL);

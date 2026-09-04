@@ -341,8 +341,11 @@
  * b_system(WALLCLOCK) (OPENISSUES.md's "Missing common syscalls"
  * section) -- real, not stubs. nanosleep/clock_nanosleep are real too
  * (chained in 10ms chunks so lwIP timers keep servicing during a
- * sleep). CLOCK_PROCESS_CPUTIME_ID and anything else return -EINVAL,
- * matching "no per-process accounting" above.
+ * sleep). CLOCK_PROCESS_CPUTIME_ID is also wired to TIMECOUNTER (wall
+ * time since boot, not real per-process CPU-only accounting -- there's
+ * no scheduled-vs-blocked tracking to back that with, matching "no
+ * per-process accounting" above, but it's a reasonable stand-in given
+ * this port is single-process); anything else still returns -EINVAL.
  * --------------------------------------------------------------------- */
 #define HAVE_CLOCK_GETTIME 1
 #define HAVE_CLOCK_GETRES 1
@@ -355,11 +358,11 @@
  * is only *defined* under #if HAVE_CLOCK but *called* unconditionally
  * as time.process_time()'s last-resort fallback, so leaving this
  * undefined fails the build, not just a runtime call -- found the hard
- * way running this port's build (setup.sh/build-app.sh). musl does provide a real clock();
- * whether it returns anything meaningful here depends on times()/
- * CLOCK_PROCESS_CPUTIME_ID, neither of which posix_shim.c backs, so
- * time.process_time() likely fails or returns garbage at runtime --
- * same "let it link, fail at the call site" choice as HAVE_SIGACTION. */
+ * way running this port's build (setup.sh/build-app.sh). musl's
+ * clock() (src/time/clock.c) calls __clock_gettime(
+ * CLOCK_PROCESS_CPUTIME_ID, ...), which posix_shim.c now backs (see
+ * "Clocks" above) -- so time.process_time()'s clock() fallback works,
+ * modulo that same wall-time-since-boot approximation. */
 #define HAVE_CLOCK 1
 #define HAVE_MKTIME 1
 #define HAVE_TIMEGM 1
