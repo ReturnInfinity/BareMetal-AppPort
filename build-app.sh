@@ -131,7 +131,7 @@ APP_NAME="$(basename "${APP_SRCS[0]}" .c).app"
 # using none of libcurl still paid for all of it. Applied here too
 # (not just in setup.sh) since crt0.o/posix_shim.o/the app's own
 # sources/etc. are compiled fresh by *this* script every build.
-CFLAGS="-c -m64 -nostdlib -nostartfiles -nodefaultlibs -ffreestanding -fno-pic -fno-pie -mcmodel=large -falign-functions=16 -fomit-frame-pointer -mno-red-zone -fno-builtin -fno-stack-protector -ffunction-sections -fdata-sections -nostdinc -isystem $MUSL_INC"
+CFLAGS="-c -m64 -O2 -nostdlib -nostartfiles -nodefaultlibs -ffreestanding -fno-pic -fno-pie -mcmodel=large -falign-functions=16 -fomit-frame-pointer -mno-red-zone -fno-builtin -fno-stack-protector -ffunction-sections -fdata-sections -nostdinc -isystem $MUSL_INC"
 
 # lwIP headers pull in musl's (via -isystem above) for size_t/
 # stdint/etc., plus its own lwip/ and netif/ trees, plus our port's

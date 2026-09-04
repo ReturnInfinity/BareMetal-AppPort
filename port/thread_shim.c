@@ -144,8 +144,12 @@ static int g_active;
 
 static void thread_shim_timer_tick(void);
 
-static inline void irq_disable(void) { __asm__ volatile ("cli" ::: "memory"); }
-static inline void irq_enable(void)  { __asm__ volatile ("sti" ::: "memory"); }
+// cli/sti are ring-0-only -- the app runs in ring 3 (see libBareMetal.c's
+// header), so these go through the kernel's IRQ_ENABLE/IRQ_DISABLE
+// b_system() calls (a real int $0x80 trap) instead of executing the
+// privileged instruction directly, which would #GP.
+static inline void irq_disable(void) { b_system(IRQ_DISABLE, 0, 0); }
+static inline void irq_enable(void)  { b_system(IRQ_ENABLE, 0, 0); }
 
 static inline void fxsave_state(unsigned char *area)
 {
@@ -157,17 +161,21 @@ static inline void fxrstor_state(unsigned char *area)
 	__asm__ volatile ("fxrstor (%0)" :: "r"(area) : "memory");
 }
 
+// RDMSR/WRMSR are ring-0-only, same problem as cli/sti (see irq_disable()/
+// irq_enable() above) -- but unlike IRQ control, FS base has no b_system()
+// call to trap through. Instead the kernel enables CR4.FSGSBASE at boot
+// (see init/cpu.asm's init_cpu) specifically so ring-3 code can use
+// RDFSBASE/WRFSBASE directly, no trap needed.
 static inline unsigned long get_fsbase(void)
 {
-	unsigned lo, hi;
-	__asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100));
-	return ((unsigned long)hi << 32) | lo;
+	unsigned long v;
+	__asm__ volatile ("rdfsbase %0" : "=r"(v));
+	return v;
 }
 
 static inline void set_fsbase(unsigned long v)
 {
-	unsigned lo = (unsigned)v, hi = (unsigned)(v >> 32);
-	__asm__ volatile ("wrmsr" :: "c"(0xC0000100), "a"(lo), "d"(hi));
+	__asm__ volatile ("wrfsbase %0" :: "r"(v));
 }
 
 // -----------------------------------------------------------------------
@@ -546,7 +554,13 @@ static void deliver_pending_signals(struct bmos_thread *t)
 // this file's header. Only preempts a thread that's actually running
 // (never a thread another reschedule() call already parked as
 // T_BLOCKED on this same stack, e.g. the idle-poll loop above).
-static void thread_shim_timer_tick_c(void)
+// __attribute__((used)): the only call site is the raw "call
+// thread_shim_timer_tick_c" in thread_shim_timer_tick()'s inline asm
+// below -- invisible to the compiler's normal call-graph analysis, so
+// at -O2 this static function otherwise looks unreferenced and gets
+// eliminated before the linker ever sees it (undefined reference at
+// link time, not a warning).
+__attribute__((used)) static void thread_shim_timer_tick_c(void)
 {
 	if (!g_active)
 		return;
@@ -909,6 +923,64 @@ long thread_shim_futex(long uaddr, long op, long val, long timeout_or_val2, long
 	default:
 		return -ENOSYS;
 	}
+}
+
+// -----------------------------------------------------------------------
+// nanosleep()/usleep() blocking wait
+//
+// posix_shim.c's sleep_until_ns() used to just chain raw b_system(SLEEP,
+// ...) HLTs, relying on interrupt.asm's int_apic_timer to transparently
+// fabricate this scheduler's own timer-tick callback *during* that HLT so
+// other ready threads still got to run. That assumption broke once
+// int_apic_timer was fixed to only fabricate the callback for an interrupt
+// that actually landed in ring 3 (the app) -- a thread HLT-waiting inside
+// the kernel's b_system(SLEEP, ...) is a same-privilege interrupt for the
+// timer tick that fires during it (see that file's comment), so the
+// callback -- and with it, every other thread -- now never runs until the
+// sleeping thread's own HLT returns. This is the scheduler-aware
+// replacement: parks the calling thread with a deadline and no wait_addr,
+// exactly like futex_wait()'s own timeout path, so reschedule() can switch
+// to another ready thread (or, same as futex_wait(), fall through to
+// short, explicitly-polled b_system(SLEEP, ...) chunks only once nothing
+// at all is ready to run).
+// -----------------------------------------------------------------------
+
+long thread_shim_sleep_until(u64 target_ns)
+{
+	if (!g_active) {
+		// No scheduler running yet (thread_shim_init() never ran --
+		// no pthread_create() so far) -- nothing else could possibly
+		// be ready to yield to, so just HLT straight through.
+		u64 now;
+		while ((now = b_system(TIMECOUNTER, 0, 0)) < target_ns)
+			b_system(SLEEP, target_ns - now, 0);
+		return 0;
+	}
+
+	struct bmos_thread *self = g_current;
+
+	// Real nanosleep()/usleep() are never restarted after a caught
+	// signal regardless of SA_RESTART (see man 7 signal) -- so, unlike
+	// futex_wait(), WOKEN_INTR below doesn't need an SA_RESTART check;
+	// any deliverable signal ends the wait.
+	if (self->sig_pending & ~self->sig_blocked)
+		return -EINTR;
+
+	if (b_system(TIMECOUNTER, 0, 0) >= target_ns)
+		return 0;
+
+	irq_disable();
+	self->state = T_BLOCKED;
+	self->wait_addr = 0;
+	self->wait_deadline_ns = target_ns;
+	self->wake_reason = WOKEN_NONE;
+	irq_enable();
+
+	reschedule(0);
+
+	enum wake_reason why = self->wake_reason;
+	self->wait_deadline_ns = 0;
+	return why == WOKEN_INTR ? -EINTR : 0;
 }
 
 // -----------------------------------------------------------------------

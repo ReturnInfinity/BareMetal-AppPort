@@ -101,19 +101,18 @@
  #define IPC_64 0
 --- musl-1.2.6/src/thread/x86_64/__set_thread_area.s
 +++ musl-1.2.6/src/thread/x86_64/__set_thread_area.s
-@@ -1,11 +1,24 @@
+@@ -1,11 +1,19 @@
 -/* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
 +/*
 + * BareMetal-Firecracker port.
 + *
 + * Upstream sets the thread pointer via arch_prctl(ARCH_SET_FS, ptr),
-+ * a real syscall on Linux. BareMetal apps run in ring 0 in the same
-+ * flat address space as the kernel, so the privileged instruction
-+ * that arch_prctl would have used on the kernel's behalf -- wrmsr on
-+ * IA32_FS_BASE -- can just be issued directly, with no trap needed.
-+ *
-+ * IA32_FS_BASE = 0xC0000100. wrmsr takes the MSR index in ecx and
-+ * the 64-bit value split as edx:eax (high:low).
++ * a real syscall on Linux. The app runs in ring 3 (see
++ * BareMetal-Firecracker's src/BareMetal/kernel.asm), so the
++ * privileged MSR write arch_prctl would have used on the kernel's
++ * behalf (wrmsr on IA32_FS_BASE) would #GP here -- WRFSBASE is the
++ * ring-3-legal equivalent, available because the kernel enables
++ * CR4.FSGSBASE during boot (src/init/cpu.asm).
 + */
  .text
  .global __set_thread_area
@@ -124,11 +123,7 @@
 -	movl $0x1002,%edi       /* SET_FS register */
 -	movl $158,%eax          /* set fs segment to */
 -	syscall                 /* arch_prctl(SET_FS, arg)*/
-+	mov %rdi,%rax
-+	mov %rdi,%rdx
-+	shr $32,%rdx
-+	mov $0xC0000100,%ecx
-+	wrmsr
++	wrfsbase %rdi
 +	xor %eax,%eax
  	ret
 --- musl-1.2.6/src/thread/x86_64/clone.s
@@ -243,7 +238,7 @@
  	jmp __cancel
 --- musl-1.2.6/src/thread/x86_64/__unmapself.s
 +++ musl-1.2.6/src/thread/x86_64/__unmapself.s
-@@ -1,10 +1,43 @@
+@@ -1,10 +1,58 @@
  /* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
 +/*
 + * BareMetal-Firecracker port.
@@ -274,6 +269,14 @@
 + * from here (it disables interrupts itself immediately) and only
 + * re-enables them once execution has moved to a different thread's
 + * stack entirely.
++ *
++ * `cli` is ring-0-only -- the app runs in ring 3 (see libBareMetal.c's
++ * header), so this goes through the kernel's IRQ_DISABLE b_system()
++ * call (see libBareMetal.h) instead, the same fix thread_shim.c's own
++ * irq_disable() needed. a1/a2 (base/size, still needed for the munmap
++ * call below) are saved across it -- safe to push onto this
++ * about-to-be-unmapped stack for the same reason `call __bmos_syscall`
++ * already is, per this comment's second paragraph.
 + */
  .text
  .global __unmapself
@@ -284,7 +287,14 @@
 -	xor %rdi,%rdi   /* exit() args: always return success */
 -	movl $60,%eax   /* SYS_exit */
 -	syscall         /* exit(0) */
-+	cli
++	push %rdi       /* save a1 = base across the b_system() call below */
++	push %rsi       /* save a2 = size */
++	mov $0x50,%edi  /* IRQ_DISABLE */
++	xor %esi,%esi
++	xor %edx,%edx
++	call b_system
++	pop %rsi
++	pop %rdi
 +	mov %rsi,%rdx   /* a2 = size */
 +	mov %rdi,%rsi   /* a1 = base */
 +	mov $11,%edi    /* n = SYS_munmap */

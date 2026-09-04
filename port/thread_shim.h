@@ -23,6 +23,18 @@ long thread_shim_futex(long uaddr, long op, long val, long timeout_or_val2, long
 // SYS_sched_yield.
 long thread_shim_sched_yield(void);
 
+// Blocks the calling thread until b_system(TIMECOUNTER, ...) reaches
+// target_ns, the same way futex_wait()'s own timeout path does -- unlike a
+// raw b_system(SLEEP, ...) HLT, this parks the thread on the scheduler so
+// other ready threads still run during the wait (see thread_shim.c's
+// "nanosleep()/usleep() blocking wait" section for why a raw HLT here no
+// longer yields to anyone, now that interrupt.asm's scheduler callback is
+// only fabricated for an interrupt landing in ring 3). Returns 0 once
+// target_ns is reached, or -EINTR if a deliverable signal interrupted it
+// early (nanosleep()/usleep() are never restarted regardless of
+// SA_RESTART, so this doesn't check it).
+long thread_shim_sleep_until(u64 target_ns);
+
 // True once the calling context is a worker thread (created via
 // thread_shim_clone()) rather than the app's original entry context.
 // posix_shim.c's SYS_exit case uses this to decide whether a bare

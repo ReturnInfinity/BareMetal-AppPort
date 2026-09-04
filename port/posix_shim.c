@@ -605,23 +605,18 @@ static long sys_clock_gettime(long clk_id, long ts_addr)
 	}
 }
 
-// nanosleep()/clock_nanosleep() -- b_system(SLEEP, ns, 0) (see
-// libBareMetal.h) HLTs the CPU until the APIC timer fires ns
-// nanoseconds out instead of spinning, so this chains that in
-// NET_POLL_INTERVAL_NS-sized chunks -- net_poll() is still called
-// between chunks so lwIP's timers/retransmits keep getting serviced
-// during a long sleep instead of stalling for its whole duration. This
-// predates thread_shim.c's scheduler and doesn't explicitly yield to
-// it, but doesn't need to: thread_shim.c's timer tick (the same APIC
-// timer this HLT wakes for) transparently preempts a sleeping thread
-// like any other, so other threads still make progress during a long
-// sleep here -- see that file's header.
+// nanosleep()/clock_nanosleep() -- thread_shim_sleep_until() (see that
+// function's comment for why this can't just chain raw b_system(SLEEP,
+// ...) HLTs: that would stop every other thread from running for the
+// entire sleep) in NET_POLL_INTERVAL_NS-sized chunks -- net_poll() is
+// still called between chunks so lwIP's timers/retransmits keep getting
+// serviced during a long sleep instead of stalling for its whole
+// duration.
 //
-// A caught signal without SA_RESTART now legitimately interrupts a
-// sleep early (see thread_shim.c's "Signals" section) -- checked once
-// per NET_POLL_INTERVAL_NS-sized chunk below via
-// thread_shim_take_eintr(), same granularity the sleep itself already
-// runs at. *rem is left zeroed only for the "slept the full duration"
+// A caught signal now legitimately interrupts a sleep early (see
+// thread_shim_sleep_until()'s own comment on why that's correct
+// regardless of SA_RESTART) -- reported via that function's -EINTR
+// return. *rem is left zeroed only for the "slept the full duration"
 // case; an EINTR return reports real remaining time.
 #define NET_POLL_INTERVAL_NS 10000000ULL // 10ms
 
@@ -631,9 +626,10 @@ static long sleep_until_ns(u64 target_ns, long rem_addr)
 
 	while ((now_ns = b_system(TIMECOUNTER, 0, 0)) < target_ns) {
 		u64 remaining_ns = target_ns - now_ns;
-		b_system(SLEEP, remaining_ns < NET_POLL_INTERVAL_NS ? remaining_ns : NET_POLL_INTERVAL_NS, 0);
+		u64 chunk_ns = remaining_ns < NET_POLL_INTERVAL_NS ? remaining_ns : NET_POLL_INTERVAL_NS;
+		long rc = thread_shim_sleep_until(now_ns + chunk_ns);
 		net_poll();
-		if (thread_shim_take_eintr()) {
+		if (rc == -EINTR) {
 			now_ns = b_system(TIMECOUNTER, 0, 0);
 			if (rem_addr) {
 				struct timespec *rem = (struct timespec *)rem_addr;
@@ -916,10 +912,11 @@ static long sys_poll(long fds_addr, long nfds, long timeout)
 // Process / thread bootstrap
 //
 // arch_prctl(ARCH_SET_FS) is normally reached during startup, but on
-// this port it's handled directly by a wrmsr in
-// src/thread/x86_64/__set_thread_area.s (ring 0, no trap needed) and
-// never comes through here. This case only exists in case something
-// calls the arch_prctl() library function explicitly.
+// this port it's handled directly by a wrfsbase in
+// src/thread/x86_64/__set_thread_area.s (ring 3-legal, no trap needed
+// -- see that file and cpu.asm's CR4.FSGSBASE enable) and never comes
+// through here. This case only exists in case something calls the
+// arch_prctl() library function explicitly.
 // -----------------------------------------------------------------------
 
 #define ARCH_SET_FS 0x1002
@@ -929,14 +926,13 @@ static long sys_arch_prctl(long code, long addr)
 {
 	switch (code) {
 	case ARCH_SET_FS: {
-		unsigned lo = (unsigned)addr, hi = (unsigned)((unsigned long)addr >> 32);
-		__asm__ volatile ("wrmsr" :: "c"(0xC0000100), "a"(lo), "d"(hi));
+		__asm__ volatile ("wrfsbase %0" :: "r"((unsigned long)addr));
 		return 0;
 	}
 	case ARCH_GET_FS: {
-		unsigned lo, hi;
-		__asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100));
-		*(unsigned long *)addr = ((unsigned long)hi << 32) | lo;
+		unsigned long base;
+		__asm__ volatile ("rdfsbase %0" : "=r"(base));
+		*(unsigned long *)addr = base;
 		return 0;
 	}
 	default:
@@ -953,14 +949,14 @@ static long sys_set_tid_address(long addr)
 // exit()/_exit() call this from wherever they were invoked, deep in
 // musl's call stack -- and musl's _Exit() is _Noreturn, spinning
 // forever on the syscall rather than returning up through main() if
-// it ever came back. So instead of returning normally, unwind RSP
-// straight back to _start's entry point (crt0.c) in one shot and
-// perform its "pop rbp; ret" ourselves. That lands back in
-// BareMetal's kernel right after it `call`ed into the app, exactly
-// as if the app had returned normally -- which is what makes the
+// it ever came back. So instead of returning normally, trap into the
+// kernel via b_exit(): the app runs in ring 3, so it can no longer
+// just unwind its own stack and `ret` into the kernel's ring 0 code
+// the way it could back when app and kernel shared one privilege
+// level and one stack. b_exit() (libBareMetal.c) never returns --
+// the kernel's syscall gate resets RSP to its own stack and jumps
+// straight to kernel.asm's app_finished, which is what makes the
 // kernel shut down.
-extern void *__bmos_entry_sp;
-
 static long sys_exit(long code)
 {
 	(void)code;
@@ -973,20 +969,15 @@ static long sys_exit(long code)
 	// through the same _Exit() call) is guaranteed to go through.
 	ext4_shim_sync();
 
-	__asm__ volatile (
-		"movq __bmos_entry_sp(%%rip), %%rsp\n\t"
-		"popq %%rbp\n\t"
-		"ret\n\t"
-		::: "memory"
-	);
+	b_exit();
 	__builtin_unreachable();
 }
 
 // thread_shim.c's signal delivery (see its "Signals" section) calls
 // this for a signal whose disposition is "terminate" -- reached from
 // deep inside a CALLBACK_TIMER-driven call chain (possibly several
-// thread_shim.c frames down), but that's fine: sys_exit() resets RSP to
-// __bmos_entry_sp directly and never returns through them, the same way
+// thread_shim.c frames down), but that's fine: sys_exit() traps into
+// the kernel via b_exit() and never returns through them, the same way
 // a bare exit() call from arbitrarily deep inside any app callback
 // already unwinds cleanly today.
 void thread_shim_terminate_process(long code)

@@ -55,8 +55,14 @@ extern void baremetal_install_frozen_modules(void);
 // non-static (like crt0.c's _start_c()) so the `call` below resolves
 // to a real relocation instead of being eligible for --gc-sections to
 // drop as unreferenced.
+// __attribute__((used)): main()'s inline asm below references this by
+// name in a raw "leaq python_c_stack+..." string -- invisible to the
+// compiler's normal use analysis, so at -O2 this static array
+// otherwise looks unreferenced and gets eliminated before the linker
+// ever sees it (undefined reference at link time, not a warning) --
+// same failure shape as thread_shim.c's thread_shim_timer_tick_c().
 #define PY_C_STACK_BYTES (1 * 1024 * 1024)
-static unsigned char python_c_stack[PY_C_STACK_BYTES] __attribute__((aligned(16)));
+__attribute__((used)) static unsigned char python_c_stack[PY_C_STACK_BYTES] __attribute__((aligned(16)));
 
 void python_main(void) __attribute__((noreturn));
 

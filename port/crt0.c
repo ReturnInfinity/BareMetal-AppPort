@@ -18,22 +18,6 @@ static int has_rdrand(void);
 #define AT_RANDOM	25
 
 /*
- * RSP as it was when BareMetal `call`ed into _start, captured in
- * _start's prologue and handed to _start_c as an argument rather
- * than written straight to this global from _start: it lives in
- * .bss, and _start_c's first act is zero_bss(), which would
- * immediately wipe it again if it were set any earlier. exit()/
- * _exit() never return up through the normal call chain (musl's
- * _Exit() spins forever on the syscall instead) -- so sys_exit()
- * (posix_shim.c) restores RSP from this and issues its own "pop
- * rbp; ret" to unwind straight back to _start's tail in one shot,
- * exactly as if main() had returned normally. That's what lets the
- * app just fall out to BareMetal, which shuts down once _start
- * returns.
- */
-void *__bmos_entry_sp;
-
-/*
  * Ensure RSP is 16-byte aligned. SSE instructions such as
  * MOVAPS will #GP on the mis-aligned stack.
  */
@@ -54,6 +38,8 @@ __attribute__((naked)) void _start(void)
 
 int _start_c(void *entry_sp)
 {
+	(void)entry_sp;	/* only used to keep the CALL into here 8-mod-16 aligned (see _start) */
+
 	/*
 	 * zero_bss() below writes every byte from __bss_start through
 	 * __bss_stop -- the whole app image's footprint (.text+.rodata+
@@ -73,11 +59,9 @@ int _start_c(void *entry_sp)
 	 * on the console instead.
 	 */
 	if (!image_fits_in_ram())
-		return 1;
+		b_exit();	/* never returns -- _start has no way to `ret` into the kernel anymore */
 
 	zero_bss();
-
-	__bmos_entry_sp = entry_sp;	/* safe now that .bss is zeroed */
 
 	static unsigned char randbuf[16];
 	fill_random(randbuf);
@@ -140,9 +124,10 @@ static int image_fits_in_ram(void)
 	 * storage (anywhere in .bss, not just past the ceiling) isn't
 	 * provably safe to touch yet. The stack itself is a separate,
 	 * always-valid region BareMetal sets up independently of the
-	 * image's own mapped window (entry_sp is already a valid low
-	 * address by the time _start_c runs), so it's the only storage
-	 * this function can trust before the check below has passed. */
+	 * app's own image size (it's the top slice of the same
+	 * high-mapped RAM window, sized off the VM's total RAM rather
+	 * than off this image), so it's the only storage this function
+	 * can trust before the check below has passed. */
 	char msg[192];
 	char numbuf[20];
 	char *p = msg;
