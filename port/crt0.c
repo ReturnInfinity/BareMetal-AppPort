@@ -1,3 +1,5 @@
+#include <stddef.h>
+
 #include "libBareMetal.h"
 
 extern int main(int argc, char **argv, char **envp);
@@ -17,6 +19,20 @@ static int has_rdrand(void);
 #define AT_PAGESZ	6
 #define AT_RANDOM	25
 
+// Firecracker writes the whole kernel cmdline here for guests that have
+// no other way to read it (see net_glue.c's FC_IP_PARAM_ADDR -- same
+// address, same 256-byte reserved region per BareMetal-Firecracker's
+// memory map, this just looks for a different token in it). baremetal.sh
+// sets boot_args to exactly `args=\`$*\`` when args are passed to
+// 2-run.sh, e.g.:
+//   args=`This is a test`
+// -> argv = { "main", "This", "is", "a", "test" }
+// argv[0] is always the literal "main" -- BareMetal apps have no
+// filename of their own the way a Linux argv[0] would carry one.
+#define FC_ARGS_PARAM_ADDR ((const char *)0x5a00UL)
+#define FC_ARGS_PARAM_MAXLEN 256
+#define FC_ARGS_MAX_ARGC 32	/* argv[0] ("main") + up to 31 args from the cmdline */
+
 /*
  * Ensure RSP is 16-byte aligned. SSE instructions such as
  * MOVAPS will #GP on the mis-aligned stack.
@@ -34,6 +50,70 @@ __attribute__((naked)) void _start(void)
 		"ret\n\t"                /* return to BareMetal OS       */
 		::: "memory"
 	);
+}
+
+// Copies the NUL-terminated string at FC_ARGS_PARAM_ADDR (capped at
+// FC_ARGS_PARAM_MAXLEN, in case it's uninitialized/non-Firecracker memory
+// with no NUL in range), finds the "args=`...`" token in it as a
+// Linux-style kernel command line (the same way net_glue.c's
+// fc_parse_ip_param() finds "ip=" -- as a whole token, at the start of
+// the line or preceded by whitespace, not assumed to be a prefix of the
+// buffer), and splits the backtick-quoted string on whitespace into
+// argv[1..]. argv[0] is always "main". Returns argc (>= 1); on a missing
+// or malformed "args=" token, argv is just { "main" }.
+//
+// No libc yet at this point in startup (this runs before
+// __libc_start_main() -- see the comment on fill_random()), hence
+// hand-rolled rather than using strstr/strtok.
+static int fc_parse_args_param(char **argv, int max_argc)
+{
+	static char buf[FC_ARGS_PARAM_MAXLEN];
+	const char *src = FC_ARGS_PARAM_ADDR;
+	int argc = 0;
+	size_t len;
+
+	argv[argc++] = "main";
+
+	for (len = 0; len < sizeof(buf) - 1 && src[len] != '\0'; len++)
+		buf[len] = src[len];
+	buf[len] = '\0';
+
+	char *tok = NULL;
+	for (char *p = buf; *p != '\0'; p++) {
+		if ((p == buf || p[-1] == ' ' || p[-1] == '\t') &&
+		    p[0] == 'a' && p[1] == 'r' && p[2] == 'g' && p[3] == 's' && p[4] == '=') {
+			tok = p + 5;
+			break;
+		}
+	}
+
+	if (tok == NULL || *tok != '`')
+		return argc;	/* no "args=" token (or malformed): argv = {"main"} */
+
+	tok++;	/* skip opening backtick */
+
+	char *end = tok;
+	while (*end != '\0' && *end != '`')
+		end++;
+	if (*end != '`')
+		return argc;	/* no closing backtick found: truncated/malformed, ignore */
+	*end = '\0';
+
+	/* Split the backtick-quoted string on whitespace in place. */
+	char *p = tok;
+	while (*p != '\0' && argc < max_argc) {
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (*p == '\0')
+			break;
+		argv[argc++] = p;
+		while (*p != '\0' && *p != ' ' && *p != '\t')
+			p++;
+		if (*p != '\0')
+			*p++ = '\0';
+	}
+
+	return argc;
 }
 
 int _start_c(void *entry_sp)
@@ -72,21 +152,27 @@ int _start_c(void *entry_sp)
 	 * (NULL-terminated), envp (NULL-terminated), then an auxv
 	 * array of {key,value} pairs terminated by {AT_NULL,0}.
 	 * BareMetal doesn't hand the app anything like this -- it just
-	 * calls _start() -- so it's fabricated here. argc is 0 and
-	 * envp is empty; the auxv only carries the two entries musl's
-	 * startup actually consumes: AT_PAGESZ (mallocng divides by
+	 * calls _start() -- so it's fabricated here. argv comes from
+	 * Firecracker's "args=" cmdline token (see fc_parse_args_param())
+	 * and envp is always empty; the auxv only carries the two entries
+	 * musl's startup actually consumes: AT_PAGESZ (mallocng divides by
 	 * this -- a zero here breaks it) and AT_RANDOM (stack
 	 * protector / malloc hardening entropy).
 	 */
-	static long init_stack[] = {
-		0,                     /* argv[0] terminator (argc = 0) */
-		0,                     /* envp[0] terminator (empty envp) */
-		AT_PAGESZ, 4096,
-		AT_RANDOM, (long)randbuf,
-		AT_NULL, 0,
-	};
+	static char *fc_argv[FC_ARGS_MAX_ARGC];
+	int fc_argc = fc_parse_args_param(fc_argv, FC_ARGS_MAX_ARGC);
 
-	return __libc_start_main(main, 0, (char **)init_stack, 0, 0, 0);
+	static long init_stack[FC_ARGS_MAX_ARGC + 8];
+	int idx = 0;
+	for (int i = 0; i < fc_argc; i++)
+		init_stack[idx++] = (long)fc_argv[i];
+	init_stack[idx++] = 0;                     /* argv[] terminator */
+	init_stack[idx++] = 0;                     /* envp[0] terminator (empty envp) */
+	init_stack[idx++] = AT_PAGESZ; init_stack[idx++] = 4096;
+	init_stack[idx++] = AT_RANDOM; init_stack[idx++] = (long)randbuf;
+	init_stack[idx++] = AT_NULL;   init_stack[idx++] = 0;
+
+	return __libc_start_main(main, fc_argc, (char **)init_stack, 0, 0, 0);
 }
 
 /* Renders v in decimal into the tail of buf (which must be at least
