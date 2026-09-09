@@ -211,7 +211,7 @@
  * register/virtualization explanation and pointing at the *memory*
  * two fixed, correct addresses resolved to actually being one and the
  * same. No PT_TLS program header or runtime TLS-copy machinery was
- * ever involved -- musl's own PT_TLS-walking init (Python-3.12.8's
+ * ever involved -- musl's own PT_TLS-walking init (Python-3.14.7's
  * vendored env/__init_tls.c, via aux[AT_PHDR]) is dead code on this
  * port regardless (crt0.c's fabricated auxv carries only
  * AT_PAGESZ/AT_RANDOM), since x86-64 Local-Exec TLS access computes

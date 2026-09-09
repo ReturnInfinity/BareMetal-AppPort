@@ -328,7 +328,7 @@ full reasoning) built directly over `posix_shim.c`/`ext4_shim.c`:
 
 ## Python (`port/python_port/`)
 
-CPython 3.12.8 is vendored unmodified (`scripts/get-python.sh`);
+CPython 3.14.7 is vendored unmodified (`scripts/get-python.sh`);
 `port/python_port/pyconfig.h` is this port's hand-written build config
 (the role `curl_config.h`/`sqlite_baremetal_config.h` play for
 curl/SQLite), and `python.c`/`config_baremetal.c`/

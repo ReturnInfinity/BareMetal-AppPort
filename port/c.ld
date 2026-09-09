@@ -66,7 +66,7 @@ SECTIONS
 	 *
 	 * This didn't need a PT_TLS program header or any runtime TLS
 	 * setup to go wrong -- Local-Exec offsets are baked in entirely at
-	 * link time. musl's own PT_TLS-parsing (Python-3.12.8/../
+	 * link time. musl's own PT_TLS-parsing (Python-3.14.7/../
 	 * __init_tls.c's static_init_tls(), walking aux[AT_PHDR]) is
 	 * already dead code here regardless (crt0.c's fabricated auxv
 	 * carries only AT_PAGESZ/AT_RANDOM -- see this file's _DYNAMIC

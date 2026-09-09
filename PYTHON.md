@@ -1,11 +1,11 @@
 # Python Port
 
-A CPython 3.12.8 port for this repo, following the same
+A CPython 3.14.7 port for this repo, following the same
 vendor-unmodified-source-plus-hand-written-config pattern already used
 for curl/SQLite/Mbed TLS/lwIP/lwext4/libsodium: `port/python_port/`
 holds this port's own glue (`python.c`, `config_baremetal.c`,
 `frozen_encodings_baremetal.c`, `pyconfig.h`), `scripts/get-python.sh`
-fetches CPython 3.12.8 unmodified, and both `setup.sh` and
+fetches CPython 3.14.7 unmodified, and both `setup.sh` and
 `build-app.sh` build it the same way they build every other port.
 Unlike a library other apps merely link against, though, CPython's
 whole point *is* the app -- so `./setup.sh` alone leaves `python.app`
@@ -54,7 +54,7 @@ empirical way `build-app.sh`'s own `--gc-sections`/`OUTPUT_FORMAT(binary)`
 comment describes confirming linker behavior by testing it rather than
 reasoning about it in the abstract.
 
-## What's confirmed, from reading CPython 3.12.8's actual source (not
+## What's confirmed, from reading CPython 3.14.7's actual source (not
 just pyconfig.h.in) against this port's files
 
 - **Threading is a real match, not just "present".**
@@ -129,7 +129,7 @@ back to.
 **Phase 1 -- the interpreter itself.** What it took to get a
 boot-verified interpreter running:
 
-- **A native host CPython 3.12.8** (`build/host-python-build/`, a
+- **A native host CPython 3.14.7** (`build/host-python-build/`, a
   plain `./configure && make` on the build machine, not the target --
   ~15 min, not checked into the repo). Not just for `--with-build-python`
   bookkeeping: CPython's *generated* sources (the pegen parser tables
@@ -141,7 +141,7 @@ boot-verified interpreter running:
   target-specific. A native build produces every one of them for free;
   Phase 1 never had to regenerate any of it, only recompile the
   existing generated `.c`/`.h` files against musl instead of glibc.
-  `build/Python-3.12.8/Python/frozen_modules/*.h` and
+  `build/Python-3.14.7/Python/frozen_modules/*.h` and
   `Python/deepfreeze/deepfreeze.c` were copied over from the host build
   once, by hand.
 - **`port/python_port/pyconfig.h`**, not `pyconfig_baremetal.h` alone --
@@ -171,7 +171,7 @@ boot-verified interpreter running:
   `Py_InitializeFromConfig()` embedding API with a hand-built
   `PyConfig` instead: `site_import=0`, `use_environment=0`,
   `module_search_paths_set=1` with zero real entries (no installed
-  `lib/python3.12/` tree on this port yet, see Phase 3), and
+  `lib/python3.14/` tree on this port yet, see Phase 3), and
   `parse_argv=0` (`crt0.c`'s argv is always empty anyway). Runs
   `PyRun_SimpleString("print(1 + 1)\n")`.
 - **`port/python_port/config_baremetal.c`** -- a hand-written
@@ -340,7 +340,7 @@ Compiled with **zero new C shim code**, only config work:
   traced directly: `build/host-python-build/python -S -c "import
   json"`, diffing `sys.modules` before/after. Result: 19 files --
   `json`'s own 4-file package, plus `collections`, `re` (itself a
-  5-file package in 3.12), `enum`, `functools`, `_collections_abc`,
+  5-file package in 3.14), `enum`, `functools`, `_collections_abc`,
   `copyreg`, `keyword`, `operator`, `reprlib`, `types` -- plus
   `encodings/ascii.py` for the other test (see below). `_json` (json's
   optional C accelerator) is genuinely optional -- not built, and
@@ -501,7 +501,7 @@ new).
 ## Bottom line
 
 No fundamental primitive is missing -- threading was the last one, and
-Phases 1, 2, and 3 prove it end to end: a real CPython 3.12.8 now boots
+Phases 1, 2, and 3 prove it end to end: a real CPython 3.14.7 now boots
 on BareMetal-Firecracker, runs Python code, drives real sockets through
 `posix_shim.c`/`net_shim.c`, and imports real, unmodified `.py` files
 off the EXT2 disk image through `ext4_shim.c` -- all three with zero
