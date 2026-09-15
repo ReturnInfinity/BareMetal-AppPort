@@ -77,15 +77,43 @@ SECTIONS
 	 * needs to exist for Local-Exec mode to be correct once the
 	 * addresses themselves stop colliding.
 	 */
+	/*
+	 * __tdata_start/__tdata_end/__tbss_end: crt0.c fabricates a
+	 * single-entry PT_TLS program header from these (see its own
+	 * comment) so musl's static_init_tls()/__copy_tls() -- otherwise
+	 * dead code here, since there's no real program header table left
+	 * once c.ld's own OUTPUT_FORMAT(binary) strips it -- actually
+	 * copies this template into every thread's TLS block instead of
+	 * leaving it (and therefore every #[thread_local]/__thread
+	 * variable with a non-zero initializer) uninitialized.
+	 */
+	__tdata_start = .;
+
 	.tdata : {
 		*(.tdata .tdata.*)
 	}
+
+	__tdata_end = .;
 
 	. = ALIGN(16);
 
 	.tbss : {
 		*(.tbss .tbss.*)
 	}
+
+	/*
+	 * ld's location counter famously does *not* advance past a TLS
+	 * (SHT_TLS) output section's own size the way it does for every
+	 * other section -- .tbss's PT_TLS phdr entry (readelf -l) reports
+	 * the right p_memsz regardless, but a bare `symbol = .;` placed
+	 * right after this block would otherwise land at .tbss's *start*,
+	 * not its end (confirmed: without this line, __tbss_end below came
+	 * out equal to __tdata_end). SIZEOF() is ld's own documented
+	 * workaround for exactly this.
+	 */
+	. = . + SIZEOF(.tbss);
+
+	__tbss_end = .;
 
 	. = ALIGN(16);
 

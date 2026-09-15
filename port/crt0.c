@@ -9,6 +9,9 @@ extern int __libc_start_main(int (*)(int, char **, char **), int, char **,
 extern char __bss_start;
 extern char __bss_stop;
 extern char __image_base[];
+extern char __tdata_start[];
+extern char __tdata_end[];
+extern char __tbss_end[];
 
 static int image_fits_in_ram(void);
 static void zero_bss(void);
@@ -16,8 +19,56 @@ static void fill_random(unsigned char buf[16]);
 static int has_rdrand(void);
 
 #define AT_NULL		0
+#define AT_PHDR		3
+#define AT_PHENT	4
+#define AT_PHNUM	5
 #define AT_PAGESZ	6
 #define AT_RANDOM	25
+
+#define PT_TLS		7
+
+/*
+ * musl's static_init_tls() (src/env/__init_tls.c) walks aux[AT_PHDR]/
+ * aux[AT_PHNUM] for a PT_TLS entry to learn the main executable's TLS
+ * template (image address, initialized/.tdata size, total .tdata+.tbss
+ * size, alignment) -- the same information __copy_tls() then memcpy's
+ * into *every* thread's TLS block, main or pthread_create()'d alike.
+ * With no real program header table (c.ld's OUTPUT_FORMAT(binary)
+ * strips it before this ever runs), that loop found nothing: main_tls
+ * stayed zeroed, libc.tls_head was never set, and __copy_tls()'s own
+ * copy loop (`for (p=libc.tls_head; p; p=p->next)`) never executed --
+ * for *any* thread, not just ones spawned later. Every #[thread_local]/
+ * __thread variable whose compiled-in initial value happens to be all-
+ * zero bytes (Option::None, 0u64, ...) looked correct anyway, purely
+ * because it landed on already-zeroed .bss-backed storage (main
+ * thread: builtin_tls[] in musl's own .bss; a spawned thread: a fresh
+ * mmap, always zero-filled -- see posix_shim.c's sys_mmap()) -- but
+ * one with a non-zero initial value (e.g. Rust std's own internal
+ * `DTORS: RefCell<Vec<..>>` thread-local, whose empty-Vec sentinel
+ * pointer is a small non-zero constant, not 0) silently read whatever
+ * zero/garbage was already there instead, corrupting that thread's
+ * TLS destructor list -- surfacing on this port as a #GP or a spurious
+ * "cannot access a Thread Local Storage value during or after
+ * destruction" panic, only once a spawned thread actually exits and
+ * that destructor list gets walked (a plain single-threaded run never
+ * exercises the buggy path at all).
+ *
+ * Fabricating this one PT_TLS entry -- pointing straight at c.ld's own
+ * __tdata_start/__tdata_end/__tbss_end symbols, which are exact and
+ * known at link time since this image is neither PIE nor relocated --
+ * is enough: static_init_tls() takes it from there exactly as it would
+ * a real ELF's program header, no further musl changes needed.
+ */
+struct fake_phdr {
+	unsigned int p_type;
+	unsigned int p_flags;
+	unsigned long p_offset;
+	unsigned long p_vaddr;
+	unsigned long p_paddr;
+	unsigned long p_filesz;
+	unsigned long p_memsz;
+	unsigned long p_align;
+};
 
 // Firecracker writes the whole kernel cmdline here for guests that have
 // no other way to read it (see net_glue.c's FC_IP_PARAM_ADDR -- same
@@ -147,6 +198,19 @@ int _start_c(void *entry_sp)
 	fill_random(randbuf);
 
 	/*
+	 * See this file's own PT_TLS/struct fake_phdr comment: this one
+	 * entry is what lets musl's static_init_tls() find and copy the
+	 * real .tdata/.tbss template, for every thread, instead of
+	 * silently leaving it dead code.
+	 */
+	static struct fake_phdr tls_phdr;
+	tls_phdr.p_type = PT_TLS;
+	tls_phdr.p_vaddr = (unsigned long)__tdata_start;
+	tls_phdr.p_filesz = (unsigned long)(__tdata_end - __tdata_start);
+	tls_phdr.p_memsz = (unsigned long)(__tbss_end - __tdata_start);
+	tls_phdr.p_align = 16;
+
+	/*
 	 * musl's real startup path (__libc_start_main -> __init_tls ->
 	 * exit()) expects a Linux-style initial stack: argc, argv
 	 * (NULL-terminated), envp (NULL-terminated), then an auxv
@@ -154,15 +218,18 @@ int _start_c(void *entry_sp)
 	 * BareMetal doesn't hand the app anything like this -- it just
 	 * calls _start() -- so it's fabricated here. argv comes from
 	 * Firecracker's "args=" cmdline token (see fc_parse_args_param())
-	 * and envp is always empty; the auxv only carries the two entries
-	 * musl's startup actually consumes: AT_PAGESZ (mallocng divides by
-	 * this -- a zero here breaks it) and AT_RANDOM (stack
-	 * protector / malloc hardening entropy).
+	 * and envp is always empty; the auxv carries AT_PAGESZ (mallocng
+	 * divides by this -- a zero here breaks it), AT_RANDOM (stack
+	 * protector / malloc hardening entropy), and AT_PHDR/AT_PHENT/
+	 * AT_PHNUM pointing at the single fabricated PT_TLS entry above --
+	 * every other program header type static_init_tls() looks at
+	 * (PT_PHDR, PT_DYNAMIC, PT_GNU_STACK) is fine left unrepresented,
+	 * it just skips them.
 	 */
 	static char *fc_argv[FC_ARGS_MAX_ARGC];
 	int fc_argc = fc_parse_args_param(fc_argv, FC_ARGS_MAX_ARGC);
 
-	static long init_stack[FC_ARGS_MAX_ARGC + 8];
+	static long init_stack[FC_ARGS_MAX_ARGC + 14];
 	int idx = 0;
 	for (int i = 0; i < fc_argc; i++)
 		init_stack[idx++] = (long)fc_argv[i];
@@ -170,6 +237,9 @@ int _start_c(void *entry_sp)
 	init_stack[idx++] = 0;                     /* envp[0] terminator (empty envp) */
 	init_stack[idx++] = AT_PAGESZ; init_stack[idx++] = 4096;
 	init_stack[idx++] = AT_RANDOM; init_stack[idx++] = (long)randbuf;
+	init_stack[idx++] = AT_PHDR;   init_stack[idx++] = (long)&tls_phdr;
+	init_stack[idx++] = AT_PHENT;  init_stack[idx++] = (long)sizeof(tls_phdr);
+	init_stack[idx++] = AT_PHNUM;  init_stack[idx++] = 1;
 	init_stack[idx++] = AT_NULL;   init_stack[idx++] = 0;
 
 	return __libc_start_main(main, fc_argc, (char **)init_stack, 0, 0, 0);

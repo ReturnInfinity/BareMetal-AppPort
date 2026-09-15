@@ -39,10 +39,12 @@ true`, `panic-strategy: abort`, no dynamic linking, no PIE -- the exact
 same reasoning as `build-app.sh`'s `-fno-pic -fno-pie -mcmodel=large
 -mno-red-zone`.
 
-TLS works unmodified: `port/c.ld` already carves per-symbol
-`.tdata`/`.tbss` output sections and thread-pointer setup uses
-`wrfsbase` (Local-Exec model), which is exactly what a statically
-linked, non-PIC Rust binary uses too.
+TLS's *addressing* works unmodified: `port/c.ld` already carves
+per-symbol `.tdata`/`.tbss` output sections and thread-pointer setup
+uses `wrfsbase` (Local-Exec model), which is exactly what a statically
+linked, non-PIC Rust binary uses too. Getting a *thread's own copy* of
+that template correctly initialized took one real fix -- see "The
+PT_TLS fix" below.
 
 ## Build flow: `build-rust-app.sh`
 
@@ -100,6 +102,55 @@ this port needed -- no changes to Rust's own std source were required,
 despite the plan that led here expecting a small patch to
 `std::rt`'s guard-page install and `std::process::Command`.
 
+## The PT_TLS fix (`crt0.c`, `c.ld`)
+
+`std::thread::spawn` used to panic during thread teardown --
+`cannot access a Thread Local Storage value during or after
+destruction: AccessError` (`std/src/thread/local.rs`), crashing the VM
+outright (`Exception 0x13(GP)`) as often as not. Root cause, found by
+patching a debug trace into std's own `sys/thread_local` source
+(`-Z build-std` compiles it from source anyway, so this is just a
+throwaway local edit to the toolchain's `rust-src` copy, not a
+committed patch) and reading musl's `src/env/__init_tls.c`:
+
+musl's `static_init_tls()` (called from `__libc_start_main`, for
+*every* process, threaded or not) walks `aux[AT_PHDR]`/`aux[AT_PHNUM]`
+looking for a `PT_TLS` program header to learn the executable's TLS
+template -- its image address, its initialized (`.tdata`) size, its
+total (`.tdata`+`.tbss`) size, and its alignment. `__copy_tls()` then
+uses exactly that to `memcpy` the template into every thread's TLS
+block, main thread included. `crt0.c`'s fabricated auxv never carried
+`AT_PHDR` (there's no real program header table left once c.ld's
+`OUTPUT_FORMAT(binary)` strips it), so that lookup silently found
+nothing: `libc.tls_head` was never set, and `__copy_tls()`'s copy loop
+never ran, for *any* thread. Any `#[thread_local]`/`__thread` variable
+whose compiled-in initial value happens to be all-zero bytes
+(`Option::None`, `0u64`, ...) looked correct anyway, purely because it
+landed on already-zeroed storage (main thread: musl's own
+`builtin_tls[]`, in `.bss`; a spawned thread: a fresh `mmap`, always
+zero-filled -- see `posix_shim.c`'s `sys_mmap()`). One with a
+*non-zero* initial value -- std's own internal `DTORS: RefCell<Vec<..>>`
+thread-local (list.rs), whose empty-`Vec` sentinel pointer is a small
+non-zero constant -- read garbage instead, corrupting that thread's own
+destructor list. It only ever surfaced once a spawned thread actually
+exited and that destructor list got walked; a single-threaded run never
+touched the buggy path at all.
+
+The fix fabricates one `PT_TLS` program header entry (`crt0.c`'s
+`struct fake_phdr`/`tls_phdr`) pointing at `c.ld`'s own
+`__tdata_start`/`__tdata_end`/`__tbss_end` symbols -- exact and known
+at link time, since this image is neither PIE nor relocated -- and adds
+`AT_PHDR`/`AT_PHENT`/`AT_PHNUM` to the fabricated auxv so
+`static_init_tls()` finds it. No musl changes needed; it already does
+the right thing once it has a `PT_TLS` entry to read. One `c.ld`
+wrinkle along the way, worth knowing if this is ever touched again:
+`ld`'s location counter does not advance past a `SHT_TLS` output
+section's own size the way it does for every other section (`.tbss` is
+`SHT_NOBITS` + `SHT_TLS`) -- a bare `symbol = .;` placed right after
+`.tbss`'s closing brace lands at `.tbss`'s *start*, not its end, unless
+you explicitly do `. = . + SIZEOF(.tbss);` first (`c.ld`'s own comment
+there has the details).
+
 ## Verified so far
 
 - `hello-rs/` (a `println!` app) builds via `./1-build.sh
@@ -109,23 +160,13 @@ despite the plan that led here expecting a small patch to
 - `std::fs::write`/`read_to_string`/`remove_file` against `disk.img`'s
   ext2 filesystem (via `ext4_shim.c`, the same path C's `fs_test.c`
   uses) work correctly end to end.
+- `std::thread::spawn`/`join` + `Arc<Mutex<_>>` across 4 threads
+  (1000 increments each, final count checked) works correctly end to
+  end, including clean thread teardown -- see "The PT_TLS fix" above.
 
 ## Known gaps (do not attempt to "fix" these without re-reading
 `OPENISSUES.md`'s "Process model" section first)
 
-- **`std::thread::spawn` + `Mutex`/`Arc` panics during thread
-  teardown**: `thread '<unnamed>' (...) panicked ... cannot access a
-  Thread Local Storage value during or after destruction: AccessError`
-  (`std/src/thread/local.rs`), which crashes the VM (`Exception
-  0x13(GP)`). musl's own `pthread_create`/`pthread_mutex_t`/TSD are
-  unmodified and work correctly for C (`threads.c`), so this looks
-  specific to how std's own `Thread` handle (itself stored in a
-  `thread_local!`) interacts with `thread_shim.c`'s **cooperative**,
-  non-preemptive thread exit/join path (see `OPENISSUES.md`'s "Threads
-  ... are cooperative user-level threads" section) -- not yet root-
-  caused. **`std::thread` is not considered supported until this is
-  fixed.** Single-threaded apps (the common case -- everything verified
-  above) are unaffected.
 - **`std::process::Command`**: this port has no `fork`/`vfork`/`execve`
   (`OPENISSUES.md`'s "Process model" section) -- same limitation
   already true for C and Python's `os.fork`/`subprocess`. Expect a
