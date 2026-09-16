@@ -16,6 +16,20 @@ BUILD_DIR="build"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# scripts/get-rust.sh's own `source "$HOME/.cargo/env"` only updates
+# PATH for that script's own process -- if this is the first time
+# rustup was ever installed, a shell that hasn't been restarted since
+# (e.g. setup.sh followed by ./1-build.sh in the same terminal) still
+# resolves `cargo` to any pre-existing apt/distro cargo in /usr/bin,
+# which doesn't understand the `+nightly-...` toolchain-override
+# syntax below and fails with "no such command: `+nightly-...`".
+# Sourcing it here too makes this script work regardless of whether
+# the invoking shell already picked up rustup's PATH change.
+if [ -f "$HOME/.cargo/env" ]; then
+	# shellcheck disable=SC1091
+	source "$HOME/.cargo/env"
+fi
+
 if [ $# -ne 1 ]; then
 	echo "usage: $0 yourcrate/src/main.rs" >&2
 	exit 1
