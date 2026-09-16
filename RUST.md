@@ -163,6 +163,10 @@ there has the details).
 - `std::thread::spawn`/`join` + `Arc<Mutex<_>>` across 4 threads
   (1000 increments each, final count checked) works correctly end to
   end, including clean thread teardown -- see "The PT_TLS fix" above.
+- `std::net::TcpListener`/`TcpStream` (`webserver-rs/`, the Rust
+  counterpart to `webserver.py`/`webserver.c`): binds, accepts real
+  connections over a bridged `tap0` (`BareMetal-Firecracker/scripts/
+  mkbr0.sh`), and serves a real browser/curl request end to end.
 
 ## Known gaps (do not attempt to "fix" these without re-reading
 `OPENISSUES.md`'s "Process model" section first)
@@ -179,12 +183,6 @@ there has the details).
   outright or silently no-ops against `posix_shim.c`'s bump-allocator
   `mmap()` -- needs checking before relying on deep recursion failing
   cleanly.
-- **`std::net`** (`TcpStream`/`TcpListener`) is architecturally
-  expected to work the same way `std::fs` does (same "musl already
-  speaks this ABI" reasoning, and C's own `net_test.c`/`tcp_test.c`
-  already exercise `net_shim.c` from the same syscall surface) but has
-  not been smoke-tested end to end yet -- do that before calling it
-  supported.
 
 ## Toolchain
 
