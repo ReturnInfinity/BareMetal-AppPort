@@ -410,6 +410,52 @@ role as every other section here:
   (see "Heap" above) is a real, not just theoretical, concern for
   Python specifically.
 
+## C++ (`port/cpp_port/`)
+
+The host's own `g++`/libstdc++.a (Ubuntu's, built against glibc) is
+reused directly as a freestanding compiler + static archive, the same
+"host compiler, our own musl at final link" trick `build-app.sh`
+already uses for C -- see `CPP.md` for the full account of why this
+works and everything it took (a real bug in `port/c.ld`'s own
+`.init_array` handling, found via this work, is also fixed there; it
+affects every language, not just C++, though nothing before C++
+happened to trip it).
+
+- **Real C++ exceptions don't work, by design.** Apps build with
+  `-fno-exceptions -fno-rtti` (`try`/`catch`/`throw` are compile
+  errors in app code), and `port/cpp_port/cxxabi_stub.cpp` overrides
+  every `std::__throw_*()` helper libstdc++'s containers/iostream/etc
+  call internally to abort (via `b_output()`/`b_exit()`) instead of
+  really throwing -- confirmed via `std::vector::at()` out-of-range.
+  The one known residual risk: a `throw` compiled directly into some
+  libstdc++.a internal *without* going through a `std::__throw_*()`
+  helper (locale/facet edge cases are the most likely place) would
+  still reach the real (but non-functional -- no `.eh_frame` exists
+  anywhere in this port) unwinder and abort there instead, with a
+  less specific message.
+- **Locale is always "C"/POSIX**, always -- there's no locale data on
+  disk anywhere in this port for a real `setlocale(LC_ALL, "xx_YY")`
+  to load. `<iostream>`'s ctype/classification backing
+  (`port/cpp_port/glibc_ctype_shim.c`, standing in for glibc's
+  `__ctype_b_loc()`/etc, which musl has no equivalent of at all) is
+  correct for every byte value under that one locale, same as running
+  under `LC_ALL=C` on a real Linux box.
+- **`std::thread`/`std::mutex` not yet exercised** the way Rust's
+  `std::thread`/`Arc<Mutex<_>>` was (see `RUST.md`) -- libstdc++'s
+  `<thread>`/`<mutex>` ultimately call the same real `thread_shim.c`
+  pthreads Rust/Python already use, so there's no known reason it
+  wouldn't work, just not yet verified end to end.
+- **`std::filesystem`/`std::regex`/wide-stream (`std::wcin`/file-based
+  `std::wifstream` etc) are unverified.** `std::wcout`/`std::wcin`'s
+  in-memory construction is real (see `CPP.md` -- `ios_base::Init`
+  constructs the wide streams unconditionally alongside the narrow
+  ones, which is what surfaced the `.init_array` bug), but nothing has
+  actually exercised wide-character *output* end to end, and
+  `std::filesystem`/`std::regex` haven't been tried at all -- both
+  pull substantial additional libstdc++.a surface (real syscalls via
+  `std::filesystem`, ICU-adjacent tables for `std::regex`) that may
+  need more shims the same way `<iostream>` did.
+
 ## General
 
 - **No dynamic linking, by design** — everything is statically linked

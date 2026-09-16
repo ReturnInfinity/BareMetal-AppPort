@@ -132,13 +132,42 @@ SECTIONS
 	 * section reachable only by *bounds* symbols pointing at its start
 	 * and end -- not a per-entry relocation from other kept code, which
 	 * is what a constructor-pointer table looks like -- reads as
-	 * unreferenced and gets dropped. Harmless today (nothing populates
-	 * these), but silently discarding a real constructor/destructor if
-	 * one's ever added later would be a much nastier bug to chase down
-	 * than two extra KEEP()s now.
+	 * unreferenced and gets dropped.
+	 *
+	 * *(.init_array .init_array.* .ctors .ctors.*) -- the wildcard
+	 * suffix forms are load-bearing, not defensive: with
+	 * -ffunction-sections (every build-*-app.sh's CFLAGS), gcc doesn't
+	 * always emit a plain `.init_array` for a translation unit's own
+	 * static-initializer entry -- it names it `.init_array.NNNNN`
+	 * (NNNNN encoding init priority) instead, the exact same pattern
+	 * -fdata-sections already causes for .tdata/.tbss (see that
+	 * section's own comment above). A bare `*(.init_array .ctors)`
+	 * rule -- this section's own original form -- silently leaves any
+	 * such entry as an unmatched orphan section, placed by ld
+	 * *outside* [__init_array_start, __init_array_end), so
+	 * __libc_start_main.c's own bounds-walking loop never calls it at
+	 * all. Found the hard way building the C++ port: libstdc++.a's
+	 * globals_io.o carries std::cout/cin/cerr's real constructor in
+	 * exactly a `.init_array.00090` section -- with the un-suffixed
+	 * rule, it silently never ran, leaving std::cout as zeroed .bss
+	 * (no vtable pointer) and the first real `std::cout << ...` call
+	 * segfaulting on a null vtable read. No app happened to trip this
+	 * before the C++ port because nothing here previously relied on a
+	 * *library-provided* (not app-local) global constructor -- see
+	 * CPP.md.
+	 *
+	 * SORT_BY_INIT_PRIORITY on the suffixed forms, matching the
+	 * standard GNU ld default linker script's own .init_array rule
+	 * (`ld --verbose` prints it): the NNNNN suffix *is* an explicit
+	 * init_priority ordering, so unlike .tdata.* / .tbss.* (grouped by
+	 * name, order genuinely doesn't matter there), globbing these
+	 * unsorted would link fine but silently run higher-priority
+	 * constructors after lower-priority ones whenever more than one
+	 * library/TU-provided entry exists at once.
 	 */
 	.init_array : {
 		__init_array_start = .;
+		KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
 		KEEP(*(.init_array .ctors))
 		__init_array_end = .;
 	}
@@ -147,6 +176,7 @@ SECTIONS
 
 	.fini_array : {
 		__fini_array_start = .;
+		KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*) SORT_BY_INIT_PRIORITY(.dtors.*)))
 		KEEP(*(.fini_array .dtors))
 		__fini_array_end = .;
 	}
