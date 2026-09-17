@@ -494,11 +494,22 @@ account of why this works and everything it took.
   truncated to fit" at link time. `-O ReleaseSmall` (required regardless,
   see `build-zig-app.sh`) avoids this; an LLVM/Zig code-model
   limitation, not something this port's build can work around.
-- **Not exhaustively audited beyond `std.debug.print`/`std.Thread`.**
-  The rest of `std` (networking, more of `std.fs`, `std.process`, ...)
-  is presumed to work the same way (real libc calls, or now real
-  syscalls via `int_syscall_fast`) but hasn't been individually
-  exercised.
+- **`std.net.Stream.write()`/`writeAll()` don't work -- use
+  `std.posix.write()` instead.** Zig 0.15's `Io.Writer`-backed
+  `Stream.write()` sends via `sendmsg()`, and this port's `posix_shim.c`
+  has no `SYS_sendmsg`/`SYS_recvmsg` case (`sys_writev`/`sys_readv` do
+  handle socket fds correctly, `sendmsg`/`recvmsg` are a separate,
+  unhandled syscall pair) -- silently drops to `-ENOSYS`, which Zig maps
+  to `error.Unexpected`. Found and worked around building
+  `examples/zig/webserver/webserver.zig` (see `ZIG.md`'s "Known gaps"
+  for the full account and the workaround). A real fix would add
+  `SYS_sendmsg`/`SYS_recvmsg` to `posix_shim.c`/`net_shim.c`; not
+  attempted.
+- **Not exhaustively audited beyond `std.debug.print`/`std.Thread`/basic
+  TCP server sockets.** The rest of `std` (more of `std.fs`,
+  `std.process`, UDP, ...) is presumed to work the same way (real libc
+  calls, or now real syscalls via `int_syscall_fast`) but hasn't been
+  individually exercised.
 - **No real exceptions/unwinding needed, unlike C++/Rust** -- Zig has
   no unwinding runtime at all; a panic always aborts, so no
   `unwind_stub.c`/`cxxabi_stub.cpp`-equivalent stub was needed.

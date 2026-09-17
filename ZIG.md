@@ -215,6 +215,15 @@ every other language here already does), imported as the `bm` module
   hit the relocation-truncation issue described above; not something
   this port's build can paper over. Always pass `-O ReleaseSmall` (or
   `ReleaseFast`, untried but should behave the same way).
+- `examples/zig/webserver/webserver.zig` (real `std.net.Address.listen`/
+  `Server.accept`, matching `webserver.c`/`webserver-rs`/`webserver.py`):
+  built via `build-zig-app.sh`, booted with real Firecracker networking
+  (`BareMetal-Firecracker/scripts/mkbr0.sh`'s bridge/tap), and fetched
+  with a real `curl` from the host -- `HTTP/1.1 200`, correct HTML body,
+  hit counter incrementing across requests, request line logged to the
+  console for each connection. Confirms `bind`/`listen`/`accept`/`read`
+  all work through the musl -> `posix_shim` -> `net_shim` -> lwIP path
+  the same way they already did for every other language.
 
 ## Known gaps
 
@@ -222,12 +231,29 @@ See `OPENISSUES.md`'s Zig section for the condensed version.
 
 - **Debug-mode builds don't link** (see "Build flow" above) -- use
   `-O ReleaseSmall`/`ReleaseFast`.
-- **Not exhaustively audited.** `std.debug.print`/`std.Thread` are
-  verified end to end; the rest of `std` (networking, more of
-  `std.fs`, `std.process`, ...) is presumed to work the same way file
-  I/O already did (real libc calls, or now real syscalls via
-  `int_syscall_fast`) but hasn't been individually exercised the way
-  those two were.
+- **`std.net.Stream.write()`/`writeAll()` (the current, non-deprecated
+  API) don't work -- use `std.posix.write()` instead.** Found while
+  building `examples/zig/webserver/webserver.zig`: Zig 0.15's rewritten
+  `Io.Writer` machinery backs `Stream.write()` with a real `sendmsg()`
+  syscall, and this port's `posix_shim.c` has no `SYS_sendmsg` (or
+  `SYS_recvmsg`) case at all -- it falls through to the `-ENOSYS`
+  default, which Zig's error-mapping doesn't expect from a real Linux
+  `write()` and surfaces as `error.Unexpected`. Symptom: a connection
+  that reads the client's request fine and then just closes with no
+  response, no crash. `std.posix.write()` (the plain `SYS_write` syscall
+  `Stream.write()` itself used before the 0.15 rework) works correctly,
+  through the same `sys_write()`/`net_shim_send()` path `stream.read()`
+  already uses on the way in -- see `webserver.zig`'s own comment on its
+  local `writeAll()` helper. Fixing this for real would mean adding
+  `SYS_sendmsg`/`SYS_recvmsg` to `posix_shim.c`/`net_shim.c` (flattening
+  the iovecs into the existing `net_shim_send`/`recv`, similar to how
+  `sys_writev`/`sys_readv` already do) -- not attempted here, out of
+  scope for an app-level example.
+- **Not exhaustively audited beyond `std.debug.print`/`std.Thread`/
+  basic TCP server sockets.** The rest of `std` (more of `std.fs`,
+  `std.process`, UDP, ...) is presumed to work the same way file I/O
+  already did (real libc calls, or now real syscalls via
+  `int_syscall_fast`) but hasn't been individually exercised.
 - Locale is always "C"/POSIX, same posture as every other language
   here.
 - Requires `BareMetal-Firecracker`'s `zig` branch, not `main` -- see the
