@@ -456,6 +456,52 @@ happened to trip it).
   `std::filesystem`, ICU-adjacent tables for `std::regex`) that may
   need more shims the same way `<iostream>` did.
 
+## Zig (`port/zig_port/`)
+
+Zig cross-compiles to `x86_64-linux-musl` natively (`zig build-obj
+-target x86_64-linux-musl -lc`), with ordinary file I/O and most of
+`std.c`/`std.posix` routing through real, interceptable calls into
+this port's own patched musl -- no shim needed for any of that,
+simpler than either the C++ or Rust ports. See `ZIG.md` for the full
+account of why this works and everything it took.
+
+- **Anything in `std` that reaches a raw, inlined `syscall` x86
+  instruction crashes the VM outright** (`Exception 0x06 (UD)`,
+  confirmed by an actual boot -- see `ZIG.md`). Zig's own
+  `lib/std/os/linux.zig` implements Linux syscalls itself "whether or
+  not libc is linked" (its own words) for a specific subset of `std`,
+  with no libc symbol at the call site this port's patched musl could
+  intercept the way it does for Rust's `libc` crate or C++'s
+  libstdc++.a. This is a real, permanent restriction on what Zig code
+  can run here, not (yet) a missing shim:
+  - `std.debug.print` and anything else touching `std.debug`'s
+    internal stderr lock -- use `port/zig_port/bm.zig`'s
+    `print`/`eprint` instead (a plain, unlocked `std.c.write()` call).
+  - `std.Thread`/`Mutex`/`Futex`/`getCurrentId()` -- **no real OS
+    threads for Zig apps on this port**, even though this port's real
+    cooperative pthreads (`thread_shim.c`) work fine for every other
+    language here (see "Process model" above) -- `std.Thread` never
+    goes through libc's pthread API in the first place, so there's
+    nothing for this port to intercept.
+  - Any other `std` API not yet audited the same way -- `objdump -d`
+    the resulting `.o` for bare `syscall` instructions before trusting
+    a new one.
+- **No real exceptions/unwinding needed, unlike C++/Rust** -- Zig has
+  no unwinding runtime at all; a panic always aborts, so no
+  `unwind_stub.c`/`cxxabi_stub.cpp`-equivalent stub was needed.
+- **No Zig-idiomatic `pub fn main() !void` entry point.** This port
+  supplies its own `crt0.c`/`_start`, not Zig's own `start.zig` -- apps
+  must export a C-ABI `main` themselves (see `ZIG.md`/
+  `examples/zig/hello/hello.zig`).
+- **Locale is always "C"/POSIX**, same posture as every other language
+  here.
+- **Fixing the `syscall`-instruction gap for real would need
+  kernel-side work** (a `SYSCALL`/`SYSRET` handler -- `STAR`/`LSTAR`/
+  `SFMASK` MSRs plus an entry stub routing into the same dispatcher
+  this port's ring-3 `int 0x80` path already uses), not anything
+  `build-zig-app.sh`/`port/zig_port/` can do on their own -- out of
+  scope for this app-level port.
+
 ## General
 
 - **No dynamic linking, by design** — everything is statically linked
