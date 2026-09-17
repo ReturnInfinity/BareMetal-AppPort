@@ -115,6 +115,10 @@ if ! compgen -G "$BUILD_DIR/python_*.o" >/dev/null; then
 	echo "error: Python objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
 	exit 1
 fi
+if ! compgen -G "$BUILD_DIR/luacore_*.o" >/dev/null; then
+	echo "error: Lua objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
+	exit 1
+fi
 
 mkdir -p "$BUILD_DIR"
 
@@ -198,13 +202,14 @@ SQLITE_OBJS="$BUILD_DIR/sqlite_sqlite3.o"
 SODIUM_OBJS=$(ls "$BUILD_DIR"/sodium_*.o)
 LWEXT4_OBJS=$(ls "$BUILD_DIR"/lwext4_*.o)
 PYTHON_OBJS=$(ls "$BUILD_DIR"/python_*.o)
+LUA_OBJS=$(ls "$BUILD_DIR"/luacore_*.o)
 
 echo "Linking..."
 ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -o "$BUILD_DIR/$APP_NAME.elf" "$BUILD_DIR/crt0.o" "$BUILD_DIR/posix_shim.o" "$BUILD_DIR/thread_shim.o" \
 	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" "$BUILD_DIR/cacert_data.o" \
 	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" "$BUILD_DIR/dlfcn_shim.o" \
-	"$BUILD_DIR/libBareMetal.o" "$RUST_OBJ" "$BUILD_DIR/unwind_stub.o" $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/libBareMetal.o" "$RUST_OBJ" "$BUILD_DIR/unwind_stub.o" $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS $LUA_OBJS "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
 echo "Built $APP_NAME"

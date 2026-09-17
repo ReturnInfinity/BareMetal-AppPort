@@ -81,6 +81,8 @@ LWEXT4_DIR="$BUILD_DIR/lwext4-58bcf89"
 LWEXT4_INC="$LWEXT4_DIR/include"
 LWEXT4_PORT="port/lwext4_port"
 
+LUA_DIR="$BUILD_DIR/lua-5.4.7"
+
 CPP_PORT="port/cpp_port"
 
 PORT="port"
@@ -127,6 +129,10 @@ if ! compgen -G "$BUILD_DIR/lwext4_*.o" >/dev/null; then
 fi
 if ! compgen -G "$BUILD_DIR/python_*.o" >/dev/null; then
 	echo "error: Python objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
+	exit 1
+fi
+if ! compgen -G "$BUILD_DIR/luacore_*.o" >/dev/null; then
+	echo "error: Lua objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
 	exit 1
 fi
 
@@ -213,7 +219,7 @@ PYTHON_GCC_FREESTANDING_INC="$(gcc -print-file-name=include)"
 # exposes to a .c app, plus CXX_INC_ROOT (gcc's own freestanding
 # <stdatomic.h> etc, same reasoning as build-app.sh's
 # PYTHON_GCC_FREESTANDING_INC) and CPP_PORT for any C++-side port glue.
-APP_CFLAGS="$CXXFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\" -I $LWIP_INC -I $LWIP_PORT -isystem $PYTHON_GCC_FREESTANDING_INC -I $CPP_PORT"
+APP_CFLAGS="$CXXFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\" -I $LWIP_INC -I $LWIP_PORT -isystem $PYTHON_GCC_FREESTANDING_INC -I $CPP_PORT -I $LUA_DIR/src"
 
 echo "Building..."
 
@@ -281,6 +287,11 @@ for obj in "$BUILD_DIR"/python_*.o; do
 	PYTHON_OBJS="$PYTHON_OBJS $obj"
 done
 
+LUA_OBJS=""
+for obj in "$BUILD_DIR"/luacore_*.o; do
+	LUA_OBJS="$LUA_OBJS $obj"
+done
+
 echo "Linking..."
 
 # Same two-stage link-then-objcopy shape as build-app.sh (see its own
@@ -309,7 +320,7 @@ ld --gc-sections --no-warn-rwx-segments --no-relax --oformat elf64-x86-64 -T "$P
 	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" "$BUILD_DIR/cacert_data.o" \
 	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" "$BUILD_DIR/dlfcn_shim.o" \
-	"$BUILD_DIR/libBareMetal.o" "$BUILD_DIR/cxxabi_stub.o" "$BUILD_DIR/glibc_ctype_shim.o" "$BUILD_DIR/fortify_shim.o" "$BUILD_DIR/libstdcxx_globals_shim.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS \
+	"$BUILD_DIR/libBareMetal.o" "$BUILD_DIR/cxxabi_stub.o" "$BUILD_DIR/glibc_ctype_shim.o" "$BUILD_DIR/fortify_shim.o" "$BUILD_DIR/libstdcxx_globals_shim.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS $LUA_OBJS \
 	"$LIBSTDCXX" "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 

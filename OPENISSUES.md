@@ -456,6 +456,32 @@ happened to trip it).
   `std::filesystem`, ICU-adjacent tables for `std::regex`) that may
   need more shims the same way `<iostream>` did.
 
+## Lua (`port/lua_port/`)
+
+Lua 5.4.7's own `src/*.c` is portable ANSI C with every OS-specific
+piece already gated behind a `LUA_USE_*` macro upstream Lua itself
+defines -- leaving all of them undefined compiles the whole
+interpreter as-is against musl, no shim needed beyond `port/lua_port/
+lua.c` (this port's own replacement for upstream's `src/lua.c`, the
+same role `python.c` plays for CPython). See `LUA.md` for the full
+account.
+
+- **No dynamic C module loading.** `loadlib.c`'s POSIX/`dlopen`
+  backend is never enabled (see `LUA_USE_*` above), so
+  `package.loadlib`/`require` for a compiled module doesn't work.
+  Pure-Lua `require` targets would also need a real `package.path`
+  search over files on `disk.img`, which isn't wired up either -- only
+  the fixed `/lualib/main.lua` entry point is.
+- **`os.execute()`/`io.popen` compile but do nothing real** -- `system()`
+  is unconditional ISO C so it links fine, but there's no process model
+  underneath it to actually fork/exec (see "Process model" above).
+- **Locale is always "C"/POSIX**, same posture as every other language
+  here.
+- **No dedicated larger C stack** the way `python.c` switches to for
+  CPython's own recursion guard -- untested against a very deeply
+  recursive script; `python.c`'s stack-switch is the template to copy
+  if this ever needs it.
+
 ## General
 
 - **No dynamic linking, by design** — everything is statically linked

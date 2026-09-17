@@ -24,6 +24,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-lwext4.sh"
 "$SCRIPT_DIR/scripts/get-python.sh"
 "$SCRIPT_DIR/scripts/get-rust.sh"
+"$SCRIPT_DIR/scripts/get-lua.sh"
 
 BUILD_DIR="build"
 
@@ -57,6 +58,9 @@ LWEXT4_PORT="port/lwext4_port"
 PYTHON_DIR="$BUILD_DIR/Python-3.14.7"
 PYTHON_HOST_BUILD="$BUILD_DIR/host-python-build"
 PYTHON_PORT="port/python_port"
+
+LUA_DIR="$BUILD_DIR/lua-5.4.7"
+LUA_PORT="port/lua_port"
 
 # Run a command, staying silent unless it fails -- then dump its output
 # and abort. Keeps musl/lwIP's noisy per-file build logs off the screen
@@ -502,6 +506,36 @@ for src in Modules/sha2module.c Modules/_hacl/Hacl_Hash_SHA2.c; do
 	gcc $PYTHON_SHA2_CFLAGS -o "$obj" "$PYTHON_DIR/$src"
 done
 
+# Lua compiles cleanly against musl with no LUA_USE_* macro defined at
+# all -- every POSIX-only code path in loadlib.c/loslib.c/liolib.c/
+# lauxlib.c (dlopen-based dynamic libraries, mkstemp-based
+# os.tmpname, sys/wait.h's pclose status macros) is already
+# `#if defined(LUA_USE_POSIX)`-gated by upstream Lua itself, and
+# compiles out entirely under the default ISO C fallback used here.
+# Confirmed by compiling every one of these files standalone against
+# $MUSL_INC before wiring this in -- unlike CPython/C++, nothing in
+# port/lua_port/ beyond lua.c (this port's own
+# replacement for src/lua.c, the same role python.c plays for CPython)
+# was needed to make this work.
+#
+# Built (and required by build-app.sh's own check) *before* python.app
+# below -- build-app.sh links luacore_*.o into every app it builds,
+# python.app included, the same way it already links python_*.o into
+# every app regardless of language.
+LUA_CFLAGS="$CFLAGS -I $LUA_DIR/src"
+echo "- Building Lua"
+LUA_SRCS="
+	lapi.c lauxlib.c lbaselib.c lcode.c lcorolib.c lctype.c
+	ldblib.c ldebug.c ldo.c ldump.c lfunc.c lgc.c linit.c liolib.c
+	llex.c lmathlib.c lmem.c loadlib.c lobject.c lopcodes.c loslib.c
+	lparser.c lstate.c lstring.c lstrlib.c ltable.c ltablib.c ltm.c
+	lundump.c lutf8lib.c lvm.c lzio.c
+"
+for src in $LUA_SRCS; do
+	obj="$BUILD_DIR/luacore_$(basename "$src" .c).o"
+	gcc $LUA_CFLAGS -o "$obj" "$LUA_DIR/src/$src"
+done
+
 # Unlike every other library here, CPython's whole point is the
 # resulting app, not a library other apps link a bit of -- so unlike
 # curl/SQLite/etc (which just leave their objects in build/ for
@@ -514,5 +548,13 @@ done
 # once, not a step build-app.sh itself needs to know about.
 echo "- Building python.app"
 "$SCRIPT_DIR/build-app.sh" "$PYTHON_PORT/python.c" "$PYTHON_PORT/config_baremetal.c" "$PYTHON_PORT/frozen_encodings_baremetal.c"
+
+# Like python.app above: Lua's whole point is the resulting
+# interpreter app, not a library other apps link a bit of, so setup.sh
+# finishes by building lua.app itself too -- ready to go immediately
+# after ./setup.sh. Re-run build-app.sh the same way by hand any time
+# port/lua_port/lua.c changes.
+echo "- Building lua.app"
+"$SCRIPT_DIR/build-app.sh" "$LUA_PORT/lua.c"
 
 # echo -e "${BOLD}Library builds complete${NORMAL}"
