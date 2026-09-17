@@ -465,27 +465,40 @@ this port's own patched musl -- no shim needed for any of that,
 simpler than either the C++ or Rust ports. See `ZIG.md` for the full
 account of why this works and everything it took.
 
-- **Anything in `std` that reaches a raw, inlined `syscall` x86
-  instruction crashes the VM outright** (`Exception 0x06 (UD)`,
-  confirmed by an actual boot -- see `ZIG.md`). Zig's own
-  `lib/std/os/linux.zig` implements Linux syscalls itself "whether or
-  not libc is linked" (its own words) for a specific subset of `std`,
-  with no libc symbol at the call site this port's patched musl could
-  intercept the way it does for Rust's `libc` crate or C++'s
-  libstdc++.a. This is a real, permanent restriction on what Zig code
-  can run here, not (yet) a missing shim:
-  - `std.debug.print` and anything else touching `std.debug`'s
-    internal stderr lock -- use `port/zig_port/bm.zig`'s
-    `print`/`eprint` instead (a plain, unlocked `std.c.write()` call).
-  - `std.Thread`/`Mutex`/`Futex`/`getCurrentId()` -- **no real OS
-    threads for Zig apps on this port**, even though this port's real
-    cooperative pthreads (`thread_shim.c`) work fine for every other
-    language here (see "Process model" above) -- `std.Thread` never
-    goes through libc's pthread API in the first place, so there's
-    nothing for this port to intercept.
-  - Any other `std` API not yet audited the same way -- `objdump -d`
-    the resulting `.o` for bare `syscall` instructions before trusting
-    a new one.
+- **Requires `BareMetal-Firecracker`'s `zig` branch, not `main`.**
+  Ordinary Zig code (`std.debug.print`, `std.Thread`, ...) routinely
+  emits the raw `syscall` x86 instruction directly, with no libc call
+  in sight for this port's patched musl to intercept the way it does
+  for Rust's `libc` crate or C++'s libstdc++.a. `BareMetal-Firecracker`'s
+  `zig` branch adds real kernel-side support for that raw instruction
+  (`EFER.SCE`/`STAR`/`LSTAR`/`SFMASK`, a new `int_syscall_fast` entry
+  stub -- see `ZIG.md`'s "SYSCALL/SYSRET" section for the full account,
+  including two real bugs -- a stack-alignment bug and a missing
+  register-preservation bug -- found and fixed while getting it
+  working). Built against a `main`-branch kernel instead, the exact same
+  code crashes: `Exception 0x06 (UD)`, confirmed by an actual boot
+  before the kernel fix existed.
+- **`std.debug.print` and `std.Thread`/`Mutex`/`Futex` are verified
+  working end to end** against that kernel branch -- a real
+  `std.debug.print` call (plain and formatted) and a real
+  `std.Thread.spawn`/`join` + atomics test both link, boot, and produce
+  correct output repeatedly (see `ZIG.md`'s "Verified so far"). Real
+  threads route through the same `thread_shim.c` cooperative pthreads
+  every other language's threading already uses -- `std.Thread` never
+  went through libc's pthread API to get there, but the kernel-side
+  `syscall` support means it doesn't need to anymore.
+- **Debug-mode (`-O` omitted) builds don't link.** Zig's Debug-mode
+  codegen for `std.Io.Writer`'s internals emits some anonymous
+  constant/vtable references as absolute 32-bit relocations that can't
+  reach this port's high-canonical load address -- "relocation
+  truncated to fit" at link time. `-O ReleaseSmall` (required regardless,
+  see `build-zig-app.sh`) avoids this; an LLVM/Zig code-model
+  limitation, not something this port's build can work around.
+- **Not exhaustively audited beyond `std.debug.print`/`std.Thread`.**
+  The rest of `std` (networking, more of `std.fs`, `std.process`, ...)
+  is presumed to work the same way (real libc calls, or now real
+  syscalls via `int_syscall_fast`) but hasn't been individually
+  exercised.
 - **No real exceptions/unwinding needed, unlike C++/Rust** -- Zig has
   no unwinding runtime at all; a panic always aborts, so no
   `unwind_stub.c`/`cxxabi_stub.cpp`-equivalent stub was needed.
@@ -495,12 +508,6 @@ account of why this works and everything it took.
   `examples/zig/hello/hello.zig`).
 - **Locale is always "C"/POSIX**, same posture as every other language
   here.
-- **Fixing the `syscall`-instruction gap for real would need
-  kernel-side work** (a `SYSCALL`/`SYSRET` handler -- `STAR`/`LSTAR`/
-  `SFMASK` MSRs plus an entry stub routing into the same dispatcher
-  this port's ring-3 `int 0x80` path already uses), not anything
-  `build-zig-app.sh`/`port/zig_port/` can do on their own -- out of
-  scope for this app-level port.
 
 ## General
 

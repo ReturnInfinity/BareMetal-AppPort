@@ -1,13 +1,21 @@
-// Formatted output for BareMetal Zig apps, routed through a plain
-// libc write() call -- not std.debug.print(). See ZIG.md's "Known
-// gaps" section for why: std.debug.print's stderr-locking/tty-
-// detection path (and std.Thread/Mutex/Futex more generally) emit
-// inlined raw `syscall` x86 instructions that bypass libc entirely,
-// even when linking musl with -lc -- there's no libc symbol there for
-// this port's patched musl to intercept, and BareMetal doesn't
-// service the raw SYSCALL opcode (confirmed by an actual boot crash:
-// Exception 0x06 (UD) on a bare `syscall`). Every call in this file
-// only ever reaches std.c.write(), a real, interceptable musl symbol.
+// Formatted output for BareMetal Zig apps, routed through a plain libc
+// write() call rather than std.debug.print(). Originally written as a
+// mandatory workaround: std.debug.print's stderr-locking/tty-detection
+// path (and std.Thread/Mutex/Futex more generally) emits inlined raw
+// `syscall` x86 instructions that bypass libc entirely, and this port had
+// no way to service that raw opcode at all (confirmed by an actual boot
+// crash: Exception 0x06 (UD) on a bare `syscall`).
+//
+// That's no longer true -- BareMetal-Firecracker gained a real
+// SYSCALL/SYSRET kernel path (see its interrupt.asm's int_syscall_fast
+// and ZIG.md's "SYSCALL/SYSRET" section) specifically to service those
+// raw instructions too, and std.debug.print/std.Thread are now verified
+// working end to end (real boot, both plain and formatted prints, and a
+// real std.Thread.spawn/join + atomics test). This file is kept as an
+// optional, lighter-weight alternative -- no locking, no heap, no
+// dependency on the Firecracker kernel fix at all (routes through libc
+// the same way every other language here already does) -- not because
+// std.debug.print is unsafe anymore.
 
 const std = @import("std");
 

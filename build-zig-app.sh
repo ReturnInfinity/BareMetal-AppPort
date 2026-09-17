@@ -105,13 +105,24 @@ mkdir -p "$BUILD_DIR"
 # Same freestanding ABI build-app.sh's own CFLAGS comment explains
 # (fixed high-canonical load address, no PIE, no ELF loader): static,
 # non-PIC, large code model, no red zone (interrupts here don't switch
-# stacks). -fno-stack-protector/-fsingle-threaded are this port's own
-# choice, not forced by the ABI -- see ZIG.md's "Known gaps": std's
-# stack-protector support-runtime symbols don't exist here, and
-# -fsingle-threaded avoids some (not all -- see ZIG.md) of std's
-# raw-syscall Thread/Mutex/Futex paths by construction rather than by
-# convention alone.
-ZIGFLAGS="-target x86_64-linux-musl -mcmodel=large -mno-red-zone -fno-stack-protector -fsingle-threaded -O ReleaseSmall -lc"
+# stacks). -fno-stack-protector is this port's own choice, not forced by
+# the ABI -- matches every other language here (build-app.sh's own CFLAGS),
+# since std's stack-protector support-runtime symbols don't exist here.
+#
+# -O ReleaseSmall (never plain Debug mode) is required, not just a size
+# preference: Zig's Debug-mode codegen for std.Io.Writer's internals (the
+# machinery std.debug.print goes through) emits some anonymous constant/
+# vtable references as absolute 32-bit (R_X86_64_32) relocations that
+# can't reach this port's high-canonical (0xFFFF8000...) load address --
+# "relocation truncated to fit" at link time. ReleaseSmall/ReleaseFast
+# don't hit this (confirmed by a real link+boot of std.debug.print calls,
+# both plain and formatted, under ReleaseSmall) -- an LLVM/Zig code-model
+# limitation, not something this port's build can work around.
+#
+# No -fsingle-threaded: real threads (std.Thread/Mutex/Futex) work now --
+# see ZIG.md for what made that true (a companion kernel-side fix in
+# BareMetal-Firecracker, not anything in this build script).
+ZIGFLAGS="-target x86_64-linux-musl -mcmodel=large -mno-red-zone -fno-stack-protector -O ReleaseSmall -lc"
 
 echo "Building Zig app ($APP_SRC)..."
 
@@ -122,15 +133,17 @@ echo "Building Zig app ($APP_SRC)..."
 # stage first), so there's no separate stage here: this one compile
 # command stands in directly for build-app.sh's $APP_OBJS.
 #
-# -target x86_64-linux-musl + -lc routes std's file I/O (open/read/
-# write/lseek/stat/...) through real calls to musl symbols this port's
-# patched musl already intercepts (__bmos_syscall(), see
-# port/musl_port/'s patch and RUST.md's "why this works" section for
-# the same reasoning as Rust's libc crate) -- confirmed via `nm`/
-# `objdump` on the resulting object and a real boot. The "bm" module
-# (port/zig_port/bm.zig) is this port's own tiny stand-in for
-# std.debug.print -- see that file's header and ZIG.md for why
-# std.debug.print itself isn't safe to use here.
+# -target x86_64-linux-musl + -lc routes std's syscalls (file I/O,
+# threading/futex, debug.print's internals, ...) through real calls to
+# musl symbols this port's patched musl already intercepts
+# (__bmos_syscall(), see port/musl_port/'s patch and RUST.md's "why this
+# works" section for the same reasoning as Rust's libc crate) -- see
+# ZIG.md for the full account, including the BareMetal-Firecracker
+# kernel-side fix this now depends on for real std.debug.print/
+# std.Thread support. The "bm" module (port/zig_port/bm.zig) is available
+# to every app (`@import("bm")`) as an optional, lighter-weight
+# alternative to std.debug.print -- not required for correctness anymore,
+# just smaller and lock-free.
 APP_OBJ="$BUILD_DIR/$(basename "$APP_SRC" .zig).o"
 "$ZIG" build-obj \
 	$ZIGFLAGS \
