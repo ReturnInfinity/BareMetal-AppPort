@@ -456,6 +456,59 @@ happened to trip it).
   `std::filesystem`, ICU-adjacent tables for `std::regex`) that may
   need more shims the same way `<iostream>` did.
 
+## Zig (`port/zig_port/`)
+
+Zig cross-compiles to `x86_64-linux-musl` natively (`zig build-obj
+-target x86_64-linux-musl -lc`), with ordinary file I/O and most of
+`std.c`/`std.posix` routing through real, interceptable calls into
+this port's own patched musl -- no shim needed for any of that,
+simpler than either the C++ or Rust ports. See `ZIG.md` for the full
+account of why this works and everything it took.
+
+- **Requires `BareMetal-Firecracker`'s `zig` branch, not `main`.**
+  Ordinary Zig code (`std.debug.print`, `std.Thread`, ...) routinely
+  emits the raw `syscall` x86 instruction directly, with no libc call
+  in sight for this port's patched musl to intercept the way it does
+  for Rust's `libc` crate or C++'s libstdc++.a. `BareMetal-Firecracker`'s
+  `zig` branch adds real kernel-side support for that raw instruction
+  (`EFER.SCE`/`STAR`/`LSTAR`/`SFMASK`, a new `int_syscall_fast` entry
+  stub -- see `ZIG.md`'s "SYSCALL/SYSRET" section for the full account,
+  including two real bugs -- a stack-alignment bug and a missing
+  register-preservation bug -- found and fixed while getting it
+  working). Built against a `main`-branch kernel instead, the exact same
+  code crashes: `Exception 0x06 (UD)`, confirmed by an actual boot
+  before the kernel fix existed.
+- **`std.debug.print` and `std.Thread`/`Mutex`/`Futex` are verified
+  working end to end** against that kernel branch -- a real
+  `std.debug.print` call (plain and formatted) and a real
+  `std.Thread.spawn`/`join` + atomics test both link, boot, and produce
+  correct output repeatedly (see `ZIG.md`'s "Verified so far"). Real
+  threads route through the same `thread_shim.c` cooperative pthreads
+  every other language's threading already uses -- `std.Thread` never
+  went through libc's pthread API to get there, but the kernel-side
+  `syscall` support means it doesn't need to anymore.
+- **Debug-mode (`-O` omitted) builds don't link.** Zig's Debug-mode
+  codegen for `std.Io.Writer`'s internals emits some anonymous
+  constant/vtable references as absolute 32-bit relocations that can't
+  reach this port's high-canonical load address -- "relocation
+  truncated to fit" at link time. `-O ReleaseSmall` (required regardless,
+  see `build-zig-app.sh`) avoids this; an LLVM/Zig code-model
+  limitation, not something this port's build can work around.
+- **Not exhaustively audited beyond `std.debug.print`/`std.Thread`.**
+  The rest of `std` (networking, more of `std.fs`, `std.process`, ...)
+  is presumed to work the same way (real libc calls, or now real
+  syscalls via `int_syscall_fast`) but hasn't been individually
+  exercised.
+- **No real exceptions/unwinding needed, unlike C++/Rust** -- Zig has
+  no unwinding runtime at all; a panic always aborts, so no
+  `unwind_stub.c`/`cxxabi_stub.cpp`-equivalent stub was needed.
+- **No Zig-idiomatic `pub fn main() !void` entry point.** This port
+  supplies its own `crt0.c`/`_start`, not Zig's own `start.zig` -- apps
+  must export a C-ABI `main` themselves (see `ZIG.md`/
+  `examples/zig/hello/hello.zig`).
+- **Locale is always "C"/POSIX**, same posture as every other language
+  here.
+
 ## General
 
 - **No dynamic linking, by design** — everything is statically linked

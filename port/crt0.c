@@ -85,6 +85,26 @@ struct fake_phdr {
 #define FC_ARGS_MAX_ARGC 32	/* argv[0] ("main") + up to 31 args from the cmdline */
 
 /*
+ * musl's own patched syscall_arch.h calls __bmos_syscall() (posix_shim.c)
+ * directly, by symbol -- a plain CALL, nothing for the kernel to know about.
+ * Some runtimes (Zig's std is the concrete case) don't go through libc at
+ * all for a handful of syscalls (Thread/Mutex/Futex/getCurrentId,
+ * std.debug.print's stderr lock) and instead emit the raw `syscall` x86
+ * opcode directly -- BareMetal-Firecracker's kernel now has a second entry
+ * point for that (int_syscall_fast, IA32_LSTAR), but it has no way to find
+ * *this app's own* __bmos_syscall() by itself (every app is linked/compiled
+ * independently; nothing about its address is guaranteed stable across
+ * builds even though crt0.o/posix_shim.o happen to be byte-identical today).
+ * Publishing it here, unconditionally, on every app regardless of language,
+ * is what lets the kernel reach it -- see BareMetal-Firecracker's
+ * sysvar.asm (app_bmos_syscall_ptr) and interrupt.asm's int_syscall_fast
+ * for the other end of this, and BareMetal-AppPort's ZIG.md/OPENISSUES.md
+ * Zig section for why this exists at all.
+ */
+extern long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6);
+#define BMOS_SYSCALL_PTR_ADDR ((void **)0x8100UL)
+
+/*
  * Ensure RSP is 16-byte aligned. SSE instructions such as
  * MOVAPS will #GP on the mis-aligned stack.
  */
@@ -170,6 +190,17 @@ static int fc_parse_args_param(char **argv, int max_argc)
 int _start_c(void *entry_sp)
 {
 	(void)entry_sp;	/* only used to keep the CALL into here 8-mod-16 aligned (see _start) */
+
+	/*
+	 * Must be first: nothing before this point can possibly issue a
+	 * syscall, but nothing is stopping some future addition from doing so
+	 * (however unlikely before main()), and BMOS_SYSCALL_PTR_ADDR is
+	 * zeroed at boot precisely so a `syscall` reaching the kernel before
+	 * this line NULL-calls and faults cleanly instead of jumping into
+	 * whatever was here before. See BMOS_SYSCALL_PTR_ADDR's own comment
+	 * above for the full story.
+	 */
+	*BMOS_SYSCALL_PTR_ADDR = (void *)&__bmos_syscall;
 
 	/*
 	 * zero_bss() below writes every byte from __bss_start through

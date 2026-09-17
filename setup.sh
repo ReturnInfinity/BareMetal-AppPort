@@ -24,6 +24,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-lwext4.sh"
 "$SCRIPT_DIR/scripts/get-python.sh"
 "$SCRIPT_DIR/scripts/get-rust.sh"
+"$SCRIPT_DIR/scripts/get-zig.sh"
 
 BUILD_DIR="build"
 
