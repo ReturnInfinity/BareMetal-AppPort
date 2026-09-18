@@ -1152,6 +1152,98 @@ Not root-caused. No fix applied or attempted -- another clean isolation
 round, narrowing the hypothesis space further rather than finding a
 bug to fix.
 
+### Real-bundle minimal-DOM isolation: reproduced reliably, 50% rate, and two brand-new fault sites
+
+The exact next step the prior round identified: fetch Swagger UI's
+REAL bundle live (the actual ~1.4MB file that originally leaked) but
+run it through the real `run_scripts()` path against the SAME minimal
+DOM `browser_fetch_yamltest.c` used, instead of httpbin.org's own page.
+
+**First design attempt was wrong and worth recording:** the first cut
+of `examples/lexbor/browser-fetch/browser_fetch_bundletest.c` fetched
+the bundle, then embedded it *inline* into the parsed HTML document
+(same shape as `browser_fetch_yamltest.c`'s js-yaml embedding). That
+triples real memory use versus how the bug actually happens: lexbor's
+HTML parser makes its own copy of inline script text into the DOM, and
+`run_one_script()`'s `lxb_dom_node_text_content()` call makes a
+*third* copy to hand to `JS_Eval()` -- an *external* `<script src>`
+never round-trips through lexbor's DOM storage at all, since
+`run_external_script()` fetches straight into a buffer and
+`JS_Eval()`s it directly. The inline version hit a reproducible
+`posix_shim: out of memory (short by 32768 bytes)` at the usual 32MiB
+`MEMSIZE` -- not the bug under investigation, just wasteful test
+design. Fixed by building a genuinely minimal document instead:
+```c
+static const char MINIMAL_DOC[] =
+	"<html><body><script src=\"" BUNDLE_URL "\"></script></body></html>";
+```
+letting the real, already-proven `run_scripts()`/`run_external_script()`
+path do the actual live fetch -- the exact mechanism that originally
+leaked, just isolated from httpbin.org's other 2 scripts/its own
+inline script/its own page structure.
+
+**This reproduces, reliably, at a far higher rate than ever seen
+before: 5 crashes in 10 boots (50%)** -- versus the original ~12-30%
+against the full httpbin.org page. This is now the fastest, cheapest,
+most reliable repro this whole investigation has produced.
+
+**Register dump reminder, reconfirmed:** `RSP` was identical
+(`00000000001CFF90`) across every single crash in this round regardless
+of fault type or how far execution had gotten -- consistent with the
+earlier-established finding that `RSP` in this port's exception dump is
+a debug-dump artifact, not the real faulting context's stack pointer.
+`RIP` is the real signal and varied correctly across the three distinct
+fault sites found:
+
+1. **The already-known site**, `RIP=FFFF800000204D5F` -- confirmed 3
+   times in this round with byte-identical output each time: the
+   inline script throws its `cssFloat` `TypeError` normally, prints
+   `Assertion failed: list_empty(&rt->gc_obj_list)`, dumps the same
+   `Function`/`Closure` leak signature already documented above, then
+   faults. Fully reproducible on demand now.
+2. **A brand-new site**, `RIP=FFFF800000109666`, disassembled to
+   **inside `js_free_value_rt` itself** -- faulting at
+   `mov %rax,0x8(%rdx)`, a linked-list unlink/relink write (almost
+   certainly `gc_obj_list` manipulation) through a corrupted `%rdx`.
+   Crashed with **zero script output printed first** -- meaning
+   whatever corrupts the list can crash immediately, mid-execution,
+   the moment something is freed through the already-corrupted list,
+   rather than only surfacing later as the graceful "list not empty"
+   assertion at teardown. This reframes the bug: it's not "one object
+   quietly outlives `JS_FreeRuntime()`", it's "the GC object list can
+   already be in a corrupted state well before teardown," with the
+   teardown assertion being the *lucky* outcome, not the only one.
+3. **A second brand-new site**, `RIP=FFFF800000631044`, Exception
+   `0x14` (page fault, not GP), `CR2=FFFFFFFFD680FFFF`. Disassembly
+   found nothing at this address at all -- `readelf -S` shows it falls
+   **outside every one of this binary's own sections** (past the end
+   of `.text`/`.rodata`/`.data`/`.bss`). This is a wild jump into
+   unmapped memory, almost certainly via a corrupted function pointer
+   or return address -- consistent with the same underlying heap
+   corruption manifesting a third, even more severe way. Also zero
+   script output before the fault.
+
+**Still not root-caused, and deliberately not patched blind** -- three
+distinct fault signatures from what's presumably one underlying
+corruption is exactly the kind of evidence that would be easy to
+misread as three separate bugs, or to "fix" by only addressing whichever
+one reproduces most often. What this round firmly establishes: this is
+real, severe memory corruption inside QuickJS-ng's own GC/heap
+bookkeeping, triggered by something about compiling/running this
+specific real, large, minified bundle (not this project's DOM binding
+code -- none of the three fault sites touch `Element`/`document`
+binding code at all) -- and it can happen at essentially any point
+during or after that bundle runs, not just at a predictable moment.
+
+**Concrete next step for whoever resumes this:** with a 50%-reliable,
+cheap repro finally in hand (a single external-script fetch, no
+httpbin.org page dependency), the natural next move is bisecting the
+bundle itself -- fetch it once, save it, and binary-search how much of
+it (by byte count, or by which of its vendored libraries) is actually
+required to keep reproducing, to find out whether this is really about
+total code size/module count or something specific to a particular
+piece of vendored code within the bundle.
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run

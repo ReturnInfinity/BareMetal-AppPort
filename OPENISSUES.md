@@ -814,9 +814,32 @@ account of why this works and everything it took.
   UI's real bundle (its actual ~1.4MB size, or additional vendored
   content beyond js-yaml) that neither isolated ingredient supplies on
   its own. Still not fixed; see `BROWSER.md`'s "Minimal-DOM
-  `run_scripts()` isolation" section for the full writeup and the
-  untried next step (fetch Swagger UI's real bundle for real, but run
-  it against this same minimal DOM instead of its own page).
+  `run_scripts()` isolation" section for the full writeup.
+- **That untried next step was tried, and it's a major breakthrough in
+  reproducibility (though still not root-caused):**
+  `examples/lexbor/browser-fetch/browser_fetch_bundletest.c` fetches
+  Swagger UI's real bundle live but runs it against the same minimal
+  document via a real `<script src>` (not embedded inline -- a first
+  attempt that embedded it inline tripled memory use versus the real
+  bug's mechanism and just hit an unrelated OOM, see `BROWSER.md`).
+  **5 crashes in 10 boots (50%) -- far higher than the ~12-30% seen
+  against the full httpbin.org page, making this the fastest, cheapest
+  repro this investigation has found.** Register dumps confirm `RSP`
+  is a debug-dump artifact (identical across every crash regardless of
+  fault type); `RIP` gave three distinct fault sites: the already-known
+  `gc_obj_list` assertion site (reproduced 3/3 times exactly), and two
+  brand-new ones -- a fault *inside `js_free_value_rt` itself* (a
+  linked-list-unlink write through a corrupted pointer, with zero
+  script output printed first, meaning the corruption can crash
+  immediately mid-execution, not just show up gracefully at teardown),
+  and a wild jump to an address outside every section of the binary
+  entirely (almost certainly a corrupted function pointer/return
+  address). This is real, severe QuickJS-ng heap/GC corruption
+  triggered by this specific large real bundle -- not this project's
+  DOM binding code (none of the three fault sites touch it). Still not
+  root-caused or fixed; see `BROWSER.md`'s newest section for the full
+  writeup and the concrete next step (bisect the bundle itself now that
+  a fast, reliable repro exists).
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 
