@@ -204,7 +204,26 @@ static bool resolve_script_url(const char *src, size_t src_len, char *out, size_
 	lxb_url_serialize(resolved, url_serialize_cb, &ub, false);
 	out[ub.len] = '\0';
 
-	lxb_url_memory_destroy(resolved);
+	// NOT lxb_url_memory_destroy() -- that calls lexbor_mraw_destroy(),
+	// tearing down the ENTIRE mraw arena (every chunk, and the mraw
+	// struct itself), not just this one URL's own allocation. g_url_parser
+	// (and g_base_url, allocated from the same arena) is reused across
+	// every <script src> on the page, so destroying the whole arena after
+	// the FIRST resolution leaves g_url_parser.mraw a dangling pointer --
+	// exactly the documented gotcha in url.h's own comment on
+	// lxb_url_memory_destroy(): "if you have a live lxb_url_parser_t
+	// parsing object, you will have a pointer to garbage after calling
+	// this function". The SECOND call to resolve_script_url() then reads
+	// that garbage pointer inside lxb_url_parse() -> lexbor_mraw_alloc(),
+	// producing a deterministic GP fault on exactly the second external
+	// script on any page, regardless of its content or size -- root-
+	// caused via a minimal repro (urltest2.c, no curl/QuickJS at all)
+	// that reproduced the identical crash from pure lexbor `url`-module
+	// reuse alone. lxb_url_destroy() is the correct one-URL-at-a-time
+	// equivalent -- lexbor_mraw_free(), returning just this object's own
+	// memory to the arena's free list, leaving the arena itself intact
+	// for the next resolve_script_url() call.
+	lxb_url_destroy(resolved);
 	return true;
 }
 

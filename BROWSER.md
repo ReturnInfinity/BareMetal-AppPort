@@ -257,7 +257,9 @@ Fixed by moving `curl_global_cleanup()` to bracket the whole of
 `main()` instead of just the first fetch. This is a real, permanent
 fix, kept regardless of the crash below.
 
-**The crash, found boot-testing against three real pages:**
+**The crash, found boot-testing against three real pages, root-caused
+and fixed (see "The crash, root-caused" below) -- kept here as the
+original discovery narrative, not a still-open problem:**
 
 - `https://www.iana.org/domains/reserved` -- jQuery (`src="/static/js/
   jquery.a8e7cabd4d49.js"`, correctly resolved to an absolute URL)
@@ -297,23 +299,105 @@ fetch example in this project (`fetch.c`, `browser.c`, and
 `browser_fetch.c` against pages with no external scripts) has always
 worked; this is the first code path to ever do two.
 
-**Deliberately not chased further here.** Diagnosing this fully would
-mean instrumenting or stepping through this port's syscall/interrupt
-boundary (`posix_shim.c`'s `sys_mmap`/`sys_brk`/network syscalls, or
-possibly `BareMetal-Firecracker`'s own interrupt handling under this
-specific "two full network round trips interleaved with heavy engine
-activity in one process" load shape, which nothing in this project has
-exercised before) -- real, valuable follow-up work, but a different
-scope than this task, and explicitly not something to touch
-kernel-side without a separate, deliberate investigation. The code
-implementing external-script fetching is kept as-is (not reverted or
-stubbed back to skip-and-print) because it is correct as written and
-the crash is a genuine, now well-characterized finding about this
-port's current limits, not a defect in this feature's own logic.
-Regression-verified: `example.com` (no scripts at all) and the static
-`examples/lexbor/browser/browser.c` test are both unaffected --
-the crash only reproduces on the code path that performs a second
-real network fetch.
+**The crash, root-caused.** The "identical RSP, near-identical RIP
+across wildly different payloads" observation above turned out to
+have two separate, unrelated explanations, only one of which was a red
+herring:
+
+- `RSP` being bit-for-bit identical (`00000000001CFF90`) every time
+  really is just a debug-dump artifact -- `BareMetal-Firecracker`'s
+  `exception_gate_main` (`src/BareMetal/interrupt.asm`) prints its
+  *own* current stack pointer partway through pushing 16 registers for
+  display, not the app's real stack pointer at the moment of the
+  fault. It's always the same value because it's always captured at
+  the same fixed depth into the kernel's own fixed-size crash-dump
+  stack frame, regardless of what the app was doing.
+- `RIP` clustering near the same address, though, was **not** a
+  debug-dump artifact -- it was the dump correctly reporting that the
+  crash is *always in the same instruction*, because it is: every
+  crash was `lexbor_mraw_alloc` (lexbor's own memory-arena allocator)
+  dereferencing a corrupted `mraw->mem` pointer, confirmed by
+  disassembling the actual faulting address (`objdump -d` on the
+  unstripped intermediate `build/*.app.elf` `build-app.sh` produces
+  before flattening to a raw binary) against the exact fault RIP from
+  the boot log.
+
+That pointed at lexbor's `url` module, not networking, threading, or
+this port's syscall layer at all -- confirmed by a minimal, hermetic
+repro (`BareMetal-AppPort/urltest2.c`, no curl, no QuickJS, no real
+network fetch) that resolves the same three relative URLs
+`resolve_script_url()` resolves for `iana.org`, in sequence, against a
+hardcoded base URL. It reproduced the identical crash on exactly the
+*second* resolution, every time -- proving the "second real network
+fetch" theory wrong: it was never about doing two fetches, or about
+QuickJS/lexbor coexisting under memory pressure. It was about calling
+`lxb_url_parse()` twice on the same reused `lxb_url_parser_t`.
+
+**Root cause:** `resolve_script_url()` called `lxb_url_memory_destroy()`
+on each resolved URL to free it -- but that function calls
+`lexbor_mraw_destroy()`, which tears down lexbor's *entire* memory
+arena (every chunk, and the arena object itself), not just the one
+URL's own allocation. `g_url_parser` (and `g_base_url`, allocated from
+the same arena) is deliberately reused across every `<script src>` on
+the page -- so the first call destroyed the whole arena out from under
+the still-live parser, leaving `g_url_parser.mraw` a dangling pointer.
+The *second* `lxb_url_parse()` call then dereferenced that freed
+memory inside `lexbor_mraw_alloc`, producing a deterministic crash on
+exactly the second external script on any page, regardless of its
+content or size -- exactly matching what was observed. This isn't
+subtle or unique to this port: lexbor's own `url.h` documents the
+gotcha verbatim, right next to the function: *"if you have a live
+`lxb_url_parser_t` parsing object, you will have a pointer to garbage
+after calling this function"*. `lxb_url_destroy()` is the correct
+one-URL-at-a-time equivalent (`lexbor_mraw_free()` -- returns just
+that object's memory to the arena's free list, leaving the arena
+itself intact).
+
+**Fix:** one line, `lxb_url_memory_destroy(resolved)` ->
+`lxb_url_destroy(resolved)` in `resolve_script_url()`. No kernel
+changes needed or made -- a kernel-side stack-layout theory was
+investigated along the way (see below) and disproven, so
+`BareMetal-Firecracker` ended this investigation with no changes at
+all.
+
+Boot-verified against everything that matters:
+
+- The minimal `urltest2.c` repro: all three resolutions now succeed,
+  no crash.
+- `https://www.iana.org/domains/reserved`: all three external scripts
+  (jQuery, `dtable.js`, `relative-time.js`) fetch and run with no
+  crash. jQuery and `dtable.js` each throw a real, distinct DOM-gap
+  exception (`cannot read property 'matches' of undefined`,
+  `TypeError: not a function`); `relative-time.js` runs clean with no
+  exception at all. The page's inline script still throws
+  `$ is not defined` -- now for a *legitimate* reason (jQuery's own
+  init code throws before it finishes assigning the `$`/`jQuery`
+  globals, a `documentElement`-class gap, not "the script was never
+  fetched").
+- `https://httpbin.org/`: all three external scripts, including
+  Swagger UI's real 1.4MB bundle, fetch and run with no crash, each
+  throwing its own real exception.
+- Regression checks, byte-for-byte/behavior-identical to every prior
+  round: `https://example.com/` (no scripts), `https://www.wikipedia.org/`
+  (now additionally fetches its 2 external scripts, which prior
+  rounds never attempted, with no crash), and the static
+  `examples/lexbor/browser/browser.c` hermetic test.
+
+**A kernel-side theory, investigated and disproven.** Before finding
+the real bug, the stack-layout reasoning above led to a hypothesis
+that `exception_gate_main`'s RIP field was misreading the wrong stack
+offset for exceptions with a hardware error code (GP/PF/DF/...) --
+`BareMetal-Firecracker`'s `interrupt.asm` was temporarily patched to
+read a different offset and dump more raw stack words to test this.
+The wider raw dump proved the *original* code was already reading the
+correct offset for this real GP fault in practice under
+Firecracker/KVM (no separate error-code slot appears in the actual
+stack layout observed, contrary to the plain-x86-SDM expectation) --
+so the "fix" was backed out and `BareMetal-Firecracker` was left
+completely unmodified. Recorded here so this dead end isn't
+re-investigated blind next time: the exception dump's RIP field is
+correct as originally written, at least for GP under this kernel/
+hypervisor combination.
 
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
@@ -326,37 +410,26 @@ plain JS, live network fetch included, verified above with
 
 Far, for anything resembling a real-world page -- now confirmed against
 four actual live sites, iterated on three times (a growable fetch
-buffer, a `window` stub, and external script fetching). One of the
-four (`httpbin.org`'s *inline* script) still runs clean with zero
-exceptions. But the picture changed with this round: wiring up
-external scripts is real, working, WHATWG-correct URL resolution and
-fetch logic -- verified fetching and running two genuinely large real
-scripts (jQuery, and Swagger UI's 1.4MB bundle) -- and it surfaced a
-**new class of finding**, a reproducible VM crash, not just another
-missing-API exception. Every one of the three pages with an external
-script (`iana.org`, `httpbin.org`, `wikipedia.org`) now fetches and
-runs that script successfully, throws an honest, expected JS-level
-error from it (a further DOM/API gap, same category as before), and
-*then* crashes the VM outright the first time a second real network
-fetch happens in one process -- a limit this project had never
-exercised before external scripts existed to trigger it.
+buffer, a `window` stub, and external script fetching, the last of
+which also found and fixed a real crash bug along the way -- see
+"External script fetching" above). External-script fetching is real,
+working, WHATWG-correct URL resolution and fetch logic, verified
+fetching and running genuinely large real scripts (jQuery, and Swagger
+UI's 1.4MB bundle) with no crash, on every page tested.
 
-So the assessment splits in two: for the DOM+JS binding layer itself,
-the trend from earlier rounds holds -- `$ is not defined` is
-unaffected by any of the three fixes (a missing-external-script
-problem, now finally addressed at the URL/fetch level, though masked
-by the crash before the page's own inline script gets to prove it);
-`wikipedia.org` and `iana.org` both progressed to new, more specific
-DOM-gap exceptions once their real external scripts actually ran,
-exactly the "failing later, for narrower reasons" pattern every prior
-round showed. But there's now a harder floor underneath all of that:
-**no real page with an external script can currently finish running
-in this project without crashing the VM**, which is a more fundamental
-limit than any single missing DOM property or `Window` method. No
-event handling, no `fetch`/XHR from JS, no `getElementById`/
-`querySelectorAll`/DOM mutation, and `window` is a bare alias with none
-of a real `Window` interface's methods remain the other honest gaps.
-Each of those is still a distinct, addable follow-up; the network-fetch
-crash is the one item on this list that isn't yet characterized well
-enough to call addable -- it needs real investigation before it can be
-called a follow-up rather than an open question.
+For the DOM+JS binding layer itself, the trend from earlier rounds
+holds all the way through: `httpbin.org`'s `relative-time.js`-class
+scripts run clean with zero exceptions when they don't need anything
+beyond this scope's DOM surface; `$ is not defined` on `iana.org` is
+now resolved at the fetch level (jQuery genuinely loads and runs) but
+still fails, now for the legitimate reason that jQuery's own init code
+needs DOM properties this scope doesn't implement; `wikipedia.org` and
+`iana.org` both progress to new, more specific DOM-gap exceptions once
+their real external scripts actually run -- the same "failing later,
+for narrower reasons" pattern every round has shown, now extended to
+scripts that were previously never even fetched. No event handling, no
+`fetch`/XHR from JS, no `getElementById`/`querySelectorAll`/DOM
+mutation, and `window` is a bare alias with none of a real `Window`
+interface's methods remain the honest gaps -- each a distinct, addable
+follow-up, not a structural blocker. There is no longer an open
+network-fetch crash on this list.

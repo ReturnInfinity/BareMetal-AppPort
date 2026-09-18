@@ -607,25 +607,32 @@ account of why this works and everything it took.
   `window` has none of a real `Window` interface's methods yet);
   `iana.org`'s unrelated `$ is not defined` is unaffected, as expected.
   See `BROWSER.md`'s "Window stub" section for the exact boot logs.
-- **OPEN, high priority: external `<script src>` fetching is
-  implemented and correct, but crashes the VM on every real page
-  tried.** lexbor's `url` module is now vendored (see `LEXBOR.md`);
-  `browser_fetch.c` resolves and fetches external scripts for real
-  (verified against jQuery and Swagger UI's real 1.4MB bundle -- both
-  fetch and run correctly, throwing an honest DOM-gap exception each).
-  But immediately afterward, every single real page tested
-  (`iana.org`, `httpbin.org`, `wikipedia.org`) hits a reproducible
-  `Exception 0x13(GP)` and the VM halts. `RSP` is bit-for-bit identical
-  (`00000000001CFF90`) across all three crashes despite wildly
-  different payload sizes/content, pointing at something structural in
-  performing a *second* real network fetch within one process rather
-  than ordinary heap corruption. Also found and fixed along the way (a
-  real, permanent fix, independent of the crash): `curl_global_cleanup()`
-  was being called after only the first fetch, leaving later
-  `curl_easy_init()` calls in undefined-behavior territory per
-  libcurl's own contract. See `BROWSER.md`'s "External script fetching"
-  section for full boot logs and why this wasn't chased further into
-  this port's syscall/interrupt boundary within this task's scope.
+- **Fixed: external `<script src>` fetching, including a real crash
+  bug found and root-caused along the way.** lexbor's `url` module is
+  now vendored (see `LEXBOR.md`); `browser_fetch.c` resolves and
+  fetches external scripts for real (verified against jQuery and
+  Swagger UI's real 1.4MB bundle -- both fetch and run correctly,
+  throwing an honest DOM-gap exception each). This initially crashed
+  every real page tried with `Exception 0x13(GP)` on the *second*
+  external script -- root-caused (not a kernel bug, not networking, not
+  QuickJS/lexbor memory pressure) to `resolve_script_url()` calling
+  `lxb_url_memory_destroy()` on each resolved URL, which tears down
+  lexbor's *entire* memory arena rather than just that one allocation,
+  leaving the reused `g_url_parser`'s arena a dangling pointer for the
+  next resolution. One-line fix: `lxb_url_destroy()` instead (frees
+  just that object, leaves the arena intact) -- lexbor's own `url.h`
+  documents this exact gotcha verbatim. Boot-verified against
+  `iana.org`/`httpbin.org` (both previously crashing, now run to
+  completion with real per-script exceptions) and a full regression
+  set (`example.com`, `wikipedia.org`, the static `browser.c` test).
+  Also found and fixed along the way, independent of the crash: a
+  `curl_global_cleanup()` ordering bug (called after only the first
+  fetch, leaving later `curl_easy_init()` calls in undefined-behavior
+  territory per libcurl's own contract). A kernel-side stack-layout
+  theory was investigated and disproven along the way --
+  `BareMetal-Firecracker` ended this investigation unmodified. See
+  `BROWSER.md`'s "External script fetching" / "The crash, root-caused"
+  sections for the full story and boot logs.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 
