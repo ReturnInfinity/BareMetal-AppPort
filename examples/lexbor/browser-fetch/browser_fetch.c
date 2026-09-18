@@ -283,6 +283,11 @@ static void setup_globals(JSContext *ctx)
 			   JS_NewCFunction(ctx, document_querySelector, "querySelector", 1));
 	JS_SetPropertyStr(ctx, global, "document", document);
 
+	// window is an alias for the global object, same as browser.c --
+	// see its matching comment for why (window === globalThis in a real
+	// browser, not a separate object).
+	JS_SetPropertyStr(ctx, global, "window", JS_DupValue(ctx, global));
+
 	JS_FreeValue(ctx, global);
 }
 

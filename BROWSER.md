@@ -50,6 +50,15 @@ lexbor's DOM API, the same way a small C `jsdom` would be built.
   execution moves on to the next `<script>` tag, matching how a real
   browser keeps loading the rest of the page after one failing script
   block, rather than aborting the whole run.
+- **`window`** -- an alias for the global object itself
+  (`JS_SetPropertyStr(ctx, global, "window", JS_DupValue(ctx, global))`),
+  matching a real browser's `window === globalThis`, not a separate
+  object with its own copies of every global. `window.document`/
+  `window.console` and `typeof window !== 'undefined'` work for free
+  this way, and `window.foo = ...` assignments succeed as plain
+  property sets -- there's still no event loop to ever act on them.
+  See "Window stub" below for what boot-testing this against real
+  pages actually found.
 
 An `Element` wrapper's opaque pointer is the raw `lxb_dom_node_t*` it
 wraps; its finalizer is a no-op because the `lxb_html_document_t`
@@ -77,11 +86,16 @@ addable follow-up, not a discovered blocker:
   fetch through the same `libcurl` pattern `examples/lexbor/fetch/
   fetch.c` already established.
 - **No event loop, no `setTimeout`/`setInterval`, no `fetch()`/XHR
-  exposed to JS.** This is synchronous load-and-run only: parse once,
-  run every inline `<script>` once, exit. A real page's `<script>`
-  that expects any of `window`, event listeners, or async APIs will
-  simply throw a `ReferenceError`/`TypeError` on first use -- expected
-  under this scope, not a bug to chase.
+  exposed to JS, and `window` has no methods/properties of its own
+  beyond what's a plain global** (`window.document` works because
+  `document` is global; `window.addEventListener` does not exist and
+  throws `TypeError: not a function` if called). This is synchronous
+  load-and-run only: parse once, run every inline `<script>` once,
+  exit. A real page's `<script>` that expects event listeners, async
+  APIs, or DOM properties beyond `querySelector`/`textContent`/
+  `tagName`/`getAttribute` (e.g. `document.documentElement`) will
+  throw a `ReferenceError`/`TypeError` on first use -- expected under
+  this scope, not a bug to chase.
 - **No CSS cascade/computed style/layout, ever** -- this stays a
   DOM+JS headless browser, not a pixel-rendering one (see `QUICKJS.md`/
   `LEXBOR.md`'s framing).
@@ -140,16 +154,19 @@ against the real web rather than a single cherry-picked success:
   prints. Confirms the pipeline does nothing observable (correctly)
   when a page has no script content, rather than erroring.
 - **`https://httpbin.org/`** -- three `<script src=...>` tags correctly
-  skipped (printed as such), then the one inline `<script>` (Swagger
-  UI's bootstrap) throws `ReferenceError: window is not defined` on
-  its first statement. Real, expected, matches the "no `window`
-  object" non-goal above exactly.
+  skipped (printed as such); the one inline `<script>` (Swagger UI's
+  bootstrap) originally threw `ReferenceError: window is not defined`
+  on its first statement. After the window stub (see "Window stub"
+  below), this script now runs to completion with **no exception at
+  all** -- whatever it does with `window` didn't need anything beyond
+  a plain object.
 - **`https://www.iana.org/domains/reserved`** -- same shape, but a
   *different* real failure: the inline `<script>` throws
   `ReferenceError: $ is not defined` -- it assumes jQuery, which was
   loaded via a skipped `<script src>`, so the global it expects was
-  never defined. A different missing-global reason than the `window`
-  case, both equally expected under this scope.
+  never defined. Unaffected by the window stub (re-verified) -- this
+  is a missing-external-script problem, not a missing-`window`
+  problem.
 - **`https://www.wikipedia.org/`** -- originally found the fixed
   32KB `RESPONSE_BUF_SIZE` cap silently truncating this 119KB page
   mid-document, producing a misleading `TypeError` that was really an
@@ -157,10 +174,37 @@ against the real web rather than a single cherry-picked success:
   "Growable fetch buffer" below): both `fetch.c` and this example now
   fetch the full `body: 119573 byte(s)` and correctly parse `<title>:
   Wikipedia` / count 383 `<a>` tags. Re-run against the untruncated
-  document, its scripts now throw *real* errors instead --
-  `TypeError: cannot read property 'className' of undefined` and
-  `ReferenceError: window is not defined` -- the same "no `window`
-  object" non-goal every other real page hit, not a buffer artifact.
+  document (before the window stub), its scripts threw *real* errors
+  instead -- `TypeError: cannot read property 'className' of
+  undefined` and `ReferenceError: window is not defined`. After the
+  window stub (see below), the `window` error is gone, replaced by a
+  *new* distinct one -- `TypeError: not a function` -- alongside the
+  same `className` error, both now isolated to real, separate DOM
+  gaps rather than a missing global.
+
+### Window stub
+
+Added `window` as an alias for the global object (see "What's bound"
+above) and re-ran all three real pages that had thrown against it:
+
+- **`httpbin.org`** -- the `window is not defined` error is gone, and
+  the script now runs with **no exception at all**.
+- **`www.wikipedia.org`** -- the `window is not defined` error is
+  gone, replaced by two *different* real errors: the pre-existing
+  `TypeError: cannot read property 'className' of undefined` (almost
+  certainly `document.documentElement.className` -- `documentElement`
+  isn't implemented, a separate DOM gap from `window`) and a new
+  `TypeError: not a function` (a later statement calling some
+  `window.<method>` that doesn't exist -- `window` is just a plain
+  object alias, it has none of a real `Window` interface's methods
+  like `addEventListener`). Progress, not a full fix: the page still
+  fails, but now for its *next* real, distinct gap instead of the
+  first one.
+- **`www.iana.org/domains/reserved`** -- unchanged, still
+  `ReferenceError: $ is not defined`, confirming the window stub has
+  no effect on the separate missing-external-script problem.
+- Regression check: the static `examples/lexbor/browser/browser.c`
+  example's boot output is byte-for-byte unchanged.
 
 ### Growable fetch buffer
 
@@ -189,18 +233,23 @@ plain JS, live network fetch included, verified above with
 `browser_fetch.c`.
 
 Far, for anything resembling a real-world page -- now confirmed against
-four actual live sites, not just reasoned about: every one of them
-failed, each for a *different* concrete reason (no `window`, missing
-`$` because its defining external script was correctly not fetched,
-and a fixed-size fetch buffer truncating a larger real page mid-
-document). No event handling (`DOMContentLoaded`, click handlers --
-there's no event loop to dispatch them from), no `fetch`/XHR so a page
-can't make its own follow-up requests, no external `<script src>`
-(confirmed above to be exactly where most real sites' actual logic
-lives, not inline), no `getElementById`/`querySelectorAll`/DOM
-mutation, and a fixed 32KB fetch buffer that silently truncates
-anything larger. Each failure mode is a distinct, addable follow-up
-(external script fetching, a real `window` stub, a growable fetch
-buffer) rather than one big blocker -- but real-world pages currently
-fail for real, varied, and now-documented reasons rather than
-hypothetical ones.
+four actual live sites, not just reasoned about, and iterated on twice
+(a growable fetch buffer, then a `window` stub). One of the four
+(`httpbin.org`) now runs its inline script clean, with zero exceptions.
+The other three still fail, but each fix peels back one real layer
+rather than papering over it: `$ is not defined` is unaffected by
+either fix (a missing-external-script problem, not a `window` or
+buffer problem); `wikipedia.org` moved from a truncation artifact, to a
+missing-`window` error, to two distinct real DOM/API gaps
+(`documentElement`, and calling a `window` method that doesn't exist).
+No event handling (`DOMContentLoaded`, click handlers -- there's no
+event loop to dispatch them from), no `fetch`/XHR so a page can't make
+its own follow-up requests, no external `<script src>` (confirmed above
+to be exactly where most real sites' actual logic lives, not inline),
+no `getElementById`/`querySelectorAll`/DOM mutation, and `window` is a
+bare alias with none of a real `Window` interface's methods. Each
+remaining failure mode is a distinct, addable follow-up (external
+script fetching, `documentElement` and other DOM properties, `Window`
+interface methods) rather than one big blocker -- and the trend across
+two rounds of fixes is real pages failing progressively later and for
+progressively narrower reasons, not staying stuck on the same wall.

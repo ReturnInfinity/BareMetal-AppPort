@@ -229,6 +229,17 @@ static void setup_globals(JSContext *ctx)
 			   JS_NewCFunction(ctx, document_querySelector, "querySelector", 1));
 	JS_SetPropertyStr(ctx, global, "document", document);
 
+	// A real browser's `window` *is* the global object (window ===
+	// globalThis) -- not a separate object with its own copies of every
+	// global. Aliasing it this way means `window.document`/
+	// `window.console` and `typeof window !== 'undefined'` checks all
+	// work for free, and `window.foo = ...` assignments succeed (as a
+	// plain property set -- there's no event loop to ever act on them,
+	// see BROWSER.md's non-goals). JS_DupValue because JS_SetPropertyStr
+	// takes ownership of the value handed to it, and `global` still
+	// needs its own reference freed below.
+	JS_SetPropertyStr(ctx, global, "window", JS_DupValue(ctx, global));
+
 	JS_FreeValue(ctx, global);
 }
 

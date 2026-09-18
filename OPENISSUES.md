@@ -596,6 +596,17 @@ account of why this works and everything it took.
   fetch buffer" section) -- boot-verified against Wikipedia's full
   119KB body and a regression check against `example.com`'s default
   case. No remaining fixed-size cap on fetched response bodies.
+- **Fixed:** the "no `window`" gap above, partially -- `window` is now
+  a real global (an alias for the global object, `window ===
+  globalThis`, same as a real browser). Re-tested against all three
+  pages that had thrown `window is not defined`: `httpbin.org`'s
+  inline script now runs with zero exceptions; `wikipedia.org`'s
+  `window is not defined` is gone but two other real gaps surface in
+  its place (`document.documentElement` unimplemented, and a
+  `window.<method>()` call throwing `TypeError: not a function` since
+  `window` has none of a real `Window` interface's methods yet);
+  `iana.org`'s unrelated `$ is not defined` is unaffected, as expected.
+  See `BROWSER.md`'s "Window stub" section for the exact boot logs.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 
