@@ -346,26 +346,27 @@ for src in dtoa libregexp libunicode quickjs; do
 	gcc $QUICKJS_CFLAGS -o "$obj" "$QUICKJS_DIR/$src.c"
 done
 
-# lexbor: step one of the DOM/HTML/CSS half of the headless-browser
-# effort (see LEXBOR.md) -- HTML5 parsing, a DOM tree, and CSS-selector
-# matching (querySelector-style lookups), no fetch/network of its own
-# (that's this port's own curl, wired up separately). Only the module
-# directories this scope actually needs get built -- core (base
-# utilities: memory arenas, hash tables, its own dtoa/strtod, ...), tag/
-# ns (element tag name/namespace tables the DOM needs), dom (the tree
-# itself), html (the HTML5 tokenizer/tree-construction parser), css/
-# selectors (parsing and matching CSS selectors against the DOM).
-# Explicitly left out for now, each independently confirmed (by
-# grepping the modules above for cross-references) to be needed by
-# *none* of them, not just "probably fine to skip": encoding (real-
-# world <meta charset>/BOM detection -- this scope only feeds it
-# already-decoded UTF-8 strings), url (relative-URL resolution -- no
-# fetch layer exists yet to need it), unicode/punycode (only url's own
-# dependencies), style/engine (CSS cascade/computed-style and a
-# convenience wrapper API -- layout/rendering is out of scope for a
-# DOM+JS headless browser, see QUICKJS.md's framing). Follow-ups, not
-# blockers -- add back whichever of these a real fetched page turns out
-# to need.
+# lexbor: the DOM/HTML/CSS half of the headless-browser effort (see
+# LEXBOR.md/BROWSER.md) -- HTML5 parsing, a DOM tree, CSS-selector
+# matching (querySelector-style lookups), and now relative/absolute
+# URL resolution for fetching <script src="..."> (this port's own
+# curl still does the actual fetch, wired up separately). core (base
+# utilities: memory arenas, hash tables, its own dtoa/strtod, ...),
+# tag/ns (element tag name/namespace tables the DOM needs), dom (the
+# tree itself), html (the HTML5 tokenizer/tree-construction parser),
+# css/selectors (parsing and matching CSS selectors against the DOM),
+# url (relative-URL resolution against a base URL, used to fetch
+# external <script src>) and url's own real dependency graph --
+# encoding, unicode, punycode -- confirmed by grepping url.c/unicode.c's
+# own #includes rather than assumed (encoding was missed in an earlier
+# pass here: both url and unicode need lxb_encoding_data()/friends for
+# UTF-8 handling, not just unicode/punycode as first thought).
+# Explicitly still left out, each independently confirmed (by grepping
+# the modules above for cross-references) to be needed by *none* of
+# them, not just "probably fine to skip": style/engine (CSS cascade/
+# computed-style and a convenience wrapper API -- layout/rendering is
+# out of scope for a DOM+JS headless browser, see QUICKJS.md's
+# framing). Follow-up, not a blocker.
 #
 # lexbor/core also ships an OS-abstraction layer under ports/<os>/ for
 # the handful of things it doesn't want to assume about the C library
@@ -393,7 +394,7 @@ done
 # its own CMakeLists.txt comment) -- nothing to disable here, there's
 # simply nothing that spawns a thread to begin with.
 echo "- Building lexbor"
-LEXBOR_MODULES="core tag ns dom html css selectors"
+LEXBOR_MODULES="core tag ns dom html css selectors encoding unicode punycode url"
 for module in $LEXBOR_MODULES; do
 	# Recursive, not a flat */*.c glob -- html/dom/css nest real
 	# sources several directories deep (html/tree/insertion_mode/*.c,

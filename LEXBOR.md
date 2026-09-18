@@ -38,6 +38,17 @@ lwext4 in `setup.sh` already):
   its own `css/selectors` submodule (selector syntax parsing)
 - `selectors` -- matches parsed CSS selectors against a DOM tree
   (`lxb_selectors_find`)
+- `url` -- relative/absolute URL resolution (`lxb_url_parse`), added
+  when `<script src="...">` fetching needed it (see `BROWSER.md`'s
+  "External script fetching") -- and its own real dependency graph,
+  `encoding`/`unicode`/`punycode`, confirmed by grepping `url.c`'s and
+  `unicode.c`'s actual `#include`s rather than assumed. This corrects
+  an earlier version of this doc, which said `url` depended only on
+  `unicode`/`punycode` -- `encoding` was missed; both `url` and
+  `unicode` call `lxb_encoding_data()`/friends for UTF-8 handling, not
+  just the punycode/IDNA path this scope doesn't otherwise touch.
+  `encoding`'s own dependency graph is just `core`, confirmed the same
+  way.
 
 Plus two files from lexbor's own POSIX platform-abstraction layer,
 `source/lexbor/ports/posix/lexbor/core/`:
@@ -59,12 +70,6 @@ Deliberately **not** built:
   helper the parser pipeline never reaches. This port's `posix_shim.c`
   doesn't implement `opendir`/`readdir` anyway (see OPENISSUES.md), so
   this is a non-issue rather than a deferred gap.
-- `encoding` (real-world `<meta charset>`/BOM detection -- this scope
-  only ever feeds lexbor already-decoded UTF-8 strings; nothing in
-  `html`'s own sources references `lexbor/encoding` either, confirmed
-  by grep)
-- `url` (relative-URL resolution) and its own dependencies `unicode`/
-  `punycode` -- no fetch layer exists yet to need URL resolution at all
 - `style` / `engine` -- CSS cascade/computed-style and a convenience
   wrapper API respectively. Layout/rendering is out of scope for a
   DOM+JS headless browser (see QUICKJS.md's framing: no visual box
@@ -184,11 +189,11 @@ after it silently truncated a larger page for real; see `BROWSER.md`'s
   linked into every app already, but nothing connects them (no
   `document`/`window` JS globals, no running `<script>` tags found
   during parsing). That's the next phase.
-- `encoding`/`url` modules not built (see "What's vendored" above) --
-  follow-ups once a real fetched page needs charset detection or
-  relative-URL resolution, not blockers. `example.com`'s page is plain
-  ASCII/UTF-8 with no relative URLs, so the fetch example above never
-  exercises either gap.
+- `encoding` module still not built -- `<meta charset>`/BOM detection
+  for a real non-UTF-8 page, not exercised by anything fetched so far.
+  `url` is now vendored (see "What's vendored" above), which pulls in
+  `encoding`'s object files as a dependency, but nothing in this scope
+  calls its charset-detection API directly yet.
 - `fs.c` intentionally never built -- if some future module actually
   needs `lexbor_fs_*` (unlikely for the DOM+JS scope this project is
   aiming for), it would first need `opendir`/`readdir`/`stat` added to
