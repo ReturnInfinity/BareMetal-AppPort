@@ -801,10 +801,22 @@ account of why this works and everything it took.
   sufficient on their own, and shifts the hypothesis back toward the
   DOM binding layer itself (lexbor's DOM tree + `Element`/`document`/
   `window` C bindings coexisting with QuickJS) being a necessary
-  ingredient, not something in the JS engine alone. Still not fixed;
-  see `BROWSER.md`'s "Standalone js-yaml isolation" section for the
-  full writeup and the untried next combination (a minimal empty-body
-  lexbor document run through the real `run_scripts()` path).
+  ingredient, not something in the JS engine alone.
+- **The DOM-presence hypothesis was tested too, and also came back
+  clean** (`examples/lexbor/browser-fetch/browser_fetch_yamltest.c`):
+  the same real js-yaml source run through the ACTUAL production
+  `run_scripts()` code path (copied verbatim from `browser_fetch.c`,
+  not reimplemented), with real `Element`/`document`/`window` bindings
+  registered, against a minimal in-memory document instead of
+  Swagger UI's live-fetched bundle. **30 boots, zero leaks, zero
+  crashes.** This rules out "DOM presence + the binding layer alone"
+  as sufficient too -- the leak needs something specific to Swagger
+  UI's real bundle (its actual ~1.4MB size, or additional vendored
+  content beyond js-yaml) that neither isolated ingredient supplies on
+  its own. Still not fixed; see `BROWSER.md`'s "Minimal-DOM
+  `run_scripts()` isolation" section for the full writeup and the
+  untried next step (fetch Swagger UI's real bundle for real, but run
+  it against this same minimal DOM instead of its own page).
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 

@@ -1107,6 +1107,51 @@ Not root-caused further this round either. Committed as diagnostic
 work; no fix applied (none of the three isolated variants gave
 anything to fix -- they were all clean).
 
+### Minimal-DOM `run_scripts()` isolation: still zero reproductions
+
+The exact next step the prior round identified: run the same real
+js-yaml source through the ACTUAL production `run_scripts()`/
+`run_one_script()`/`eval_script()` code path (not a reimplementation --
+`examples/lexbor/browser-fetch/browser_fetch_yamltest.c` is a byte-for-
+byte copy of `browser_fetch.c`, only `main()` differs), against a
+minimal in-memory document instead of a live fetch of Swagger UI's real
+bundle: `<html><body><script>` + the real js-yaml 4.1.0 bytes (reused
+from `examples/quickjs/yamltest/js_yaml_src.h`, confirmed to contain
+neither `</script` nor `<!--` so it can't prematurely close its own
+tag) + `</script></body></html>`, built and parsed as one explicitly-
+length-tracked buffer exactly the way a real fetched page's bytes are
+handled elsewhere in this file -- never treated as a C string. No
+`<script src>` in this fixture, so `resolve_script_url()`/
+`run_external_script()` are present (copied verbatim, for fidelity)
+but never exercised -- this test isolates DOM presence + one real
+inline script specifically, not external-script fetching.
+
+**30 boots (1 initial + a 20-run batch + a 10-run batch, each polling
+`/tmp/fc-vm.log` for real completion rather than a fixed sleep -- see
+the prior round's own test-harness-bug gotcha), zero leaks, zero
+crashes, zero exceptions.** `register_element_class()`/
+`setup_globals()` (the real `Element`/`document`/`window`/`console`
+bindings, `JS_SetDumpFlags(rt, JS_DUMP_LEAKS)` enabled) all run for
+real every time, against a real (if minimal) `lxb_html_document_t`.
+
+**This rules out "DOM presence alone" as sufficient.** Combined with
+the prior round's three clean variants, the leak now requires
+something specific to Swagger UI's real bundle that neither "real
+js-yaml source" nor "DOM + Element/document/window bindings" supplies
+on its own -- most plausibly the bundle's actual size (~1.4MB vs. this
+test's 39KB), its additional content beyond js-yaml (Swagger UI vendors
+several other libraries in the same bundle), or something about
+fetching and parsing a payload of that size specifically. The
+cheapest untried next step: fetch Swagger UI's real bundle for real
+(live network, real size) but run it through `run_scripts()` against
+the SAME minimal DOM used here (rather than the page it's actually
+embedded in) -- isolating bundle size/content from Swagger UI's own
+surrounding page for the first time.
+
+Not root-caused. No fix applied or attempted -- another clean isolation
+round, narrowing the hypothesis space further rather than finding a
+bug to fix.
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run
