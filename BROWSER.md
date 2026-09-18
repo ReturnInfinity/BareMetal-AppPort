@@ -49,6 +49,11 @@ lexbor's DOM API, the same way a small C `jsdom` would be built.
   accessors. Each resolves to JS `null` if the document is malformed
   enough not to have one, same convention `querySelector()` uses for
   "no match".
+- **`document.createElement(tagName)`**, **`Element.appendChild(child)`**,
+  **`Element.setAttribute(name, value)`**, **`Element.remove()`** -- real
+  DOM mutation, not read-only accessors. See "DOM mutation" below for
+  the full writeup, including the element-lifetime question this
+  raised and how it was verified.
 - **`window.addEventListener`/`removeEventListener`** -- honest no-op
   stubs (bound on the global object, so both `window.addEventListener`
   and a bare `addEventListener` work, matching how real pages use
@@ -97,9 +102,13 @@ addable follow-up, not a discovered blocker:
   `lxb_selectors_find()` call, just with a different callback
   (collect-all instead of keep-first) or a direct `id` attribute
   lookup instead of a full selector parse.
-- **DOM mutation** -- no `createElement`/`appendChild`/`setAttribute`/
-  `remove` exposed to JS. lexbor's DOM API supports all of this; none
-  of it is wired up yet.
+- **DOM mutation** -- `document.createElement`/`Element.appendChild`/
+  `.setAttribute`/`.remove` are now bound (see "DOM mutation" below).
+  `Node.removeChild(child)` (the older, two-party form that must throw
+  a real DOM exception for "child isn't actually a child of this
+  node") is deliberately still not bound -- it needs real
+  DOM-exception-code translation, not just a straight lexbor call the
+  way the other four were.
 - **`<script src="...">` (external scripts)** -- now fetched and run in
   `browser_fetch.c` (lexbor's `url` module resolves `src` against the
   page's own URL, `fetch_url()` GETs it, the result runs the same way
@@ -114,14 +123,15 @@ addable follow-up, not a discovered blocker:
   `addEventListener` no longer throws (see "What's bound" above), but
   a registered listener is never called -- there is no
   `DOMContentLoaded`/`load`/click event to ever fire it.
-- **`getElementById`/`querySelectorAll`/DOM mutation still not
-  bound**, and `window` has no method beyond the two event-listener
-  stubs above -- no `window.matchMedia`/`requestAnimationFrame`/etc.
-  A real page's `<script>` that expects any of these, or DOM
-  properties beyond `querySelector`/`textContent`/`tagName`/
-  `getAttribute`/`className`/`documentElement`/`body`/`head`, will
-  throw a `ReferenceError`/`TypeError` on first use -- expected under
-  this scope, not a bug to chase.
+- **`getElementById`/`querySelectorAll` still not bound**, `Node.
+  removeChild` still not bound (see above), and `window` has no method
+  beyond the two event-listener stubs and `navigator` doesn't exist at
+  all -- no `window.matchMedia`/`requestAnimationFrame`/etc. A real
+  page's `<script>` that expects any of these, or DOM properties beyond
+  `querySelector`/`textContent`/`tagName`/`getAttribute`/`className`/
+  `documentElement`/`body`/`head`/`createElement`/`appendChild`/
+  `setAttribute`/`remove`, will throw a `ReferenceError`/`TypeError` on
+  first use -- expected under this scope, not a bug to chase.
 - **No CSS cascade/computed style/layout, ever** -- this stays a
   DOM+JS headless browser, not a pixel-rendering one (see `QUICKJS.md`/
   `LEXBOR.md`'s framing).
@@ -544,6 +554,112 @@ unaffected by this change).
   recurs, not chased blind on a single, non-reproducible occurrence.
 - Static `examples/lexbor/browser/browser.c` test -- the original four
   scripts' output unchanged; the new 5th script's output shown above.
+
+## DOM mutation
+
+The remaining item from the original "Explicit non-goals" list:
+`document.createElement`/`Element.appendChild`/`.setAttribute`/
+`.remove`, added identically to both `browser.c` and `browser_fetch.c`.
+
+**What's bound:**
+
+- **`document.createElement(tagName)`** -- `lxb_html_document_create_element()`
+  (the HTML-aware wrapper, not the lower-level
+  `lxb_dom_document_create_element()` directly), so a created element
+  goes through the same tag/interface-table lookup a parsed element
+  already goes through. Not inserted into the tree by itself -- matches
+  real DOM `createElement()` exactly.
+- **`Element.appendChild(child)`** -- `lxb_dom_node_append_child()`,
+  lexbor's own spec-shaped `Node.appendChild()` (its header explicitly
+  contrasts it with `lxb_dom_node_insert_child()`'s unvalidated raw
+  splice). Throws a real `TypeError` if `this` is a null/detached
+  Element or the argument isn't a real `Element` wrapper -- the one
+  mutation method that validates and throws, matching how
+  `querySelector()` already throws on an invalid selector, rather than
+  silently no-op'ing like the read accessors below.
+- **`Element.setAttribute(name, value)`** -- `lxb_dom_element_set_attribute()`;
+  a subsequent `getAttribute()`/`className` read reflects it. Stays
+  permissive (returns `undefined`, doesn't throw) on missing args, kept
+  consistent with `getAttribute()`'s existing soft-fail convention in
+  this same file.
+- **`Element.remove()`** -- the modern, argument-less `ChildNode.remove()`,
+  via `lxb_dom_node_remove()`. `Node.removeChild(child)` (the older,
+  two-party form) is deliberately not added -- unlike the four methods
+  above, it needs real DOM-exception-code translation for "child isn't
+  actually a child of this node," not just a straight lexbor call.
+
+**Element lifetime, checked against lexbor's actual source rather than
+assumed** (this project has already found one real bug from getting
+exactly this kind of lifetime reasoning wrong -- see "External script
+fetching"'s `lxb_url_memory_destroy` arena-teardown bug above): does a
+JS-created-but-never-appended element leak or dangle, given
+`element_finalizer` is a no-op? Traced `lxb_html_document_create_element()`
+-> `lxb_dom_document_create_element()` -> `lxb_dom_element_create()`
+-> `lxb_dom_document_create_interface()` -> (for the HTML document type)
+`lxb_dom_document_create_struct()`, which is `lexbor_mraw_calloc(document->mraw, ...)`
+-- the exact same long-lived memory arena every parsed node already
+comes from. A created element is safe to leave un-freed with today's
+no-op finalizer for the same reason every existing `Element` wrapper
+already is: its lifetime is tied to the whole document's arena, torn
+down only at `lxb_html_document_destroy()`, regardless of whether it
+was ever attached to the tree.
+
+**Hermetic round-trip test** -- a 6th `<script>` added to `browser.c`'s
+static fixture: `document.createElement("div")`, `.setAttribute("id",
+"made")`, `document.body.appendChild(made)`, then a *fresh*
+`document.querySelector("#made")` call to prove the element is
+genuinely in the tree afterward, not just a JS object floating on its
+own. Boot-verified:
+
+```
+created tagName=DIV
+```
+
+**Regression sweep via `browser_fetch.c`:**
+
+- `https://example.com/` -- identical (`body: 559 byte(s)`, `title:
+  Example Domain`, no scripts).
+- `https://www.iana.org/domains/reserved` -- identical to the prior
+  round's documented baseline, no crash (jQuery/`dtable.js` both
+  `not a function`, inline `$ is not defined`) -- none of `iana.org`'s
+  scripts touch DOM mutation, so this is an unaffected-by-this-change
+  check, not a new success.
+- `https://httpbin.org/` -- mixed, and worth being precise about. On
+  attempts that ran a script further before crashing (see below),
+  Swagger UI's bundle progressed to a *new*, deeper error,
+  `TypeError: cannot read property 'cssFloat' of undefined` (previously
+  just `not a function`) -- real forward progress. jQuery's own error
+  message is **unchanged** (`TypeError: cannot read property
+  'createElement' of undefined`) -- on inspection this is *not* actually
+  about `document.createElement` being missing (it's bound now); jQuery
+  is reading `.createElement` off some other object this scope doesn't
+  provide (most likely `elem.ownerDocument`, which isn't bound), so
+  this specific error was always going to need a different fix than the
+  one just added -- worth correcting here since the *previous* round's
+  writeup assumed binding `createElement` would resolve it.
+- **The already-documented, already-parked intermittent crash (see
+  "Stack-depth crash investigation" below) recurred multiple times
+  during this round's `httpbin.org` testing** -- roughly half of ~7
+  attempts, `Exception 0x13 (GP)`, RSP at the same known debug-dump-
+  artifact value documented below. Disassembling the unstripped
+  `build/browser_fetch.app.elf` at the two distinct fault `RIP`s seen
+  this round places both inside `js_free_value_rt` -- QuickJS-ng's own
+  internal reference-counted value-freeing function, performing a
+  doubly-linked-list unlink, the same family of internal GC/refcount
+  bookkeeping as the previously-found `free_var_ref`/
+  `remove_gc_object()` crash site, just a different nearby function.
+  This is additional evidence the bug is a heap-layout-dependent
+  corruption inside QuickJS-ng's object-list bookkeeping that can
+  surface at more than one internal call site, not something specific
+  to `free_var_ref` alone -- **not re-investigated further**, per the
+  user's explicit decision to stop chasing this bug and move on to
+  other follow-ups; recorded here only as a new data point for whoever
+  eventually resumes that investigation. Confirms this crash is
+  unrelated to the DOM-mutation code added this round (`iana.org`,
+  whose scripts never call `createElement`/`appendChild`, saw zero
+  crashes across its own regression runs).
+- Static `examples/lexbor/browser/browser.c` test -- the original five
+  scripts' output unchanged; the new 6th script's output shown above.
 
 ## Stack-depth crash investigation (partial progress, not fully fixed)
 

@@ -321,11 +321,96 @@ static JSValue element_get_className(JSContext *ctx, JSValueConst this_val)
 	return JS_NewStringLen(ctx, (const char *)value, len);
 }
 
+// appendChild(child) is a real DOM mutation: it validates its argument
+// the way querySelector() already validates a selector string (throws
+// a real TypeError on misuse rather than silently no-op'ing), unlike
+// getAttribute()/setAttribute() below which stay permissive on missing
+// args to match this file's existing soft-fail convention for read
+// accessors. lxb_dom_node_append_child() is lexbor's spec-shaped
+// Node.appendChild() (see its own header comment) -- it validates the
+// insertion itself, not just lxb_dom_node_insert_child()'s raw splice.
+static JSValue element_appendChild(JSContext *ctx, JSValueConst this_val,
+				    int argc, JSValueConst *argv)
+{
+	lxb_dom_node_t *parent = JS_GetOpaque(this_val, element_class_id);
+	if (!parent)
+		return JS_ThrowTypeError(ctx, "appendChild called on a null Element");
+
+	if (argc < 1)
+		return JS_ThrowTypeError(ctx, "appendChild requires an argument");
+
+	lxb_dom_node_t *child = JS_GetOpaque(argv[0], element_class_id);
+	if (!child)
+		return JS_ThrowTypeError(ctx, "appendChild argument must be an Element");
+
+	lxb_dom_exception_code_t code = lxb_dom_node_append_child(parent, child);
+	if (code != LXB_DOM_EXCEPTION_OK)
+		return JS_ThrowInternalError(ctx, "appendChild failed (DOM exception %d)", (int)code);
+
+	// Real Node.appendChild() returns the appended node.
+	return JS_DupValue(ctx, argv[0]);
+}
+
+// setAttribute(name, value) -- lxb_dom_element_set_attribute() creates
+// the attribute if absent or replaces its value if present, matching
+// real DOM Element.setAttribute() in one call (no separate "does this
+// attribute exist" check needed, unlike some other DOM APIs).
+static JSValue element_setAttribute(JSContext *ctx, JSValueConst this_val,
+				     int argc, JSValueConst *argv)
+{
+	lxb_dom_node_t *node = JS_GetOpaque(this_val, element_class_id);
+	if (!node || argc < 2)
+		return JS_UNDEFINED;
+
+	const char *name = JS_ToCString(ctx, argv[0]);
+	if (!name)
+		return JS_EXCEPTION;
+
+	const char *value = JS_ToCString(ctx, argv[1]);
+	if (!value) {
+		JS_FreeCString(ctx, name);
+		return JS_EXCEPTION;
+	}
+
+	lxb_dom_element_set_attribute(lxb_dom_interface_element(node),
+		(const lxb_char_t *)name, strlen(name),
+		(const lxb_char_t *)value, strlen(value));
+
+	JS_FreeCString(ctx, name);
+	JS_FreeCString(ctx, value);
+
+	return JS_UNDEFINED;
+}
+
+// remove() -- the modern, argument-less ChildNode.remove(). lexbor's
+// lxb_dom_node_remove() already tolerates a node with no parent (same
+// as a real detached node's .remove() being a harmless no-op), so no
+// extra guard is needed beyond the usual null-opaque check.
+// Node.removeChild(child) (the older, two-party, exception-throwing
+// form) is deliberately not added in this pass -- it needs real
+// DOM-exception-code translation for "child is not actually a child of
+// this node", not just a straight lexbor call, unlike the three
+// mutations above.
+static JSValue element_remove(JSContext *ctx, JSValueConst this_val,
+			       int argc, JSValueConst *argv)
+{
+	(void)ctx;
+	(void)argc;
+	(void)argv;
+	lxb_dom_node_t *node = JS_GetOpaque(this_val, element_class_id);
+	if (node)
+		lxb_dom_node_remove(node);
+	return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry element_proto_funcs[] = {
 	JS_CGETSET_DEF("textContent", element_get_textContent, NULL),
 	JS_CGETSET_DEF("tagName", element_get_tagName, NULL),
 	JS_CGETSET_DEF("className", element_get_className, NULL),
 	JS_CFUNC_DEF("getAttribute", 1, element_getAttribute),
+	JS_CFUNC_DEF("appendChild", 1, element_appendChild),
+	JS_CFUNC_DEF("setAttribute", 2, element_setAttribute),
+	JS_CFUNC_DEF("remove", 0, element_remove),
 };
 
 static void register_element_class(JSRuntime *rt, JSContext *ctx)
@@ -442,8 +527,36 @@ static JSValue document_get_head(JSContext *ctx, JSValueConst this_val)
 	return make_element(ctx, lxb_dom_interface_node(el));
 }
 
+// createElement(tagName) -- see browser.c's matching comment for the
+// full rationale (HTML interface-table lookup via
+// lxb_html_document_create_element(), and why the created-but-not-yet-
+// appended element is still safe to leave un-freed: it's allocated
+// from g_document's own long-lived mraw arena, same as every parsed
+// node, confirmed by reading lexbor's own source).
+static JSValue document_createElement(JSContext *ctx, JSValueConst this_val,
+				       int argc, JSValueConst *argv)
+{
+	(void)this_val;
+	if (argc < 1)
+		return JS_ThrowTypeError(ctx, "createElement requires a tag name");
+
+	const char *name = JS_ToCString(ctx, argv[0]);
+	if (!name)
+		return JS_EXCEPTION;
+
+	lxb_html_element_t *el = lxb_html_document_create_element(g_document,
+		(const lxb_char_t *)name, strlen(name), NULL);
+	JS_FreeCString(ctx, name);
+
+	if (!el)
+		return JS_ThrowInternalError(ctx, "createElement failed");
+
+	return make_element(ctx, lxb_dom_interface_node(el));
+}
+
 static const JSCFunctionListEntry document_props[] = {
 	JS_CFUNC_DEF("querySelector", 1, document_querySelector),
+	JS_CFUNC_DEF("createElement", 1, document_createElement),
 	JS_CGETSET_DEF("documentElement", document_get_documentElement, NULL),
 	JS_CGETSET_DEF("body", document_get_body, NULL),
 	JS_CGETSET_DEF("head", document_get_head, NULL),

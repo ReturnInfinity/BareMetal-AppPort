@@ -723,6 +723,27 @@ account of why this works and everything it took.
   along the way (a `grep "Exception"` poll loop matching the substring
   inside a normal caught-JS-exception print line, not an actual kernel
   crash -- fixed before trusting the results above).
+- **Fixed:** the "DOM mutation" gap above. `document.createElement`/
+  `Element.appendChild`/`.setAttribute`/`.remove` are now bound in both
+  `browser.c`/`browser_fetch.c` (`Node.removeChild`'s two-party,
+  exception-throwing form deliberately left out -- needs real DOM-
+  exception-code translation, not just a straight lexbor call).
+  Verified created elements are safe to leave un-freed by tracing
+  lexbor's own source: they allocate from the document's long-lived
+  `mraw` arena, same as every parsed node, not assumed. Hermetic
+  round-trip test added to `browser.c`'s static fixture (create ->
+  setAttribute -> appendChild -> a fresh querySelector() finds it for
+  real) -- boot-verified. Regression sweep found real forward progress
+  on `httpbin.org` (Swagger UI's bundle now fails one property deeper,
+  `cssFloat` instead of a bare `not a function`) and also re-surfaced
+  the already-documented, already-parked intermittent crash from the
+  "Stack-depth crash investigation" entries above, at a new fault site
+  this time (`js_free_value_rt`, same QuickJS-ng internal GC/refcount-
+  list family as `free_var_ref`) -- not re-investigated further per the
+  user's explicit decision, and confirmed unrelated to the DOM-mutation
+  code itself (`iana.org`, whose scripts never call `createElement`/
+  `appendChild`, had zero crashes across its own regression runs). See
+  `BROWSER.md`'s "DOM mutation" section for exact boot logs.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 
