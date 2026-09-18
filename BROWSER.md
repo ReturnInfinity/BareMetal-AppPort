@@ -1244,6 +1244,86 @@ required to keep reproducing, to find out whether this is really about
 total code size/module count or something specific to a particular
 piece of vendored code within the bundle.
 
+### Bisection result: it's total size/module count, not js-yaml specifically
+
+Followed the concrete next step above. Methodology, run on the host
+(node, not the VM, for speed -- this is source-level bisection, not
+something that needs BareMetal's own runtime):
+
+1. Fetched the real bundle (`https://httpbin.org/flasgger_static/
+   swagger-ui-bundle.js`, confirmed 1,428,809 bytes) to a local file.
+2. It's webpack output: a single top-level array of 1,167 module
+   functions (indices 0-1166), invoked from a real entry at
+   `n(n.s=1166)`. Confirmed via a runtime probe (`Array.isArray(e)`,
+   `Object.keys(e).length`), not assumed from the minified text.
+3. Patched the bundle's own `__webpack_require__` (`n(r)`) to record
+   every module id's exact source text (`e[r].toString()` -- V8
+   returns byte-perfect original source for a real function, unlike a
+   hand-rolled text/brace scanner, which was tried first and broke on
+   a regex literal's stray bracket characters before being abandoned
+   for this approach) the moment it's actually invoked. Ran the
+   patched bundle under plain Node with minimal `window`/`document`/
+   `navigator` stubs matching this project's own binding surface.
+   **553 of the 1,167 modules were actually invoked** before hitting
+   the same real `TypeError: Cannot read properties of undefined
+   (reading 'cssFloat')` this project's own VM boots already show --
+   confirming the stub environment faithfully reproduces the real
+   failure point, not a different one.
+4. Reconstructed a new, much smaller file: the exact same webpack
+   runtime helpers (`n`/`n.m`/`n.c`/`n.i`/`n.d`/`n.r`/`n.n`/`n.o`/
+   `n.p`, hand-copied from the real bundle's own prelude -- an earlier
+   attempt at this step used a slightly incomplete helper set, missing
+   `n.i`, and was caught by a fidelity check before trusting it, see
+   below), the same 1,167-slot array, but with only the 553 *actually-
+   invoked* modules keeping their real source and the other 614
+   replaced with a one-line stub (`function(){}`). Result: 535,694
+   bytes -- **37% of the original size**, containing the exact same
+   code that actually runs, nothing more.
+5. **Fidelity check, not assumed:** ran the reconstructed file under
+   the same Node harness. It threw the exact same
+   `Cannot read properties of undefined (reading 'cssFloat')` -- proof
+   the pruned file is behaviorally identical to the original for every
+   line of code that actually executes.
+6. Served the pruned file from a local `python3 -m http.server` bound
+   to the host's bridge IP (`172.19.0.1`, reachable from the guest VM
+   the same way every other external fetch in this project already
+   is), and pointed a copy of `browser_fetch_bundletest.c` at it via
+   `<script src="http://172.19.0.1:8899/pruned-bundle.js">` instead of
+   the real httpbin.org URL -- no other code changes, since external-
+   script fetching already handles any URL uniformly.
+7. **Result: 15/15 clean boots against the pruned (536KB) bundle. Zero
+   leaks, zero crashes, zero assertion failures.**
+8. **Control, run immediately after in the same environment/build**
+   (same `.app`, `BUNDLE_URL` pointed back at the real
+   `https://httpbin.org/...` file): **3/10 boots crashed** with the
+   same `Assertion failed: list_empty(&rt->gc_obj_list)` signature --
+   confirming the bug is still very much present and the pruned
+   bundle's clean result isn't an environment fluke.
+
+**Conclusion:** the crash requires the real bundle's full size/module
+count (1,167 modules, ~1.4MB), not the specific 553 modules that
+actually execute (which include the js-yaml code whose `Schema`
+singletons showed up in the earlier leak dump). This means the
+earlier leak-dump identification of js-yaml was very likely a red
+herring in terms of *causation* -- real objects that were genuinely
+leaked, but not necessarily what *caused* the corruption. The trigger
+looks structural: something about QuickJS-ng parsing/compiling a
+single script this large (a ~1.4MB literal containing over a thousand
+function bodies, most never called) into bytecode, independent of what
+that code actually does at runtime.
+
+**Not narrowed further within this round's budget.** A natural next
+step, not attempted: binary-search the size between 536KB (clean) and
+1.4MB (crashes) to find whether there's a sharp threshold or a smoothly
+increasing probability, which would help distinguish "a hard size/
+count limit somewhere in QuickJS-ng's parser" from "a probabilistic
+heap-layout-dependent bug that's simply more likely to manifest in a
+bigger script." The pruned-bundle construction script (Node, ad hoc,
+not committed -- the generated 536KB file itself was also not
+committed, being a large derived artifact easy to regenerate from this
+recipe) would need to be re-run with a partial subset of the 614 stub
+slots restored to real content to test intermediate sizes.
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run

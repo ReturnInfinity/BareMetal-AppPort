@@ -836,10 +836,20 @@ account of why this works and everything it took.
   entirely (almost certainly a corrupted function pointer/return
   address). This is real, severe QuickJS-ng heap/GC corruption
   triggered by this specific large real bundle -- not this project's
-  DOM binding code (none of the three fault sites touch it). Still not
-  root-caused or fixed; see `BROWSER.md`'s newest section for the full
-  writeup and the concrete next step (bisect the bundle itself now that
-  a fast, reliable repro exists).
+  DOM binding code (none of the three fault sites touch it).
+- **Bisection result: the trigger is the bundle's total size/module
+  count (1,167 modules, ~1.4MB), not the js-yaml code path the earlier
+  leak dump pointed at.** A reconstructed 536KB file (37% of the
+  original) containing only the 553 modules actually invoked, verified
+  behaviorally identical to the real bundle (same `cssFloat` `TypeError`
+  under a Node harness), had **zero crashes in 15 boots** -- while a
+  same-session, same-build control against the real full bundle still
+  crashed 3/10, ruling out an environment fluke. The earlier js-yaml
+  `Schema`-singleton leak was real but very likely a correlated
+  symptom, not the cause. Still not root-caused or fixed at the
+  QuickJS-ng-internals level; see `BROWSER.md`'s "Bisection result"
+  section for the full methodology and the un-attempted next step
+  (binary-search the size threshold between 536KB and 1.4MB).
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 
