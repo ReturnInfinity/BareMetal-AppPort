@@ -26,6 +26,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-rust.sh"
 "$SCRIPT_DIR/scripts/get-zig.sh"
 "$SCRIPT_DIR/scripts/get-quickjs.sh"
+"$SCRIPT_DIR/scripts/get-lexbor.sh"
 
 BUILD_DIR="build"
 
@@ -57,6 +58,9 @@ LWEXT4_INC="$LWEXT4_DIR/include"
 LWEXT4_PORT="port/lwext4_port"
 
 QUICKJS_DIR="$BUILD_DIR/quickjs-ng-0.16.2"
+
+LEXBOR_DIR="$BUILD_DIR/lexbor-3.0.0"
+LEXBOR_SRC="$LEXBOR_DIR/source"
 
 PYTHON_DIR="$BUILD_DIR/Python-3.14.7"
 PYTHON_HOST_BUILD="$BUILD_DIR/host-python-build"
@@ -155,6 +159,24 @@ SODIUM_CFLAGS="$CFLAGS -DSODIUM_STATIC -DCONFIGURED=1 -I $SODIUM_INC -I $SODIUM_
 # using a header the file already carries as its own fallback for old
 # GCC versions.
 QUICKJS_CFLAGS="$CFLAGS -D_GNU_SOURCE -DGCC_BUILTIN_ATOMICS"
+
+# lexbor's real build (CMake, bypassed here like every other library
+# above) globs every *.c file under each module directory it's told to
+# build (source/lexbor/<module>/, see its own GET_MODULE_RESURSES macro)
+# -- no curated per-file list to keep in sync, same posture as mbedTLS/
+# curl/lwext4 above, just one glob per module instead of one glob for
+# the whole library. -DLEXBOR_STATIC matches SODIUM_STATIC above: makes
+# def.h's LXB_API macro expand to nothing instead of
+# __attribute__((visibility("default"))) -- harmless either way on this
+# non-Windows, one-flat-static-binary target, but this keeps it
+# consistent with how every other vendored library here is told "no
+# shared library, no export decorations needed".
+#
+# -I $LEXBOR_SRC (not .../source/lexbor) matches lexbor's own
+# CMakeLists.txt include_directories() call: every file quote-includes
+# its own headers as "lexbor/core/mraw.h" etc, relative to source/, not
+# source/lexbor/.
+LEXBOR_CFLAGS="$CFLAGS -DLEXBOR_STATIC -I $LEXBOR_SRC"
 
 # lwext4 headers pull in musl's the same way, plus lwext4's own
 # include/ tree. -DCONFIG_USE_DEFAULT_CFG=0 makes lwext4's own
@@ -322,6 +344,77 @@ echo "- Building quickjs"
 for src in dtoa libregexp libunicode quickjs; do
 	obj="$BUILD_DIR/quickjs_$src.o"
 	gcc $QUICKJS_CFLAGS -o "$obj" "$QUICKJS_DIR/$src.c"
+done
+
+# lexbor: step one of the DOM/HTML/CSS half of the headless-browser
+# effort (see LEXBOR.md) -- HTML5 parsing, a DOM tree, and CSS-selector
+# matching (querySelector-style lookups), no fetch/network of its own
+# (that's this port's own curl, wired up separately). Only the module
+# directories this scope actually needs get built -- core (base
+# utilities: memory arenas, hash tables, its own dtoa/strtod, ...), tag/
+# ns (element tag name/namespace tables the DOM needs), dom (the tree
+# itself), html (the HTML5 tokenizer/tree-construction parser), css/
+# selectors (parsing and matching CSS selectors against the DOM).
+# Explicitly left out for now, each independently confirmed (by
+# grepping the modules above for cross-references) to be needed by
+# *none* of them, not just "probably fine to skip": encoding (real-
+# world <meta charset>/BOM detection -- this scope only feeds it
+# already-decoded UTF-8 strings), url (relative-URL resolution -- no
+# fetch layer exists yet to need it), unicode/punycode (only url's own
+# dependencies), style/engine (CSS cascade/computed-style and a
+# convenience wrapper API -- layout/rendering is out of scope for a
+# DOM+JS headless browser, see QUICKJS.md's framing). Follow-ups, not
+# blockers -- add back whichever of these a real fetched page turns out
+# to need.
+#
+# lexbor/core also ships an OS-abstraction layer under ports/<os>/ for
+# the handful of things it doesn't want to assume about the C library
+# (memory.c: malloc/realloc/calloc/free indirection so an embedder can
+# swap allocators later; perf.c: rdtsc-based timing, compiled to an
+# always-returns-0 stub here since LEXBOR_WITH_PERF is off, this port's
+# CFLAGS never define it; fs.c: opendir/readdir/stat-based directory
+# listing and whole-file reads -- deliberately NOT built here, since
+# grepping core/tag/ns/dom/html/css/selectors for lexbor_fs_ turns up
+# no callers at all outside fs.h's own declaration; it's an app-level
+# convenience helper, not something the parser pipeline itself reaches,
+# and this port's posix_shim.c doesn't implement opendir/readdir
+# anyway). LEXBOR_MODULES below picks "posix" over lexbor's own
+# "windows_nt" alternative the same way lexbor's own CMake does on any
+# non-Windows host.
+#
+# lexbor has no build-time codegen step to worry about (unlike CPython
+# above) -- its tag/entity/CSS-property tables (source/lexbor/{tag,ns,
+# html,css}/*_res.h etc) are pre-generated and checked into the release
+# tarball; utils/lexbor/*.py are maintainer-only regeneration scripts
+# (LEXBOR_BUILD_UTILS, default off) never invoked by this port's build,
+# same story as quickjs-ng's libunicode-table.h above. lexbor also has
+# no thread/mutex source files at all in this release (LEXBOR_WITHOUT_
+# THREADS defaults ON upstream too, "not used now, for the future" per
+# its own CMakeLists.txt comment) -- nothing to disable here, there's
+# simply nothing that spawns a thread to begin with.
+echo "- Building lexbor"
+LEXBOR_MODULES="core tag ns dom html css selectors"
+for module in $LEXBOR_MODULES; do
+	# Recursive, not a flat */*.c glob -- html/dom/css nest real
+	# sources several directories deep (html/tree/insertion_mode/*.c,
+	# html/interfaces/*.c for every element type, css/syntax/*.c,
+	# css/selectors/*.c, ...), matching CMake's own recursive
+	# GET_MODULE_RESURSES. Object names include a counter (module dirs
+	# reuse basenames like "state.c"/"error.c" across subdirectories --
+	# e.g. html/tokenizer/state.c vs css/syntax/state.c -- a bare
+	# basename would silently collide and overwrite one .o with
+	# another) rather than trying to flatten each source's subdirectory
+	# into the name.
+	i=0
+	while IFS= read -r src; do
+		i=$((i + 1))
+		obj="$BUILD_DIR/lexbor_${module}_${i}.o"
+		gcc $LEXBOR_CFLAGS -o "$obj" "$src"
+	done < <(find "$LEXBOR_SRC/lexbor/$module" -name '*.c')
+done
+for src in "$LEXBOR_SRC/lexbor/ports/posix/lexbor/core"/memory.c "$LEXBOR_SRC/lexbor/ports/posix/lexbor/core"/perf.c; do
+	obj="$BUILD_DIR/lexbor_core_port_$(basename "$src" .c).o"
+	gcc $LEXBOR_CFLAGS -o "$obj" "$src"
 done
 
 # Like mbedTLS/curl above: libsodium's own src/libsodium/Makefile.am
