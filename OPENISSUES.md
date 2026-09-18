@@ -520,6 +520,30 @@ account of why this works and everything it took.
 - **Locale is always "C"/POSIX**, same posture as every other language
   here.
 
+## QuickJS (see `QUICKJS.md`; no `port/quickjs_port/` needed)
+
+- **No `quickjs-libc.c`, by design.** Only the four core-engine files
+  are built (`quickjs.c`/`libregexp.c`/`libunicode.c`/`dtoa.c`) -- no
+  `js_std_*`/`js_os_*` helpers, no module loader, no `console.log`. An
+  app supplies its own globals via `JS_NewCFunction`.
+- **No custom allocator wired to this port's heap.** Uses quickjs-ng's
+  own default `malloc`/`realloc`/`free`-backed `JSMallocFunctions`
+  (`JS_NewRuntime()`, not `JS_NewRuntime2()`) -- shares the same bump-
+  allocator heap arena every other language's `malloc` already draws
+  from (see "Heap" above), with the same headroom caveats.
+- **No JIT, so no `mprotect`/W^X gap to begin with** -- quickjs-ng is a
+  pure bytecode interpreter; this is a property of the engine, not
+  something this port had to work around.
+- **`Atomics.*` opcodes use raw `__atomic_*()` GCC builtins**
+  (`-DGCC_BUILTIN_ATOMICS`, see `QUICKJS.md`) instead of `<stdatomic.h>`
+  (musl 1.2.6 doesn't ship one) -- compiles and runs fine single-
+  threaded; never exercised from more than one cooperative thread.
+- **MEMSIZE needs bumping well past the 4MiB Firecracker default** to
+  boot at all -- see `QUICKJS.md`'s boot-testing note.
+- **No DOM/HTML/CSS/`fetch`** -- this is just the JS engine. The rest
+  of the headless-browser plan (lexbor for HTML/CSS/DOM, hand-written
+  bindings between the two) hasn't been started.
+
 ## General
 
 - **No dynamic linking, by design** — everything is statically linked
