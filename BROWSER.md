@@ -479,6 +479,72 @@ only DOM/window bindings):
   identical boot output, since its fixture never exercises
   `documentElement`/`body`/`head`/`className`/`addEventListener`.
 
+### Global `Element` constructor
+
+The smaller of the two remaining gaps from the previous round:
+`wikipedia.org`'s external script threw `ReferenceError: Element is
+not defined` (real-world feature-detection code doing `typeof
+Element`/`instanceof Element` against a global that didn't exist).
+Bound identically in both `browser.c` and `browser_fetch.c`:
+
+- `Element` is a real callable function object
+  (`JS_NewCFunction(ctx, element_ctor_call, "Element", 0)`), so
+  `typeof Element === 'function'`, matching a real DOM. Calling it
+  (with or without `new`) throws `TypeError: Illegal constructor` --
+  matching a real browser's behavior (there's no public `Element`
+  constructor; instances only ever come from `document.querySelector`/
+  `.documentElement`/`.body`/`.head`, never `new Element()`).
+  `document.createElement()` remains unbound (see non-goals) so this
+  doesn't create a false impression that construction works some other
+  way.
+- `Element.prototype` is set to the *exact same* prototype object
+  every `Element` wrapper already has as its `[[Prototype]]`
+  (`JS_GetClassProto(ctx, element_class_id)` reads back what
+  `register_element_class()`'s `JS_SetClassProto()` stored), so
+  `instanceof` works via ordinary reference-identity prototype-chain
+  walking -- the same mechanism every real JS engine uses, not a
+  special case.
+
+**Isolated test** (a 5th `<script>` added to `browser.c`'s static
+fixture, before touching a real page): `typeof Element` and
+`document.body instanceof Element`. Boot-verified:
+
+```
+typeof Element=function
+body instanceof Element=true
+```
+
+**Re-tested `https://www.wikipedia.org/`** (the page `Element is not
+defined` came from): that error is gone, replaced by a *new* distinct
+one on the same script -- `ReferenceError: navigator is not defined`
+(the `navigator` global, a different, out-of-scope gap, not chased
+here). The inline script and the other external script still throw
+their own pre-existing `TypeError: not a function` (unrelated,
+unaffected by this change).
+
+**Regression sweep:**
+
+- `https://example.com/` -- identical.
+- `https://www.iana.org/domains/reserved` -- identical to the prior
+  round's baseline (jQuery/`dtable.js` both `not a function`, inline
+  `$ is not defined`).
+- `https://httpbin.org/` -- identical to the prior round's baseline on
+  2 of 3 attempts (Swagger bundle/standalone-preset both
+  `not a function`, jQuery `createElement` of undefined). **One of the
+  three attempts crashed instead**, partway through running the
+  Swagger UI bundle, with `Exception 0x06 (UD)` -- a different fault
+  type than the previously-fixed `#GP`, and at a very low `RIP`
+  (`0x265`) suggestive of jumping into corrupted/incomplete data rather
+  than anything related to the small, fixed `Element` global just
+  added. Retried twice more, both clean and byte-for-byte matching the
+  documented baseline -- not reproducible on demand. Recorded honestly
+  as an observed anomaly while fetching a genuinely large (1.4MB) file
+  over live internet from inside the test VM, not confirmed as caused
+  by this change or root-caused further; worth watching for if it
+  recurs, not chased blind on a single, non-reproducible occurrence.
+- Static `examples/lexbor/browser/browser.c` test -- the original four
+  scripts' output unchanged; the new 5th script's output shown above.
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run
@@ -489,35 +555,41 @@ plain JS, live network fetch included, verified above with
 `browser_fetch.c`.
 
 Far, for anything resembling a real-world page -- now confirmed against
-four actual live sites, iterated on three times (a growable fetch
-buffer, a `window` stub, and external script fetching, the last of
-which also found and fixed a real crash bug along the way -- see
-"External script fetching" above). External-script fetching is real,
-working, WHATWG-correct URL resolution and fetch logic, verified
-fetching and running genuinely large real scripts (jQuery, and Swagger
-UI's 1.4MB bundle) with no crash, on every page tested.
+four actual live sites, iterated on four times (a growable fetch
+buffer, a `window` stub, external script fetching -- which also found
+and fixed a real crash bug along the way, see "External script
+fetching" above -- and DOM properties/`Window` methods/the global
+`Element` constructor). External-script fetching is real, working,
+WHATWG-correct URL resolution and fetch logic, verified fetching and
+running genuinely large real scripts (jQuery, and Swagger UI's 1.4MB
+bundle) with no crash on every deterministic run.
 
 For the DOM+JS binding layer itself, the trend from earlier rounds
-holds all the way through four rounds now (growable buffer, window
-stub, external script fetching, DOM properties/Window methods):
-`httpbin.org`'s `relative-time.js`-class scripts run clean with zero
-exceptions when they don't need anything beyond this scope's DOM
-surface; `$ is not defined` on `iana.org` is resolved at the fetch
-level (jQuery genuinely loads and runs) but still fails, now past
-`documentElement`-class checks and into a *different* `not a function`
-gap; `wikipedia.org`'s inline script no longer fails on
-`className`/`documentElement` at all, progressing to a later, more
-specific `not a function`; every external script on every page now
-fetches and runs (no crash, ever, since the crash fix) to its own
-real, distinct exception. The pattern holds: each round's fix makes
-real pages fail later, for narrower and more specific reasons, never
-the same wall twice. `window.addEventListener`/`removeEventListener`
-no longer throw, closing that specific gap, though `window` still has
-no other method (`matchMedia`, `requestAnimationFrame`, etc.). No
-event handling ever fires (no event loop, by design), no `fetch`/XHR
-from JS, and no `getElementById`/`querySelectorAll`/DOM mutation
-(`document.createElement`, newly surfaced by name via `httpbin.org`'s
-jQuery, is exactly this gap) remain the honest gaps -- each a distinct,
-addable follow-up, not a structural blocker. There is no longer an
-open network-fetch crash, and no longer an open `documentElement`/
-`className`/`addEventListener` gap on this list.
+holds all the way through five rounds now (growable buffer, window
+stub, external script fetching, DOM properties/window stub methods,
+global `Element`): `httpbin.org`'s `relative-time.js`-class scripts run
+clean with zero exceptions when they don't need anything beyond this
+scope's DOM surface; `$ is not defined` on `iana.org` is resolved at
+the fetch level (jQuery genuinely loads and runs) but still fails, now
+past `documentElement`-class checks and into a *different*
+`not a function` gap; `wikipedia.org`'s inline script no longer fails
+on `className`/`documentElement` at all, and its external script no
+longer fails on `Element is not defined`, progressing each time to a
+later, more specific error (`not a function`, then `navigator is not
+defined`); every external script on every page now fetches and runs
+(no crash, ever, since the crash fix -- except one unreproduced,
+uncorrelated anomaly noted above) to its own real, distinct exception.
+The pattern holds: each round's fix makes real pages fail later, for
+narrower and more specific reasons, never the same wall twice.
+`window.addEventListener`/`removeEventListener` no longer throw, and
+neither does referencing the global `Element`, though `window` still
+has no other method (`matchMedia`, `requestAnimationFrame`, etc.) and
+`navigator` doesn't exist at all. No event handling ever fires (no
+event loop, by design), no `fetch`/XHR from JS, and no
+`getElementById`/`querySelectorAll`/DOM mutation (`document.
+createElement`, surfaced by name via `httpbin.org`'s jQuery, is exactly
+this gap) remain the honest gaps -- each a distinct, addable follow-up,
+not a structural blocker. There is no longer an open network-fetch
+crash, no longer an open `documentElement`/`className`/
+`addEventListener`/`Element`-reference gap on this list, and `navigator`
+is a newly-named next candidate alongside DOM mutation.

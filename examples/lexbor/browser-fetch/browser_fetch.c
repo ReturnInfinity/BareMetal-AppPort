@@ -467,6 +467,30 @@ static JSValue window_addEventListener(JSContext *ctx, JSValueConst this_val,
 	return JS_UNDEFINED;
 }
 
+// A real DOM's `Element` is a constructor function -- see browser.c's
+// matching comment for the full rationale (typeof/instanceof, and why
+// `new Element()` throws here too, matching a real browser).
+static JSValue element_ctor_call(JSContext *ctx, JSValueConst this_val,
+				  int argc, JSValueConst *argv)
+{
+	(void)this_val;
+	(void)argc;
+	(void)argv;
+	return JS_ThrowTypeError(ctx, "Illegal constructor");
+}
+
+// Must run after register_element_class() -- see browser.c's matching
+// comment: JS_GetClassProto() reads back the exact prototype object
+// every Element wrapper already has as its [[Prototype]], so
+// `instanceof` matches by reference identity.
+static void register_element_global(JSContext *ctx, JSValue global)
+{
+	JSValue ctor = JS_NewCFunction(ctx, element_ctor_call, "Element", 0);
+	JSValue proto = JS_GetClassProto(ctx, element_class_id);
+	JS_SetPropertyStr(ctx, ctor, "prototype", proto);
+	JS_SetPropertyStr(ctx, global, "Element", ctor);
+}
+
 static JSValue js_console_log(JSContext *ctx, JSValueConst this_val,
 			       int argc, JSValueConst *argv)
 {
@@ -509,6 +533,8 @@ static void setup_globals(JSContext *ctx)
 			   JS_NewCFunction(ctx, window_addEventListener, "addEventListener", 2));
 	JS_SetPropertyStr(ctx, global, "removeEventListener",
 			   JS_NewCFunction(ctx, window_addEventListener, "removeEventListener", 2));
+
+	register_element_global(ctx, global);
 
 	JS_FreeValue(ctx, global);
 }

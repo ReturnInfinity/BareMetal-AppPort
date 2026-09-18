@@ -651,6 +651,22 @@ account of why this works and everything it took.
   `querySelectorAll`/DOM mutation, external-script-triggered
   `document.write`, and any `Window` interface method beyond the two
   event-listener stubs remain open, addable follow-ups.
+- **Fixed:** the `Element is not defined` gap `wikipedia.org` hit above
+  -- a global `Element` constructor function is now bound (`typeof
+  Element === 'function'`, `instanceof Element` works via
+  `JS_GetClassProto()` reusing the exact prototype object every
+  wrapper already has; calling/constructing it throws `TypeError:
+  Illegal constructor`, matching a real browser -- `document.
+  createElement()` remains unbound). Isolated-verified (`typeof
+  Element`/`instanceof Element` in `browser.c`'s static test) before
+  re-testing `wikipedia.org`, where the error is gone, replaced by a
+  new, later `ReferenceError: navigator is not defined` on the same
+  script. Full regression sweep otherwise clean; see `BROWSER.md`'s
+  "Global `Element` constructor" section, including one non-
+  reproducible `Exception 0x06 (UD)` crash observed once on
+  `httpbin.org` (2 of 3 attempts clean and baseline-identical) --
+  recorded honestly, not confirmed as caused by this change or root-
+  caused further.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 

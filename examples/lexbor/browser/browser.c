@@ -283,6 +283,36 @@ static JSValue window_addEventListener(JSContext *ctx, JSValueConst this_val,
 	return JS_UNDEFINED;
 }
 
+// A real DOM's `Element` is a constructor function -- `typeof Element
+// === 'function'`, and `x instanceof Element` walks x's prototype
+// chain looking for `Element.prototype` by reference. `new Element()`
+// itself throws in a real browser too (Element has no public
+// constructor -- you get instances via document.createElement()/
+// querySelector()/etc, never by calling Element directly), so this
+// matches that rather than silently allowing construction of a
+// wrapper with no underlying lxb_dom_node_t.
+static JSValue element_ctor_call(JSContext *ctx, JSValueConst this_val,
+				  int argc, JSValueConst *argv)
+{
+	(void)this_val;
+	(void)argc;
+	(void)argv;
+	return JS_ThrowTypeError(ctx, "Illegal constructor");
+}
+
+// Must run after register_element_class() -- JS_GetClassProto() reads
+// back the exact same prototype object every Element wrapper already
+// has as its [[Prototype]] (set at creation by JS_NewObjectClass()),
+// so `instanceof` finds a match by reference identity, the same
+// OrdinaryHasInstance algorithm every real JS engine uses.
+static void register_element_global(JSContext *ctx, JSValue global)
+{
+	JSValue ctor = JS_NewCFunction(ctx, element_ctor_call, "Element", 0);
+	JSValue proto = JS_GetClassProto(ctx, element_class_id);
+	JS_SetPropertyStr(ctx, ctor, "prototype", proto);
+	JS_SetPropertyStr(ctx, global, "Element", ctor);
+}
+
 static JSValue js_console_log(JSContext *ctx, JSValueConst this_val,
 			       int argc, JSValueConst *argv)
 {
@@ -336,6 +366,8 @@ static void setup_globals(JSContext *ctx)
 			   JS_NewCFunction(ctx, window_addEventListener, "addEventListener", 2));
 	JS_SetPropertyStr(ctx, global, "removeEventListener",
 			   JS_NewCFunction(ctx, window_addEventListener, "removeEventListener", 2));
+
+	register_element_global(ctx, global);
 
 	JS_FreeValue(ctx, global);
 }
@@ -399,7 +431,7 @@ static void run_scripts(JSContext *ctx)
 
 int main(void)
 {
-	// Four <script> tags, in document order, each exercising one thing:
+	// Five <script> tags, in document order, each exercising one thing:
 	// 1) an intentional TypeError, to prove a throwing script doesn't
 	//    abort the rest of the page (its own diagnostic line, then
 	//    execution continues);
@@ -408,7 +440,10 @@ int main(void)
 	//    this phase, not a C-side print of an eval's return value;
 	// 3) .tagName and .getAttribute() on the same element;
 	// 4) a selector with no match, proving querySelector resolves to
-	//    JS `null` rather than throwing or crashing.
+	//    JS `null` rather than throwing or crashing;
+	// 5) typeof Element / document.body instanceof Element -- the
+	//    isolated check for register_element_global() below, before
+	//    trusting it against a real fetched page.
 	static const lxb_char_t html[] =
 		"<html><body>"
 		"<p id=\"msg\" class=\"greeting\">Hello</p>"
@@ -418,6 +453,8 @@ int main(void)
 		"console.log(\"tagName=\" + el.tagName + \" class=\" + el.getAttribute(\"class\"));</script>"
 		"<script>var missing = document.querySelector(\"#nope\"); "
 		"console.log(\"missing is \" + missing);</script>"
+		"<script>console.log(\"typeof Element=\" + typeof Element); "
+		"console.log(\"body instanceof Element=\" + (document.body instanceof Element));</script>"
 		"</body></html>";
 
 	g_document = lxb_html_document_create();
