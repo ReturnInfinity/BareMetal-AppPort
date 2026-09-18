@@ -763,10 +763,34 @@ account of why this works and everything it took.
   ng-internal GC-list consistency check) immediately before the crash
   dump -- sharper evidence than any prior round had (previously only
   raw fault `RIP`s), pointing concretely at a real reference/lifetime
-  leak rather than random corruption. **Not re-investigated further**,
-  per the user's standing decision to stop chasing this bug -- recorded
-  as a new data point. See `BROWSER.md`'s "`getElementById` /
-  `querySelectorAll`" section for exact boot logs.
+  leak rather than random corruption. See `BROWSER.md`'s
+  "`getElementById` / `querySelectorAll`" section for exact boot logs.
+- **Investigated further at the user's explicit request** (new evidence
+  above justified revisiting the earlier "stop chasing it" decision).
+  Enabled quickjs-ng's own leak-dump facility (already compiled into
+  this vendored build via `ENABLE_DUMPS`, just never turned on --
+  `JS_SetDumpFlags(rt, JS_DUMP_LEAKS)` added to `browser_fetch.c`,
+  costs nothing on a clean run, left in deliberately). Reproduced the
+  crash and captured a real object-identity dump for the first time:
+  the leaked objects are `js-yaml`'s module-level `common.js` exports
+  and default `Schema` singletons, bundled inside Swagger UI's real
+  script (`httpbin.org`), each with external refcount 1 surviving a
+  full `JS_RunGC()` cycle-collection pass. Ruled out an undrained
+  Promise/job-queue entry by reading `quickjs.c` directly (`rt->
+  job_list` is fully drained before the leak check runs). Re-audited
+  this project's own newest binding functions by hand -- no ownership
+  mistake found, same conclusion as the prior round, now double-
+  checked rather than just re-asserted. **Still not root-caused to a
+  specific quickjs-ng line or fixed** -- leading hypothesis is an
+  inline-cache/shape-cache slot inside compiled bytecode retaining a
+  reference outside the normal refcounted graph, but this is
+  unconfirmed. Concrete next step identified: a standalone repro
+  running real `js-yaml` source alone against QuickJS (no lexbor DOM)
+  to see if that alone reproduces the same leaked-object signature --
+  not attempted this round. Regression-verified unaffected:
+  `example.com`, `iana.org`, static `browser.c` test. See `BROWSER.md`'s
+  "The leak, identified for real" section for the full writeup and the
+  exact leak dump.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 

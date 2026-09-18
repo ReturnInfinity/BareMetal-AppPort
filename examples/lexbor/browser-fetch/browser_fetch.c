@@ -993,6 +993,19 @@ int main(int argc, char **argv)
 	// --- run phase: bind console/document, run every inline <script> ---
 
 	JSRuntime *rt = JS_NewRuntime();
+	// Diagnostic for the still-open list_empty(&rt->gc_obj_list) crash
+	// (see BROWSER.md's "Stack-depth crash investigation" -- the leak
+	// is real, confirmed, but not yet root-caused). quickjs-ng's leak-
+	// dump code is already compiled in (ENABLE_DUMPS is unconditionally
+	// defined in this vendored quickjs.c), just never turned on at
+	// runtime by default. Enabling it costs nothing on a clean run (the
+	// dump only fires from inside JS_FreeRuntime()'s existing leak
+	// check, which normally finds nothing to print) and turns a bare
+	// fault address into a real object-identity dump (class/properties/
+	// refcount via JS_DumpGCObject) on the rare run that does leak --
+	// left in deliberately for whoever resumes this investigation next,
+	// not a stray debug artifact to clean up.
+	JS_SetDumpFlags(rt, JS_DUMP_LEAKS);
 	JSContext *ctx = JS_NewContext(rt);
 
 	register_element_class(rt, ctx);

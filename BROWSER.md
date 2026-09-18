@@ -935,6 +935,119 @@ verified unaffected throughout this investigation: `example.com`,
 documented baselines), and the static `browser.c` test (untouched by
 this change).
 
+### The leak, identified for real (still not root-caused)
+
+Investigated further at the user's explicit request, after the
+`getElementById`/`querySelectorAll` round's regression sweep produced a
+sharper clue than any prior round: the crash now printed
+`Assertion failed: list_empty(&rt->gc_obj_list)` before the register
+dump -- a real quickjs-ng-internal consistency check, run inside
+`JS_FreeRuntime()` after it has already drained every pending job
+(`rt->job_list`, confirmed by reading quickjs.c: every queued job's
+`argv[]` is freed before this check runs, ruling out an un-drained
+Promise `.then()`/async callback as the mechanism) and run a full cycle
+collection (`JS_RunGC(rt)`). It fires only when real objects are still
+alive with nonzero refcount after all of that -- a genuine leak, not
+this app forgetting to pump an event loop.
+
+**Before assuming this was unfixable/unknowable, the by-hand audit of
+this project's own newest binding functions from the previous round
+was re-verified rather than repeated blind**
+(`document_createElement`/`element_appendChild`/`element_setAttribute`/
+`element_remove`/`query_selector_all`/`qsa_find_cb`/
+`find_by_id_recursive`, plus `register_element_global`'s
+`JS_GetClassProto()` usage): every `JS_NewObjectClass`/`JS_NewArray`/
+`JS_NewCFunction` result is consumed by exactly one ownership-taking
+call (`JS_SetPropertyStr`/`JS_SetPropertyUint32`/a function return),
+`JS_SetPropertyUint32`'s documented "always consumes `val`, success or
+failure" contract means `qsa_find_cb` never leaks even if a set
+silently fails, and `element_appendChild`'s
+`JS_DupValue(ctx, argv[0])` return is exactly balanced by the DOM's own
+child insertion not touching JS refcounts at all (`lxb_dom_node_append_child`
+operates purely on the `lxb_dom_node_t*` tree, never on the `JSValue`
+wrapper). No app-side ownership mistake found here, same as the
+previous round's conclusion -- confirmed again, not just re-asserted.
+
+**What actually cracked it open: quickjs-ng's own leak-dump
+infrastructure was already compiled into this vendored build, just
+never turned on.** `ENABLE_DUMPS` is unconditionally `#define`'d near
+the top of `quickjs.c`, gating a whole family of diagnostic dumps
+(`JS_DUMP_LEAKS` among them) behind a runtime flag
+(`rt->dump_flags`, set via the real, exported `JS_SetDumpFlags()` API)
+that this app simply never called. Added one line --
+`JS_SetDumpFlags(rt, JS_DUMP_LEAKS)` right after `JS_NewRuntime()` in
+`browser_fetch.c` -- costing nothing on a clean run (the dump only
+fires from inside the same leak-check `JS_FreeRuntime()` already runs)
+and left in deliberately, not reverted, for whoever resumes this
+investigation next.
+
+Reproduced on the 2nd of 2 boots against `https://httpbin.org/` (using
+completion-polling instead of a fixed sleep this time -- a first
+attempt at 20 boots with a 5-second fixed sleep produced zero crashes,
+but turned out to be invalid: every run was killed before the page's
+scripts had even finished fetching, let alone reaching teardown).
+**The actual leak dump:**
+
+```
+Uncaught exception (https://httpbin.org/flasgger_static/swagger-ui-bundle.js): TypeError: cannot read property 'cssFloat' of undefined
+Uncaught exception (https://httpbin.org/flasgger_static/lib/jquery.min.js): TypeError: cannot read property 'createElement' of undefined
+Object leaks:
+       ADDRESS REFS SHRF          PROTO      CLASS PROPS
+0xffff800001b15850    1   0* 0xffff8000005990e0     Object { isNothing: [Function ...], isObject: [Function ...], toArray: [Function ...], repeat: [Function ...], isNegativeZero: [Function ...], extend: [Function ...] }
+0xffff800001b15b20    1   0  0xffff800000599130   Function { length: 2, name: "r", prototype: [Object ...] }
+0xffff800001b15cb0    1   0  0xffff800000599130   Function { length: 5, name: "i", prototype: [Object ...] }
+0xffff800001b1ba70    1   0* 0xffff800001b17830     Object { include: [Array ...], implicit: [Array ...], explicit: [Array ...], compiledImplicit: [Array ...], compiledExplicit: [Array ...], compiledTypeMap: [Object ...] }
+0xffff800001b1d4d0    1   0* 0xffff800001b17830     Object { include: [Array ...], implicit: [Array ...], explicit: [Array ...], compiledImplicit: [Array ...], compiledExplicit: [Array ...], compiledTypeMap: [Object ...] }
+Assertion failed: list_empty(&rt->gc_obj_list) (build/quickjs-ng-0.16.2/quickjs.c: JS_FreeRuntime: 2704)
+```
+
+**Identifying the leaked objects:** the property shapes are
+unmistakable. `{ isNothing, isObject, toArray, repeat, isNegativeZero,
+extend }` is `js-yaml`'s `lib/common.js` module exports verbatim; the
+two `include`/`implicit`/`explicit`/`compiledImplicit`/
+`compiledExplicit`/`compiledTypeMap` objects are `js-yaml`'s internal
+`Schema` instances (its default schema singletons); the two anonymous
+`r`/`i` functions are minified constructors from the same module.
+Swagger UI's real bundle vendors `js-yaml` internally to parse
+OpenAPI/Swagger specs written in YAML -- these are legitimate module-
+level singleton objects the bundle's own code creates while loading,
+before the script throws. Each shows exactly 5 external references
+total across the whole dump, refcount 1 each, surviving a full
+`JS_RunGC()` cycle-collection pass intact.
+
+**Ruled out by reading quickjs.c directly, not assumed:** an
+undrained Promise/async job queue entry (`rt->job_list` is fully
+drained -- every entry's `argv[]` freed -- *before* `JS_RunGC()` and
+the leak check run, so a `.then()` callback closure would already be
+gone by this point, not a candidate).
+
+**Not root-caused further this round.** What's left as the honest
+remaining hypothesis: something in quickjs-ng's own bytecode-execution
+machinery (most plausibly an inline-cache or shape-cache slot embedded
+in compiled function bytecode, which lives outside the normal
+refcounted object graph the cycle collector walks) retains a reference
+to these specific module-singleton objects after the script that
+created them stops executing, independent of whether `window`/
+`document` or anything in this project's own binding layer still
+points at them. This is consistent with, but does not prove, a genuine
+quickjs-ng-internal bug rather than an application-level one -- the
+previous round's four clean isolated repros (network alone, `url`
+module alone, real large JS against fresh *and* shared contexts) never
+included a script that actually creates several singleton objects with
+this exact shape (a schema/registry pattern with cross-referencing
+default instances) the way `js-yaml`'s module-load code does, so this
+specific pattern was never actually tested in isolation -- the next
+concrete step for whoever resumes this would be a standalone repro
+running real `js-yaml` source (not just jQuery/lodash, which don't
+have this module-singleton-schema shape) against QuickJS alone, no
+lexbor DOM at all, to determine whether *that alone* -- with no DOM
+binding layer involved -- reproduces the same leaked-object signature.
+
+Regression-verified unaffected: `example.com` and `iana.org` (both
+byte-for-byte/behavior-identical to their documented baselines with
+`JS_DUMP_LEAKS` enabled) and the static `browser.c` test (untouched,
+`JS_SetDumpFlags` was only added to `browser_fetch.c`).
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run
@@ -985,11 +1098,16 @@ loop, by design), and no `fetch`/XHR from JS. What's genuinely
 unresolved is not a missing binding but a bug: **running multiple
 external scripts against one real page can still intermittently crash
 the VM** (see "Stack-depth crash investigation" above) -- narrowed
-significantly across three investigation rounds (a real stack-depth
+significantly across four investigation rounds now (a real stack-depth
 bug found and fixed; the remaining crash traced to specific QuickJS-ng
-internal functions and, most recently, to a `list_empty(&rt->
-gc_obj_list)` assertion failure pointing at a genuine reference leak
-somewhere in the binding layer) but not yet root-caused or fixed.
-Every other binding gap here is a distinct, addable follow-up, not a
-structural blocker; this crash is the one open item that's a real bug
-rather than a scope cut.
+internal functions; a `list_empty(&rt->gc_obj_list)` assertion failure
+pointing at a genuine reference leak; and, most recently, the exact
+leaked objects identified by name -- `js-yaml`'s module-level schema
+singletons, bundled inside Swagger UI's real script -- via quickjs-ng's
+own already-compiled-in leak-dump facility, turned on for the first
+time with one line). Still not root-caused to a specific quickjs-ng
+line or fixed -- see "The leak, identified for real" above for the
+concrete next step (a standalone `js-yaml`-only repro) whoever resumes
+this should try first. Every other binding gap here is a distinct,
+addable follow-up, not a structural blocker; this crash is the one
+open item that's a real bug rather than a scope cut.
