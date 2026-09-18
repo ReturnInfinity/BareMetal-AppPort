@@ -1,0 +1,143 @@
+# Headless browser: the DOM<->QuickJS binding layer
+
+This is step three -- the one that actually makes "QuickJS + lexbor" a
+browser instead of two separately-working libraries (see `QUICKJS.md`
+for the JS engine, `LEXBOR.md` for the HTML/CSS/DOM parser). There is
+no upstream to vendor here: this is hand-written glue against QuickJS's
+embedding C API (`JS_NewClassID`/`JS_NewClass`/`JS_CGETSET_DEF`) and
+lexbor's DOM API, the same way a small C `jsdom` would be built.
+
+## What's bound
+
+- **`console.log(...args)`** -- joins every argument's `JS_ToCString`
+  with a space and prints via this port's normal `printf`/
+  `posix_shim.c` stdout path. Without this, JS code has no way to
+  produce its own output -- `QUICKJS.md`'s example only ever printed a
+  C-side `JS_ToCString` of an `JS_Eval` call's *return value*, never
+  had JS itself call out. This is the first example where JS output
+  reaches the console on its own.
+- **`document.querySelector(selector)`** -- parses `selector` with
+  lexbor's CSS parser and runs `lxb_selectors_find()` against the
+  parsed document's root (same API `LEXBOR.md`'s examples already
+  use), keeping only the first match (lexbor's selector-find API has
+  no early-stop signal, so every match is still walked, matching how
+  every existing example here already handles this -- see the
+  `qs_find_cb` comment in `browser.c`). Returns an `Element` wrapper
+  object, or JS `null` if nothing matched -- deliberately `null`, not
+  `undefined`, matching real DOM `querySelector()` semantics. An
+  invalid selector string throws a real `TypeError` rather than
+  silently returning `null`.
+- **`Element.textContent`** (getter) -- `lxb_dom_node_text_content()`,
+  the same descendant-text-concatenation helper a real DOM's
+  `textContent` implements.
+- **`Element.tagName`** (getter) -- `lxb_dom_element_qualified_name_upper()`,
+  matching real DOM `tagName`'s uppercase convention (not
+  `lxb_dom_element_qualified_name()`'s as-parsed case).
+- **`Element.getAttribute(name)`** -- `lxb_dom_element_get_attribute()`;
+  returns `null` when the attribute is absent, same as the real DOM
+  method.
+- **Inline `<script>` execution** -- after parsing an HTML document,
+  every `<script>` element without a `src` attribute is found (again
+  via `lxb_selectors_find()`, query `"script"`) in document order, its
+  text content extracted via the same `lxb_dom_node_text_content()`
+  helper `Element.textContent` uses, and `JS_Eval`'d against a context
+  that already has `console`/`document` bound. `<script src="...">`
+  elements are skipped outright -- external script fetching is a
+  follow-up (see "Not yet done" below), not silently pretended to
+  work.
+- **Exception reporting** -- a script that throws prints
+  `Uncaught exception: <message>` via the same stdout path and
+  execution moves on to the next `<script>` tag, matching how a real
+  browser keeps loading the rest of the page after one failing script
+  block, rather than aborting the whole run.
+
+An `Element` wrapper's opaque pointer is the raw `lxb_dom_node_t*` it
+wraps; its finalizer is a no-op because the `lxb_html_document_t`
+itself owns every node's lifetime in this single-document, run-to-
+completion design -- there is nothing for QuickJS's GC to free when an
+`Element` object is collected.
+
+## Explicit non-goals / follow-ups
+
+Kept deliberately small for a first pass -- each of these is a real,
+addable follow-up, not a discovered blocker:
+
+- **`getElementById`/`querySelectorAll`** -- `querySelector` (single
+  result) covers the binding-layer plumbing; both would reuse the same
+  `lxb_selectors_find()` call, just with a different callback
+  (collect-all instead of keep-first) or a direct `id` attribute
+  lookup instead of a full selector parse.
+- **DOM mutation** -- no `createElement`/`appendChild`/`setAttribute`/
+  `remove` exposed to JS. lexbor's DOM API supports all of this; none
+  of it is wired up yet.
+- **`<script src="...">` (external scripts)** -- detected and skipped,
+  not fetched. Wiring this in means threading a base URL through for
+  relative `src` resolution, which needs lexbor's `url` module (not
+  built -- see `LEXBOR.md`'s "What's vendored"), plus routing the
+  fetch through the same `libcurl` pattern `examples/lexbor/fetch/
+  fetch.c` already established.
+- **No event loop, no `setTimeout`/`setInterval`, no `fetch()`/XHR
+  exposed to JS.** This is synchronous load-and-run only: parse once,
+  run every inline `<script>` once, exit. A real page's `<script>`
+  that expects any of `window`, event listeners, or async APIs will
+  simply throw a `ReferenceError`/`TypeError` on first use -- expected
+  under this scope, not a bug to chase.
+- **No CSS cascade/computed style/layout, ever** -- this stays a
+  DOM+JS headless browser, not a pixel-rendering one (see `QUICKJS.md`/
+  `LEXBOR.md`'s framing).
+
+## Boot-testing note: MEMSIZE
+
+Same story as `QUICKJS.md`/`LEXBOR.md`/`PYTHON.md`: needed
+`BareMetal-Firecracker`'s `baremetal.sh` `MEMSIZE` bumped from its
+4MiB default (32MiB was used here) to boot at all -- both engines'
+compiled code/tables plus this example's own DOM live in the same flat
+binary. Bumped, boot-tested, then reverted -- not a permanent change to
+that repo.
+
+## Example
+
+`examples/lexbor/browser/browser.c` parses a small static HTML string
+(no network -- kept hermetic, see `LEXBOR.md`'s `fetch.c` for the
+curl+lexbor pipeline this would combine with for a real fetched page)
+containing four `<script>` tags, each exercising one thing:
+
+1. `null.foo;` -- an intentional `TypeError`, proving a throwing
+   script doesn't abort the rest of the page.
+2. `console.log("DOM says: " + document.querySelector("#msg").textContent)`
+   -- the actual point of this phase: JS code reading the DOM and
+   printing on its own, not a C-side print of an eval's return value.
+3. `.tagName`/`.getAttribute("class")` on the same element.
+4. `document.querySelector("#nope")` -- proves a non-matching selector
+   resolves to JS `null` rather than throwing or crashing.
+
+Verified booting for real through the actual `build-app.sh` /
+`BareMetal-Firecracker` pipeline, first attempt:
+
+```
+Uncaught exception: TypeError: cannot read property 'foo' of null
+DOM says: Hello
+tagName=P class=greeting
+missing is null
+```
+
+## Honest assessment: how close is this to "a minimal headless browser"?
+
+Close, for toy/simple pages: fetch (curl, already proven), parse
+(lexbor, already proven), and now run scripts against a real DOM with
+real output -- the full pipeline exists and works end to end for a page
+whose scripts only touch `document.querySelector`/`textContent`/
+`tagName`/`getAttribute` and plain JS.
+
+Far, for anything resembling a real-world page: no `window` object, no
+event handling (`DOMContentLoaded`, click handlers, anything -- there's
+no event loop to dispatch them from), no `fetch`/XHR so a page can't
+make its own follow-up requests, no external `<script src>` (most real
+sites' actual logic lives there, not inline), and no
+`getElementById`/`querySelectorAll`/DOM mutation, so even simple
+"framework-shaped" pages that build up the DOM via JS after load won't
+do anything observable. Running `examples/lexbor/fetch/fetch.c`'s
+fetched `https://example.com/` page through this binding layer would
+work today (it has no inline `<script>` at all) but is not yet wired up
+as an example -- combining live fetch with live script execution is the
+natural next integration example, not a new capability.

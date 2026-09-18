@@ -540,9 +540,9 @@ account of why this works and everything it took.
   threaded; never exercised from more than one cooperative thread.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default** to
   boot at all -- see `QUICKJS.md`'s boot-testing note.
-- **No DOM/HTML/CSS/`fetch`** -- this is just the JS engine. The rest
-  of the headless-browser plan (lexbor for HTML/CSS/DOM, hand-written
-  bindings between the two) hasn't been started.
+- **No DOM/HTML/CSS/`fetch`** -- this is just the JS engine. See
+  "Headless browser bindings" below for the DOM<->QuickJS glue layer
+  built on top of this and lexbor.
 
 ## Lexbor (see `LEXBOR.md`; no `port/lexbor_port/` needed)
 
@@ -558,10 +558,6 @@ account of why this works and everything it took.
   vendored" for why each was left out and what would need adding first
   (real-world charset detection, relative-URL resolution, CSS cascade/
   layout respectively).
-- **No DOM<->QuickJS bindings yet** -- lexbor and QuickJS are each
-  linked into every app, but nothing connects them: no `document`/
-  `window` JS globals, no `<script>` execution during parsing. Next
-  phase of the headless-browser plan.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default** to
   boot at all -- see `LEXBOR.md`'s boot-testing note, same story as
   Python/QuickJS.
@@ -571,6 +567,27 @@ account of why this works and everything it took.
   against the result. No new networking setup was needed -- DHCP
   fallback and `baremetal.sh`'s existing `tap0` auto-attach already
   covered it. See `LEXBOR.md`'s "Fetch + parse example" section.
+
+## Headless browser bindings (see `BROWSER.md`; no new library port)
+
+- **DOM<->QuickJS binding layer done for a first pass** -- `console.log`,
+  `document.querySelector()`, `Element.textContent`/`.tagName`/
+  `.getAttribute()`, and inline `<script>` execution (in document
+  order, skipping `src`-bearing scripts, with exception reporting that
+  doesn't abort the rest of the page). Hand-written glue, not a vendored
+  library -- see `BROWSER.md`'s "What's bound" for the exact API
+  surface and why each piece works the way it does.
+- **No `getElementById`/`querySelectorAll`/DOM mutation, no external
+  `<script src>` fetching, no event loop/timers/`fetch()` from JS** --
+  all explicit scope cuts for this pass, not blockers; see `BROWSER.md`'s
+  "Explicit non-goals / follow-ups".
+- **Live fetch + live script execution together isn't wired up as an
+  example yet** -- `examples/lexbor/fetch/fetch.c` (fetch->parse) and
+  `examples/lexbor/browser/browser.c` (parse->run-scripts, static HTML
+  only) each work independently; combining them is the natural next
+  integration example.
+- **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
+  same story as every other QuickJS/lexbor example.
 
 ## General
 
