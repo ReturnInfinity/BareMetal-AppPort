@@ -620,27 +620,89 @@ observed. Fixing (or at least sharply reducing) the first crash let
 more runs survive long enough to reach `JS_FreeContext()`, making the
 second, previously-hidden bug more visible -- not introducing it.
 
-**Not fixed, and not chased further.** The `free_var_ref()` crash is
-almost certainly heap/GC corruption inside QuickJS-ng's own runtime,
-most plausibly triggered by this app's pattern of running several
-independent top-level `JS_Eval(..., JS_EVAL_TYPE_GLOBAL)` calls into
-one shared `JSContext` (once per script, inline or external) --
-though this is a hypothesis, not a confirmed root cause. Diagnosing it
-further would mean instrumenting QuickJS-ng's own GC/refcounting
-internals, which is a meaningfully different, deeper kind of
-investigation than anything in this project so far (all previous bugs
-were in this port's own glue code or lexbor usage, not inside a
-vendored engine's own runtime) -- deliberately not attempted blind, to
-avoid a wrong guess corrupting something far more load-bearing than
-this one code path. The two-pass restructuring is kept (it's a real,
-independently-justified stack-safety improvement, and correlates with
-eliminating the original crash mode in testing), but the honest state
-is: **running multiple scripts against one real page can still crash
-the VM**, now via a different, deterministic, partially-diagnosed
-QuickJS-internal bug rather than the original stack-overflow-shaped
-one. Regression-verified unaffected: `example.com`, `iana.org`,
-`wikipedia.org` (all producing identical output to their documented
-baselines), and the static `browser.c` test (untouched by this change).
+**Not fixed. Investigated further at the user's explicit request,
+narrowed down significantly, still not root-caused.** The disassembly
+placed the fault inside QuickJS-ng's `free_var_ref()`, specifically at
+`remove_gc_object()`'s `list_del(&h->link)` -- an intrusive doubly-
+linked-list unlink against `rt->gc_obj_list`, the runtime's single
+shared list of every GC-tracked object. A corrupted neighbor pointer
+there is consistent with either a genuine QuickJS-ng bug, or heap
+corruption from something else entirely that happens to land on a
+`JSGCObjectHeader` in the shared musl heap (QuickJS's allocator, this
+app's own `growable_buf`, and lexbor's `mraw` arena are all just
+`malloc`/`realloc`/`free` underneath, sharing one heap) -- these have
+different implications and different fixes, so which one matters.
+
+Before assuming this was inside QuickJS-ng's own code and out of this
+project's control, this project's own binding-layer code
+(`browser_fetch.c`'s `setup_globals`/`register_element_global`/
+`document_get_documentElement`/`.body`/`.head`/`element_get_className`/
+the `Element` constructor binding, and every `JS_FreeValue`/
+`JS_DupValue`/`JS_SetPropertyStr` ownership-transfer site in the file)
+was audited by hand for a refcount mistake, since this project has
+already found one real bug of exactly this shape
+(`lxb_url_memory_destroy()` above). Nothing found: every `JS_NewCFunction`/
+`JS_NewObject` result is consumed by exactly one `JS_SetPropertyStr` (which
+takes ownership), and `JS_GetClassProto()` (used by the `Element`
+constructor binding) already increments the class prototype's refcount
+internally before handing it to `JS_SetPropertyStr` -- textbook-correct,
+not a suspect.
+
+**Four increasingly faithful standalone repros were built and boot-
+tested, all with zero lexbor HTML/DOM/CSS/selectors involved** (57
+combined boots, no crash in any of them):
+1. Lexbor's `url` module (the newest, least-battle-tested vendored
+   addition, used only by `browser_fetch.c` -- `resolve_script_url()`'s
+   exact `lxb_url_parse()`/`lxb_url_destroy()` pattern) interleaved
+   with trivial QuickJS closures that create real detached var-refs
+   (the exact GC object type `free_var_ref()` operates on), no curl at
+   all: **10/10 clean.**
+2. Real curl/mbedTLS fetches (the exact URLs from the real crash --
+   `httpbin.org`, `iana.org`, jQuery) interleaved with the same trivial
+   closures, one shared `JSContext`, no lexbor `url` module at all:
+   **15/15 clean.**
+3. Real jQuery fetched and `JS_Eval`'d for real (not a synthetic
+   snippet) against a *fresh* `JSRuntime`/`JSContext` created and torn
+   down each iteration: **12/12 clean** (an earlier batch of this same
+   test looked like 12/12 crashes, but that was a test-harness bug --
+   the poll loop's `grep "Exception"` matched the substring inside the
+   app's own printed `js exception: TypeError...` line and killed the
+   VM mid-run, mistaking a normal caught JS exception for a kernel
+   crash dump; fixed to match the actual `Exception 0x` crash-dump
+   format and re-run clean).
+4. The most faithful match yet to `browser_fetch.c`'s real structure:
+   **one shared** `JSRuntime`/`JSContext` (not recreated per script,
+   unlike test 3) with three different real, large, minified scripts
+   (jQuery twice from different CDNs, plus lodash) fetched and
+   `JS_Eval`'d sequentially into it, matching `run_scripts()`'s loop
+   exactly: **20/20 clean.**
+
+**What this rules out, and what it narrows the hypothesis to:** neither
+the `url` module, nor real network I/O, nor running real large
+minified JS against QuickJS -- alone or in combination with each other
+-- reproduces this on their own. The crash appears to require the one
+remaining untested combination: lexbor's actual parsed DOM tree and
+`Element` wrapper `JSValue` objects (holding raw `lxb_dom_node_t*`
+opaque pointers into that tree) coexisting with QuickJS's heap at the
+same time real external scripts run -- i.e., something specific to
+`browser_fetch.c`'s full binding layer, not genuinely inside QuickJS-ng
+in isolation. Building a repro for *that* combination is substantial
+(most of `browser_fetch.c` itself, minus only the `url` module) and
+was not attempted in this pass, given how much ground the four lighter
+repros already covered.
+
+**Not chased further this round.** The two-pass restructuring is kept
+(it's a real, independently-justified stack-safety improvement, and
+correlates with eliminating the original stack-depth crash mode in
+testing), but the honest state is: **running multiple external scripts
+against one real page can still intermittently crash the VM**, via a
+narrowed-down but not fully root-caused bug that most likely lives in
+the DOM<->QuickJS binding layer's interaction with QuickJS's heap, not
+in QuickJS-ng itself, curl, or the `url` module alone. Regression-
+verified unaffected throughout this investigation: `example.com`,
+`iana.org`, `wikipedia.org` (all producing identical output to their
+documented baselines), and the static `browser.c` test (untouched by
+this change).
 
 ## Honest assessment: how close is this to "a minimal headless browser"?
 

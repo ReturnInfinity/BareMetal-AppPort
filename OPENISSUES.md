@@ -698,6 +698,31 @@ account of why this works and everything it took.
   on `example.com`/`iana.org`/`wikipedia.org`/static `browser.c`. See
   `BROWSER.md`'s "Stack-depth crash investigation" section for full
   detail and boot logs.
+- **Investigated further (still not fixed):** the `free_var_ref()`
+  crash above. Audited `browser_fetch.c`'s entire binding layer by hand
+  for a `JSValue` refcount mistake (the same bug shape as the already-
+  fixed `lxb_url_memory_destroy()` bug) -- found nothing; every
+  ownership-transfer site is correctly paired. Built and boot-tested
+  four standalone repros with zero lexbor HTML/DOM/CSS/selectors
+  involved (57 combined boots, no crash in any): lexbor's `url` module
+  + trivial QuickJS closures (10/10 clean), real curl/mbedTLS fetches
+  of the exact crashing URLs + trivial closures (15/15 clean), real
+  jQuery fetched and evaluated against a fresh context each iteration
+  (12/12 clean), and -- the closest match yet to `browser_fetch.c`'s
+  actual structure -- real jQuery/lodash fetched and evaluated
+  sequentially against **one shared** context (20/20 clean). Rules out
+  the `url` module, real network I/O, and running real large minified
+  JS through QuickJS, alone or combined, as sufficient causes on their
+  own. Narrows the hypothesis to something specific to lexbor's actual
+  parsed DOM tree and `Element` wrapper objects coexisting with
+  QuickJS's heap -- not genuinely inside QuickJS-ng in isolation, as
+  the crash site's location had suggested. Building a repro for that
+  full combination (most of `browser_fetch.c` itself) was not attempted
+  this round. See `BROWSER.md`'s "Stack-depth crash investigation"
+  section for the full writeup, including a test-harness bug found
+  along the way (a `grep "Exception"` poll loop matching the substring
+  inside a normal caught-JS-exception print line, not an actual kernel
+  crash -- fixed before trusting the results above).
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 
