@@ -586,13 +586,16 @@ account of why this works and everything it took.
   browser_fetch.c` (new; doesn't modify `fetch.c` or `browser.c`).
   Every real page tried failed, each for a different documented
   reason: no `window` (httpbin.org), a missing global from a correctly-
-  skipped external script (`$`/jQuery, iana.org), and a fixed 32KB
-  fetch buffer silently truncating a larger page mid-document
-  (wikipedia.org, 119KB) -- see `BROWSER.md`'s new section for the
-  exact boot logs. `RESPONSE_BUF_SIZE`'s fixed size (already a `fetch.c`
-  limitation) is now confirmed to also affect script content, not just
-  tag/title queries -- a growable/streaming fetch buffer is a real
-  follow-up for fetching anything beyond small pages.
+  skipped external script (`$`/jQuery, iana.org), and (originally) a
+  fixed 32KB fetch buffer silently truncating a larger page mid-
+  document (wikipedia.org, 119KB) -- see `BROWSER.md`'s new section for
+  the exact boot logs.
+- **Fixed:** the 32KB fetch-buffer cap above. `fetch.c` and
+  `browser_fetch.c` both moved from a fixed `response_buf[32*1024]` to
+  a `realloc`-doubling growable buffer (see `BROWSER.md`'s "Growable
+  fetch buffer" section) -- boot-verified against Wikipedia's full
+  119KB body and a regression check against `example.com`'s default
+  case. No remaining fixed-size cap on fetched response bodies.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 

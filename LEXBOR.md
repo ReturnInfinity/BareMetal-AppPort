@@ -167,11 +167,16 @@ Verified booting for real, twice, through the actual `build-app.sh` /
 
 ```
 status: 200
-body: 559 byte(s) kept (RESPONSE_BUF_SIZE cap)
+body: 559 byte(s)
 
 title: Example Domain
 <a> tag count: 1
 ```
+
+(Originally printed as `body: 559 byte(s) kept (RESPONSE_BUF_SIZE cap)`
+-- the fixed 32KB cap this implied was replaced by a growable buffer
+after it silently truncated a larger page for real; see `BROWSER.md`'s
+"live fetch + live script execution" section.)
 
 ## Not yet done
 

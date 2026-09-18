@@ -150,21 +150,34 @@ against the real web rather than a single cherry-picked success:
   loaded via a skipped `<script src>`, so the global it expects was
   never defined. A different missing-global reason than the `window`
   case, both equally expected under this scope.
-- **`https://www.wikipedia.org/`** -- a genuinely new finding: this
-  page is 119KB, over `RESPONSE_BUF_SIZE` (32KB), so the fetched body
-  hit the same silent-truncation cap `fetch.c` always had (`body:
-  32767 byte(s) kept`). `<title>` still parsed correctly (it's near
-  the top of the document), but the inline `<script>` that ran threw
-  yet another distinct error, `TypeError: cannot read property
-  'className' of undefined`, consistent with running against a
-  DOM/JS environment truncated mid-document. Not a bug in this
-  integration -- `RESPONSE_BUF_SIZE` is a fixed, documented cap
-  `fetch.c` already carried; this is the first example whose behavior
-  under that cap actually depended on more than a `<title>`/tag-count
-  query, so it's the first time the cap's effect on *script* content
-  became visible. A real embedder would need a resizable/streaming
-  buffer instead of a fixed 32KB one for pages this size -- noted as a
-  follow-up, not fixed here.
+- **`https://www.wikipedia.org/`** -- originally found the fixed
+  32KB `RESPONSE_BUF_SIZE` cap silently truncating this 119KB page
+  mid-document, producing a misleading `TypeError` that was really an
+  artifact of the truncation, not a real page failure. Fixed (see
+  "Growable fetch buffer" below): both `fetch.c` and this example now
+  fetch the full `body: 119573 byte(s)` and correctly parse `<title>:
+  Wikipedia` / count 383 `<a>` tags. Re-run against the untruncated
+  document, its scripts now throw *real* errors instead --
+  `TypeError: cannot read property 'className' of undefined` and
+  `ReferenceError: window is not defined` -- the same "no `window`
+  object" non-goal every other real page hit, not a buffer artifact.
+
+### Growable fetch buffer
+
+`fetch.c` and `browser_fetch.c` originally shared a fixed
+`static char response_buf[32 * 1024]` -- found by the Wikipedia case
+above to silently truncate anything bigger, with no error, handing
+lexbor a cut-off document. Both were changed to a `realloc`-doubling
+`struct growable_buf { char *data; size_t len; size_t cap; }` passed
+through `CURLOPT_WRITEDATA` instead of a file-scope global, starting
+at 16KB and doubling as needed. `write_cb()` now follows the standard
+libcurl growable-buffer contract: returning anything other than the
+full byte count on a failed `realloc` tells libcurl to abort the
+transfer (`CURLE_WRITE_ERROR`) rather than silently handing back a
+truncated body the way the fixed-cap version did. Boot-tested against
+Wikipedia's full 119KB body (above) and re-verified `example.com`'s
+default case still prints identically (`body: 559 byte(s)`, `title:
+Example Domain`) as a regression check.
 
 ## Honest assessment: how close is this to "a minimal headless browser"?
 

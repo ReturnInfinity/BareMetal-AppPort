@@ -24,6 +24,7 @@
 // treated as a C string.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -37,7 +38,7 @@
 #include <lexbor/dom/interfaces/element.h>
 
 #define FETCH_URL      "https://example.com/"
-#define RESPONSE_BUF_SIZE (32 * 1024)
+#define RESPONSE_BUF_INITIAL_CAP (16 * 1024)
 #define CA_BUNDLE_PATH "/etc/ssl/cacert.pem"
 
 // See curltest.c's matching declaration for why this is `weak` with a
@@ -45,8 +46,15 @@
 __attribute__((weak)) const unsigned char cacert_pem[1];
 __attribute__((weak)) const unsigned int cacert_pem_len;
 
-static char response_buf[RESPONSE_BUF_SIZE];
-static size_t response_len;
+// Growable, not a fixed RESPONSE_BUF_SIZE cap -- see fetch.c's matching
+// comment: the old fixed 32KiB buffer silently truncated anything
+// bigger, found for real against https://www.wikipedia.org/'s 119KB
+// response (see BROWSER.md's "what actually happened" notes).
+struct growable_buf {
+	char *data;
+	size_t len;
+	size_t cap;
+};
 
 // The DOM root every document.querySelector() call searches -- same
 // file-scope-global, single-document design browser.c uses.
@@ -64,18 +72,27 @@ static void set_ca_bundle(CURL *h)
 	}
 }
 
-// Same overflow contract as fetch.c's write_cb(): always report every
-// byte "written" (never abort the transfer), silently dropping
-// whatever doesn't fit past RESPONSE_BUF_SIZE.
+// Same contract as fetch.c's write_cb(): returning anything other than
+// `n` tells libcurl the write failed and aborts the transfer, the
+// standard growable-buffer write-callback idiom.
 static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
-	(void)userdata;
+	struct growable_buf *buf = userdata;
 	size_t n = size * nmemb;
 
-	size_t room = sizeof(response_buf) - 1 - response_len;
-	size_t copy = n < room ? n : room;
-	memcpy(response_buf + response_len, ptr, copy);
-	response_len += copy;
+	if (buf->len + n + 1 > buf->cap) {
+		size_t new_cap = buf->cap ? buf->cap * 2 : RESPONSE_BUF_INITIAL_CAP;
+		while (new_cap < buf->len + n + 1)
+			new_cap *= 2;
+		char *new_data = realloc(buf->data, new_cap);
+		if (!new_data)
+			return 0;
+		buf->data = new_data;
+		buf->cap = new_cap;
+	}
+
+	memcpy(buf->data + buf->len, ptr, n);
+	buf->len += n;
 
 	return n;
 }
@@ -335,8 +352,11 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	struct growable_buf resp = { 0 };
+
 	curl_easy_setopt(h, CURLOPT_URL, url);
 	curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
+	curl_easy_setopt(h, CURLOPT_WRITEDATA, &resp);
 	curl_easy_setopt(h, CURLOPT_USERAGENT, "BareMetal-browser/1.0");
 	curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
 	set_ca_bundle(h);
@@ -349,26 +369,28 @@ int main(int argc, char **argv)
 		printf("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
 		curl_easy_cleanup(h);
 		curl_global_cleanup();
+		free(resp.data);
 		return 1;
 	}
 
 	long status = 0;
 	curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
 	printf("status: %ld\n", status);
-	printf("body: %zu byte(s) kept (RESPONSE_BUF_SIZE cap)\n\n", response_len);
+	printf("body: %zu byte(s)\n\n", resp.len);
 
 	curl_easy_cleanup(h);
 	curl_global_cleanup();
 
 	// --- parse phase: hand the fetched bytes straight to lexbor ---
-	// response_buf/response_len is length-delimited, not a C string --
-	// passed through with its explicit length, never strlen()'d.
+	// resp.data/resp.len is length-delimited, not a C string -- passed
+	// through with its explicit length, never strlen()'d.
 
 	g_document = lxb_html_document_create();
 	lxb_status_t lstatus = lxb_html_document_parse(g_document,
-		(const lxb_char_t *)response_buf, response_len);
+		(const lxb_char_t *)resp.data, resp.len);
 	if (lstatus != LXB_STATUS_OK) {
 		printf("lxb_html_document_parse failed: %d\n", lstatus);
+		free(resp.data);
 		return 1;
 	}
 
@@ -388,6 +410,7 @@ int main(int argc, char **argv)
 	JS_FreeContext(ctx);
 	JS_FreeRuntime(rt);
 	lxb_html_document_destroy(g_document);
+	free(resp.data);
 
 	return 0;
 }
