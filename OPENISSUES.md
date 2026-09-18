@@ -791,6 +791,20 @@ account of why this works and everything it took.
   `example.com`, `iana.org`, static `browser.c` test. See `BROWSER.md`'s
   "The leak, identified for real" section for the full writeup and the
   exact leak dump.
+- **That concrete next step was carried out** (`examples/quickjs/
+  yamltest/`): three standalone apps running real js-yaml source alone
+  against QuickJS, no lexbor/DOM at all -- a single eval (embedded
+  source), sequential multi-eval on a shared context, and a single
+  eval of curl-fetched (not embedded) source. **63 total boots, zero
+  leaks, zero crashes across all three.** This rules out single- vs.
+  multi-eval structure and embedded- vs. curl-fetched-loading as
+  sufficient on their own, and shifts the hypothesis back toward the
+  DOM binding layer itself (lexbor's DOM tree + `Element`/`document`/
+  `window` C bindings coexisting with QuickJS) being a necessary
+  ingredient, not something in the JS engine alone. Still not fixed;
+  see `BROWSER.md`'s "Standalone js-yaml isolation" section for the
+  full writeup and the untried next combination (a minimal empty-body
+  lexbor document run through the real `run_scripts()` path).
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 

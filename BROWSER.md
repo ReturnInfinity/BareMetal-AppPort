@@ -1048,6 +1048,65 @@ byte-for-byte/behavior-identical to their documented baselines with
 `JS_DUMP_LEAKS` enabled) and the static `browser.c` test (untouched,
 `JS_SetDumpFlags` was only added to `browser_fetch.c`).
 
+### Standalone js-yaml isolation: three variants, zero reproductions
+
+The concrete next step named above -- run real `js-yaml` source alone
+against QuickJS, no lexbor/DOM at all -- was carried out as three
+separate standalone apps under `examples/quickjs/yamltest/`, each
+using the exact same real, unmodified js-yaml 4.1.0 UMD bundle
+(fetched from `https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/
+js-yaml.min.js` -- the same library Swagger UI's real bundle vendors
+internally) and the same `JS_SetDumpFlags(rt, JS_DUMP_LEAKS)` leak
+check:
+
+- **`yamltest.c`** -- a single `JS_Eval()` of the js-yaml source,
+  embedded verbatim as a byte array (`js_yaml_src.h`, generated via
+  `xxd -i` to preserve the exact bytes with no escaping risk). 21 boots
+  (1 initial + a 20-run batch), zero leaks, zero crashes.
+- **`yamltest2.c`** -- three SEQUENTIAL `JS_Eval()` calls against one
+  shared `JSContext` (a trivial script, then the js-yaml bundle, then
+  another trivial script reading back the `jsyaml` global it defined)
+  -- the same structural shape as `run_scripts()`'s real multi-`<script>`
+  execution, still with zero lexbor/DOM. 21 boots, zero leaks, zero
+  crashes.
+- **`yamltest3.c`** -- the same js-yaml source, but loaded via a real
+  `curl_easy_perform()` fetch into a growable buffer (the exact
+  `struct growable_buf`/`write_cb` pattern `fetch.c`/`browser_fetch.c`
+  use) instead of an embedded string constant -- ruling out "network-
+  buffer-loaded content specifically" as a factor, still zero lexbor/
+  DOM. 21 boots (confirmed fetching the real 39,430-byte file each
+  time), zero leaks, zero crashes.
+
+**63 total boots across the three variants, zero reproductions.**
+This rules out, on their own and without lexbor/DOM present:
+single-eval vs. sequential-multi-eval structure, and embedded-string
+vs. curl-fetched-buffer loading. Neither factor named as a candidate
+in the prior round's writeup is sufficient by itself.
+
+**Updated conclusion:** the leak most likely requires the DOM binding
+layer itself -- `Element`/`document`/`window`'s C bindings and the
+`lxb_html_document_t`/lexbor DOM tree coexisting with QuickJS's heap
+-- not just "real js-yaml source" or "multiple sequential evals" or
+"network-loaded content" in isolation. This shifts the remaining
+hypothesis space back toward something in how this project's own
+binding layer interacts with QuickJS's GC when a real DOM is also
+live (an `Element` wrapper object holding a reference the cycle
+collector doesn't walk correctly, or a keep-alive interaction between
+`document_querySelector`/`query_selector_all`'s per-call CSS
+parser/selector objects and whatever `js-yaml`'s bytecode does with
+its own module-scope closures) rather than something in QuickJS's
+JS-execution engine alone. The still-not-attempted next step (out of
+scope for this round, per the standing "one incremental step" limit)
+would be the closest remaining combination: real js-yaml source run
+via `run_scripts()`'s actual code path, with a minimal/empty lexbor
+document present (an `<html><body></body></html>` fixture with no
+other content), to test whether DOM presence alone -- independent of
+Swagger UI's own bundle content/size/complexity -- is what's needed.
+
+Not root-caused further this round either. Committed as diagnostic
+work; no fix applied (none of the three isolated variants gave
+anything to fix -- they were all clean).
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run
