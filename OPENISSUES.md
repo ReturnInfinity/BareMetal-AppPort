@@ -667,6 +667,37 @@ account of why this works and everything it took.
   `httpbin.org` (2 of 3 attempts clean and baseline-identical) --
   recorded honestly, not confirmed as caused by this change or root-
   caused further.
+- **Investigated (not fixed):** the `Exception 0x06 (UD)` anomaly
+  above. Reproduced twice more in 16 boots against `httpbin.org`
+  (`Exception 0x14 (PF)` with `RIP=CR2=0xFFFFFFFFFFFFFFFF`, and the
+  original `UD` at low `RIP`), both mid-script-execution -- consistent
+  with a stack-overflow hypothesis: this port's ring-3 app stack is a
+  fixed, guardless 64KB region sitting directly below the kernel's own
+  ring-0 stack (`BareMetal-Firecracker`'s `sysvar.asm`), and
+  `run_external_script()` was being called from inside
+  `lxb_selectors_find()`'s own DOM-recursion depth, stacking on top of
+  mbedTLS's large handshake frames. Restructured `run_scripts()` in
+  `browser_fetch.c` to a two-pass design (collect `<script>` nodes
+  during the shallow selector callback, run/fetch them afterward from
+  `run_scripts()`'s own shallow frame) to remove that recursion depth
+  from the budget. The original crash mode did not recur in 20 more
+  boots -- but a **different, deterministic** crash appeared instead
+  (`Exception 0x13 (GP)`, identical `RIP` every time, inside QuickJS-
+  ng's own `free_var_ref()` during `JS_FreeContext()` teardown, at a
+  rate of 6/20), happening only after all scripts finish successfully.
+  Since that crash site is called from `main()`'s own frame in both the
+  old and new code, the restructuring can't have caused it -- most
+  likely it's a pre-existing QuickJS-internal heap/GC bug that the
+  original, earlier-occurring crash was simply masking by killing the
+  VM first. Not root-caused further (would require instrumenting
+  QuickJS-ng's own GC/refcounting internals, out of scope for a blind
+  guess) or fixed -- **running multiple scripts against one real page
+  can still crash the VM**, now via this different, partially-diagnosed
+  bug. The two-pass restructuring is kept regardless (a real,
+  independently-justified stack-safety improvement). Regression-clean
+  on `example.com`/`iana.org`/`wikipedia.org`/static `browser.c`. See
+  `BROWSER.md`'s "Stack-depth crash investigation" section for full
+  detail and boot logs.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 

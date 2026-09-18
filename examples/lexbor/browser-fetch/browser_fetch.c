@@ -594,11 +594,40 @@ static void run_external_script(JSContext *ctx, const char *src, size_t src_len)
 	free(buf.data);
 }
 
+// Real, hard limit on this port: a ring-3 app's entire stack is a fixed
+// 64KB region (BareMetal-Firecracker's src/BareMetal/sysvar.asm,
+// os_usr_stack_base, 0x1D0000-0x1DFFFF) sitting with NO guard page
+// directly below the kernel's own 64KB ring-0 stack (os_sys_stack_base,
+// 0x1C0000-0x1CFFFF) -- an overflow past the low end doesn't fault
+// cleanly, it silently corrupts the kernel's own interrupt/syscall
+// stack. Collecting matched <script> nodes here (called from inside
+// lxb_selectors_find()'s own DOM-recursion, whatever depth that is)
+// keeps this callback itself shallow and cheap; the actual fetch/eval
+// work (run in run_scripts() below, after lxb_selectors_find() has
+// returned and unwound) never runs from inside that recursion, so it
+// never has to share the 64KB budget with an unknown, page-structure-
+// dependent amount of selector-matching call depth on top of it -- see
+// "Stack-depth crash (intermittent)" in BROWSER.md for the full
+// diagnosis this fixes.
+#define MAX_SCRIPTS_PER_PAGE 256
+
+struct script_list {
+	lxb_dom_node_t *nodes[MAX_SCRIPTS_PER_PAGE];
+	size_t count;
+};
+
 static lxb_status_t script_find_cb(lxb_dom_node_t *node,
 				    lxb_css_selector_specificity_t spec, void *ctx_ptr)
 {
 	(void)spec;
-	JSContext *ctx = ctx_ptr;
+	struct script_list *list = ctx_ptr;
+	if (list->count < MAX_SCRIPTS_PER_PAGE)
+		list->nodes[list->count++] = node;
+	return LXB_STATUS_OK;
+}
+
+static void run_one_script(JSContext *ctx, lxb_dom_node_t *node)
+{
 	lxb_dom_element_t *el = lxb_dom_interface_element(node);
 
 	size_t src_len = 0;
@@ -606,17 +635,15 @@ static lxb_status_t script_find_cb(lxb_dom_node_t *node,
 		(const lxb_char_t *)"src", 3, &src_len);
 	if (src) {
 		run_external_script(ctx, (const char *)src, src_len);
-		return LXB_STATUS_OK;
+		return;
 	}
 
 	size_t len = 0;
 	lxb_char_t *text = lxb_dom_node_text_content(node, &len);
 	if (!text || len == 0)
-		return LXB_STATUS_OK;
+		return;
 
 	eval_script(ctx, (const char *)text, len, "<script>");
-
-	return LXB_STATUS_OK;
 }
 
 static void run_scripts(JSContext *ctx)
@@ -631,12 +658,24 @@ static void run_scripts(JSContext *ctx)
 	lxb_css_selector_list_t *list =
 		lxb_css_selectors_parse(parser, query, sizeof(query) - 1);
 
+	// Pass 1: collect every <script> node while still inside
+	// lxb_selectors_find()'s own call depth -- script_find_cb does
+	// nothing but an array append, no curl/mbedTLS/QuickJS work.
+	struct script_list scripts = { .count = 0 };
 	lxb_dom_node_t *root = lxb_dom_interface_node(g_document);
-	lxb_selectors_find(selectors, root, list, script_find_cb, ctx);
+	lxb_selectors_find(selectors, root, list, script_find_cb, &scripts);
 
 	lxb_selectors_destroy(selectors, true);
 	lxb_css_parser_destroy(parser, true);
 	lxb_css_selector_list_destroy_memory(list);
+
+	// Pass 2: run each script (in document order -- scripts.nodes[] was
+	// filled in the order lxb_selectors_find() visited them, matching
+	// the tree's own document order) from this function's own shallow
+	// stack frame, after the selector-matching recursion above has
+	// fully unwound.
+	for (size_t i = 0; i < scripts.count; i++)
+		run_one_script(ctx, scripts.nodes[i]);
 }
 
 int main(int argc, char **argv)

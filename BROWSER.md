@@ -545,6 +545,103 @@ unaffected by this change).
 - Static `examples/lexbor/browser/browser.c` test -- the original four
   scripts' output unchanged; the new 5th script's output shown above.
 
+## Stack-depth crash investigation (partial progress, not fully fixed)
+
+The "unreproduced anomaly" noted above (one `Exception 0x06 (UD)` on
+`httpbin.org`, out of three attempts, during the global-`Element`
+regression sweep) was investigated further at the user's request,
+rather than left alone. This turned out to be two separate findings,
+only one of which is resolved.
+
+**Reproduction:** 16 repeated boots against `https://httpbin.org/`
+reproduced the anomaly twice more (2/16, ~12%, roughly consistent with
+the original 1-in-3 sample once averaged over a larger run) -- once as
+`Exception 0x14 (PF)` with `RIP=CR2=0xFFFFFFFFFFFFFFFF` (an invalid,
+all-ones instruction address), once as the original `Exception 0x06
+(UD)` at a very low `RIP` (`0x215`, essentially matching the original
+report's `0x265`). Both crashes happened **mid-script-execution** --
+after only the *first* of `httpbin.org`'s three external scripts had
+printed its exception, never reaching the second or third.
+
+**Hypothesis tested:** this port's ring-3 app stack is a fixed 64KB
+region with no guard page (`BareMetal-Firecracker`'s
+`src/BareMetal/sysvar.asm`: `os_usr_stack_base` at `0x1D0000`-
+`0x1DFFFF`, sitting directly below the kernel's own 64KB ring-0 stack
+at `0x1C0000`-`0x1CFFFF`) -- an overflow past the low end wouldn't
+fault cleanly, it would silently corrupt the kernel's own
+interrupt/syscall stack, which is consistent with varying,
+garbage-looking fault signatures. `run_external_script()` was, at the
+time, called from *inside* `lxb_selectors_find()`'s own DOM-recursion
+depth (`script_find_cb`), adding an unknown, page-structure-dependent
+amount of stack on top of curl/mbedTLS's own famously large TLS-
+handshake stack frames -- a call chain no single-fetch example in this
+project had ever exercised before external-script fetching existed.
+
+**Mitigation applied:** `run_scripts()` in `browser_fetch.c` now runs
+in two passes -- pass 1 (`script_find_cb`, still inside
+`lxb_selectors_find()`'s recursion) does nothing but append each
+`<script>` node to a fixed `MAX_SCRIPTS_PER_PAGE`-sized array; pass 2
+(a plain loop in `run_scripts()`'s own shallow frame, after the
+selector-matching recursion has fully returned) does the actual
+fetch/eval work. This removes lexbor's own selector-recursion depth
+from the stack budget at the moment mbedTLS's handshake runs, without
+changing any observable behavior (script execution order is preserved
+-- `scripts.nodes[]` is filled in the same document-order
+`lxb_selectors_find()` already visited them in).
+
+**Result: inconclusive on its own, but revealed a second, distinct bug.**
+20 more boots against `httpbin.org` with this change applied:
+- The original mid-script-execution crash (garbage RIP, non-
+  deterministic fault type) did **not** recur at all in these 20 runs.
+  Consistent with a real fix, though not proven by sample size alone.
+- A **different** crash appeared instead, at a higher observed rate
+  (6/20, ~30%): `Exception 0x13 (GP)`, with **RIP identical across
+  every occurrence** (`FFFF80000010CA6B`) -- and critically, happening
+  only *after all three* external scripts had already printed their
+  exceptions successfully, during `JS_FreeContext()`/`JS_FreeRuntime()`
+  teardown in `main()`'s own (already shallow, unchanged-by-this-fix)
+  stack frame. Disassembling the unstripped `build/browser_fetch.app.elf`
+  at that address places the fault inside QuickJS-ng's own internal
+  `free_var_ref()` function, at a doubly-linked-list unlink
+  (`rcx->next = rdx; rdx->prev = rcx`, the classic `list_del()`
+  pattern QuickJS uses pervasively for its GC object lists) --
+  reference-counted closure-variable cleanup, not anything this app's
+  own code directly touches.
+
+**Why this looks like two separate, previously-entangled bugs rather
+than one:** the teardown-time crash is called from `main()` in both
+the old and new code -- the two-pass restructuring never changed its
+call depth at all, so it can't be *caused* by that change. The most
+coherent explanation: this QuickJS-internal heap/GC corruption bug
+was already present before the stack-depth fix, but the *earlier*
+mid-execution crash was killing the VM first in enough runs that the
+later teardown-time bug rarely got the chance to manifest and be
+observed. Fixing (or at least sharply reducing) the first crash let
+more runs survive long enough to reach `JS_FreeContext()`, making the
+second, previously-hidden bug more visible -- not introducing it.
+
+**Not fixed, and not chased further.** The `free_var_ref()` crash is
+almost certainly heap/GC corruption inside QuickJS-ng's own runtime,
+most plausibly triggered by this app's pattern of running several
+independent top-level `JS_Eval(..., JS_EVAL_TYPE_GLOBAL)` calls into
+one shared `JSContext` (once per script, inline or external) --
+though this is a hypothesis, not a confirmed root cause. Diagnosing it
+further would mean instrumenting QuickJS-ng's own GC/refcounting
+internals, which is a meaningfully different, deeper kind of
+investigation than anything in this project so far (all previous bugs
+were in this port's own glue code or lexbor usage, not inside a
+vendored engine's own runtime) -- deliberately not attempted blind, to
+avoid a wrong guess corrupting something far more load-bearing than
+this one code path. The two-pass restructuring is kept (it's a real,
+independently-justified stack-safety improvement, and correlates with
+eliminating the original crash mode in testing), but the honest state
+is: **running multiple scripts against one real page can still crash
+the VM**, now via a different, deterministic, partially-diagnosed
+QuickJS-internal bug rather than the original stack-overflow-shaped
+one. Regression-verified unaffected: `example.com`, `iana.org`,
+`wikipedia.org` (all producing identical output to their documented
+baselines), and the static `browser.c` test (untouched by this change).
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run
@@ -559,10 +656,13 @@ four actual live sites, iterated on four times (a growable fetch
 buffer, a `window` stub, external script fetching -- which also found
 and fixed a real crash bug along the way, see "External script
 fetching" above -- and DOM properties/`Window` methods/the global
-`Element` constructor). External-script fetching is real, working,
-WHATWG-correct URL resolution and fetch logic, verified fetching and
-running genuinely large real scripts (jQuery, and Swagger UI's 1.4MB
-bundle) with no crash on every deterministic run.
+`Element` constructor). External-script fetching's own logic -- URL
+resolution, HTTP fetch, running the result -- is real and WHATWG-
+correct, verified fetching and running genuinely large real scripts
+(jQuery, and Swagger UI's 1.4MB bundle). It is not, however, crash-free
+end to end: see "Stack-depth crash investigation" above for a real,
+partially-diagnosed, still-open QuickJS-internal crash that can occur
+after running several scripts from one fetched page.
 
 For the DOM+JS binding layer itself, the trend from earlier rounds
 holds all the way through five rounds now (growable buffer, window
@@ -589,7 +689,7 @@ event loop, by design), no `fetch`/XHR from JS, and no
 `getElementById`/`querySelectorAll`/DOM mutation (`document.
 createElement`, surfaced by name via `httpbin.org`'s jQuery, is exactly
 this gap) remain the honest gaps -- each a distinct, addable follow-up,
-not a structural blocker. There is no longer an open network-fetch
-crash, no longer an open `documentElement`/`className`/
+not a structural blocker. The original network-fetch crash (lexbor
+`url`-arena reuse) and the `documentElement`/`className`/
 `addEventListener`/`Element`-reference gap on this list, and `navigator`
 is a newly-named next candidate alongside DOM mutation.
