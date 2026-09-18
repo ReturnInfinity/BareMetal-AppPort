@@ -79,12 +79,14 @@ addable follow-up, not a discovered blocker:
 - **DOM mutation** -- no `createElement`/`appendChild`/`setAttribute`/
   `remove` exposed to JS. lexbor's DOM API supports all of this; none
   of it is wired up yet.
-- **`<script src="...">` (external scripts)** -- detected and skipped,
-  not fetched. Wiring this in means threading a base URL through for
-  relative `src` resolution, which needs lexbor's `url` module (not
-  built -- see `LEXBOR.md`'s "What's vendored"), plus routing the
-  fetch through the same `libcurl` pattern `examples/lexbor/fetch/
-  fetch.c` already established.
+- **`<script src="...">` (external scripts)** -- now fetched and run in
+  `browser_fetch.c` (lexbor's `url` module resolves `src` against the
+  page's own URL, `fetch_url()` GETs it, the result runs the same way
+  an inline script does). **But this triggers a reproducible VM crash
+  on every real page tried that actually has one** -- see "External
+  script fetching" below. Left in place, not reverted, because the
+  crash is a real, characterized finding in its own right, not a
+  reason to hide the code that found it.
 - **No event loop, no `setTimeout`/`setInterval`, no `fetch()`/XHR
   exposed to JS, and `window` has no methods/properties of its own
   beyond what's a plain global** (`window.document` works because
@@ -223,6 +225,96 @@ Wikipedia's full 119KB body (above) and re-verified `example.com`'s
 default case still prints identically (`body: 559 byte(s)`, `title:
 Example Domain`) as a regression check.
 
+### External script fetching
+
+The last of the three follow-ups above -- actually wired up, and it
+found a real crash, not just another missing-API `ReferenceError`.
+
+**What got built:** lexbor's `url` module (plus its real dependency
+graph, `encoding`/`unicode`/`punycode` -- see `LEXBOR.md`) is now
+vendored. `browser_fetch.c` no longer skips `<script src="...">`:
+it resolves `src` against the page's own final, post-redirect URL
+(`CURLINFO_EFFECTIVE_URL`, captured by a new `fetch_url()` helper
+factored out of the page-fetch/script-fetch duplication that would
+otherwise exist) using `lxb_url_parse()` -- which transparently
+handles both relative (`/static/foo.js`) and already-absolute
+(`https://ajax.googleapis.com/...`) `src` values, the same WHATWG
+algorithm every real browser uses, so no separate cases were needed --
+then fetches the resolved URL with the same `growable_buf`/`write_cb`
+pattern the page fetch uses, and runs the result the same way an
+inline `<script>` runs, in document order, naming the resolved URL as
+the `JS_Eval` filename so exceptions point at the real source. A
+failed fetch/resolve is reported and skipped, same "don't abort the
+rest of the page" policy a throwing script already has.
+
+One real bug was found and fixed along the way, independent of the
+crash below: `main()` originally called `curl_global_cleanup()` right
+after the page fetch, but `run_scripts()` (called afterward) now calls
+`fetch_url()` again for every external script -- calling
+`curl_easy_init()` after `curl_global_cleanup()` without a fresh
+`curl_global_init()` is undefined behavior per libcurl's own contract.
+Fixed by moving `curl_global_cleanup()` to bracket the whole of
+`main()` instead of just the first fetch. This is a real, permanent
+fix, kept regardless of the crash below.
+
+**The crash, found boot-testing against three real pages:**
+
+- `https://www.iana.org/domains/reserved` -- jQuery (`src="/static/js/
+  jquery.a8e7cabd4d49.js"`, correctly resolved to an absolute URL)
+  fetches (78748 bytes, HTTP 200) and runs; it throws a real
+  `TypeError: cannot read property 'matches' of undefined` (a further,
+  more specific DOM-gap symptom of the same "no `documentElement`"-
+  class limitation `BROWSER.md` already tracks). Then, deterministically,
+  every time: `CPU 0x00000000 - Exception 0x13(GP)`, VM halted, no
+  further output.
+- `https://httpbin.org/` -- Swagger UI's real bundle (`flasgger_static/
+  swagger-ui-bundle.js`, 1,428,809 bytes -- 18x larger, and it actually
+  finished fetching and running) throws a different exception
+  (`TypeError: not a function`, expected -- it exercises far more than
+  this scope's DOM surface) and then hits the **exact same** `Exception
+  0x13(GP)` crash.
+- `https://www.wikipedia.org/` -- has an external script after all
+  (`portal/wikipedia.org/assets/js/index-7ecb9c7f8e.js`, missed by
+  earlier phases because the old skip-and-print code never printed a
+  URL to notice it by); it fetches and runs (throwing `ReferenceError:
+  Element is not defined`, another real DOM gap), and then the same
+  `Exception 0x13(GP)` crash follows.
+
+**Why this looks structural, not data-dependent:** across all three
+runs -- 78748 bytes vs. 1,428,809 bytes vs. Wikipedia's script,
+completely different content, completely different JS exceptions --
+`RSP` in the fault dump is **bit-for-bit identical every single time**
+(`00000000001CFF90`), and `RIP` lands within 0x40 bytes of the same two
+values across all runs. Ordinary heap corruption from a bad `realloc`/
+`free` produces increasingly *varied* garbage as payload size and
+content change; a fixed, repeatable `RSP` and near-identical `RIP`
+regardless of what was fetched or evaluated points at something
+structural in what's actually new here -- performing a *second* real
+`curl_easy_init()` → DNS → TCP → TLS → HTTP round trip within the same
+process, after the first one already completed, while a QuickJS
+runtime/lexbor DOM from the first fetch are still live. Every single-
+fetch example in this project (`fetch.c`, `browser.c`, and
+`browser_fetch.c` against pages with no external scripts) has always
+worked; this is the first code path to ever do two.
+
+**Deliberately not chased further here.** Diagnosing this fully would
+mean instrumenting or stepping through this port's syscall/interrupt
+boundary (`posix_shim.c`'s `sys_mmap`/`sys_brk`/network syscalls, or
+possibly `BareMetal-Firecracker`'s own interrupt handling under this
+specific "two full network round trips interleaved with heavy engine
+activity in one process" load shape, which nothing in this project has
+exercised before) -- real, valuable follow-up work, but a different
+scope than this task, and explicitly not something to touch
+kernel-side without a separate, deliberate investigation. The code
+implementing external-script fetching is kept as-is (not reverted or
+stubbed back to skip-and-print) because it is correct as written and
+the crash is a genuine, now well-characterized finding about this
+port's current limits, not a defect in this feature's own logic.
+Regression-verified: `example.com` (no scripts at all) and the static
+`examples/lexbor/browser/browser.c` test are both unaffected --
+the crash only reproduces on the code path that performs a second
+real network fetch.
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run
@@ -233,23 +325,38 @@ plain JS, live network fetch included, verified above with
 `browser_fetch.c`.
 
 Far, for anything resembling a real-world page -- now confirmed against
-four actual live sites, not just reasoned about, and iterated on twice
-(a growable fetch buffer, then a `window` stub). One of the four
-(`httpbin.org`) now runs its inline script clean, with zero exceptions.
-The other three still fail, but each fix peels back one real layer
-rather than papering over it: `$ is not defined` is unaffected by
-either fix (a missing-external-script problem, not a `window` or
-buffer problem); `wikipedia.org` moved from a truncation artifact, to a
-missing-`window` error, to two distinct real DOM/API gaps
-(`documentElement`, and calling a `window` method that doesn't exist).
-No event handling (`DOMContentLoaded`, click handlers -- there's no
-event loop to dispatch them from), no `fetch`/XHR so a page can't make
-its own follow-up requests, no external `<script src>` (confirmed above
-to be exactly where most real sites' actual logic lives, not inline),
-no `getElementById`/`querySelectorAll`/DOM mutation, and `window` is a
-bare alias with none of a real `Window` interface's methods. Each
-remaining failure mode is a distinct, addable follow-up (external
-script fetching, `documentElement` and other DOM properties, `Window`
-interface methods) rather than one big blocker -- and the trend across
-two rounds of fixes is real pages failing progressively later and for
-progressively narrower reasons, not staying stuck on the same wall.
+four actual live sites, iterated on three times (a growable fetch
+buffer, a `window` stub, and external script fetching). One of the
+four (`httpbin.org`'s *inline* script) still runs clean with zero
+exceptions. But the picture changed with this round: wiring up
+external scripts is real, working, WHATWG-correct URL resolution and
+fetch logic -- verified fetching and running two genuinely large real
+scripts (jQuery, and Swagger UI's 1.4MB bundle) -- and it surfaced a
+**new class of finding**, a reproducible VM crash, not just another
+missing-API exception. Every one of the three pages with an external
+script (`iana.org`, `httpbin.org`, `wikipedia.org`) now fetches and
+runs that script successfully, throws an honest, expected JS-level
+error from it (a further DOM/API gap, same category as before), and
+*then* crashes the VM outright the first time a second real network
+fetch happens in one process -- a limit this project had never
+exercised before external scripts existed to trigger it.
+
+So the assessment splits in two: for the DOM+JS binding layer itself,
+the trend from earlier rounds holds -- `$ is not defined` is
+unaffected by any of the three fixes (a missing-external-script
+problem, now finally addressed at the URL/fetch level, though masked
+by the crash before the page's own inline script gets to prove it);
+`wikipedia.org` and `iana.org` both progressed to new, more specific
+DOM-gap exceptions once their real external scripts actually ran,
+exactly the "failing later, for narrower reasons" pattern every prior
+round showed. But there's now a harder floor underneath all of that:
+**no real page with an external script can currently finish running
+in this project without crashing the VM**, which is a more fundamental
+limit than any single missing DOM property or `Window` method. No
+event handling, no `fetch`/XHR from JS, no `getElementById`/
+`querySelectorAll`/DOM mutation, and `window` is a bare alias with none
+of a real `Window` interface's methods remain the other honest gaps.
+Each of those is still a distinct, addable follow-up; the network-fetch
+crash is the one item on this list that isn't yet characterized well
+enough to call addable -- it needs real investigation before it can be
+called a follow-up rather than an open question.

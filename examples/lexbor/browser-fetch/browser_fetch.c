@@ -23,6 +23,7 @@
 // lxb_html_document_parse() with an explicit length throughout, never
 // treated as a C string.
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,7 @@
 #include <lexbor/css/css.h>
 #include <lexbor/selectors/selectors.h>
 #include <lexbor/dom/interfaces/element.h>
+#include <lexbor/url/url.h>
 
 #define FETCH_URL      "https://example.com/"
 #define RESPONSE_BUF_INITIAL_CAP (16 * 1024)
@@ -59,6 +61,17 @@ struct growable_buf {
 // The DOM root every document.querySelector() call searches -- same
 // file-scope-global, single-document design browser.c uses.
 static lxb_html_document_t *g_document;
+
+// The page's own URL (after redirects -- see fetch_url()'s
+// CURLINFO_EFFECTIVE_URL comment below), parsed once and reused as the
+// base every <script src="..."> is resolved against, exactly the way a
+// real browser resolves a page's relative URLs against its final
+// navigated location, not the URL originally requested. g_url_parser
+// is reused (lxb_url_parser_clean() between calls, matching lexbor's
+// own examples/lexbor/url/relative.c) rather than re-created per
+// script -- one parser, many lxb_url_parse() calls.
+static lxb_url_parser_t g_url_parser;
+static lxb_url_t *g_base_url;
 
 static JSClassID element_class_id;
 
@@ -95,6 +108,104 @@ static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 	buf->len += n;
 
 	return n;
+}
+
+// Common curl setup/teardown for both the main page fetch and each
+// external <script src> fetch -- factored out because this file now
+// has two real, immediate callers of the exact same ~10-line
+// CURLOPT_* block, not because it might be reused someday.
+// effective_url_out/effective_url_cap are only used by the page fetch
+// in main() (to get the post-redirect URL <script src> resolution
+// needs as its base) -- pass NULL/0 for a plain fetch. The string
+// CURLINFO_EFFECTIVE_URL points at belongs to the handle and is only
+// valid until curl_easy_cleanup(), hence copying it out before that.
+static CURLcode fetch_url(const char *url, struct growable_buf *out,
+			   long *status_out, char *effective_url_out,
+			   size_t effective_url_cap)
+{
+	CURL *h = curl_easy_init();
+	if (!h)
+		return CURLE_FAILED_INIT;
+
+	curl_easy_setopt(h, CURLOPT_URL, url);
+	curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
+	curl_easy_setopt(h, CURLOPT_WRITEDATA, out);
+	curl_easy_setopt(h, CURLOPT_USERAGENT, "BareMetal-browser/1.0");
+	curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+	set_ca_bundle(h);
+	curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
+	curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
+	curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L);
+
+	CURLcode res = curl_easy_perform(h);
+
+	if (status_out)
+		curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, status_out);
+
+	if (effective_url_out && effective_url_cap > 0) {
+		char *eff = NULL;
+		curl_easy_getinfo(h, CURLINFO_EFFECTIVE_URL, &eff);
+		if (eff) {
+			strncpy(effective_url_out, eff, effective_url_cap - 1);
+			effective_url_out[effective_url_cap - 1] = '\0';
+		} else {
+			effective_url_out[0] = '\0';
+		}
+	}
+
+	curl_easy_cleanup(h);
+	return res;
+}
+
+// Bounded accumulator for lxb_url_serialize()'s multi-call callback
+// (see lexbor's own examples/lexbor/url/parse.c -- it may call back
+// once per URL component). A fixed cap is fine here, unlike the fetch
+// response buffer: URLs have a real, sane length bound in practice
+// (every real browser enforces one), unlike arbitrary page content.
+struct url_buf {
+	char *data;
+	size_t len;
+	size_t cap;
+};
+
+static lxb_status_t url_serialize_cb(const lxb_char_t *data, size_t len, void *ctx)
+{
+	struct url_buf *ub = ctx;
+
+	if (ub->len + 1 >= ub->cap)
+		return LXB_STATUS_OK;
+
+	size_t room = ub->cap - 1 - ub->len;
+	size_t copy = len < room ? len : room;
+	memcpy(ub->data + ub->len, data, copy);
+	ub->len += copy;
+
+	return LXB_STATUS_OK;
+}
+
+// Resolves `src` (absolute or relative -- lxb_url_parse() detects
+// which by whether it has its own scheme, same WHATWG algorithm every
+// real browser uses) against g_base_url, and serializes the result
+// into `out`. Returns false if g_base_url is unset (should not happen
+// in practice -- it's always parsed from a URL curl just used
+// successfully) or the src itself doesn't parse as a URL at all.
+static bool resolve_script_url(const char *src, size_t src_len, char *out, size_t out_cap)
+{
+	if (!g_base_url)
+		return false;
+
+	lxb_url_parser_clean(&g_url_parser);
+	lxb_url_t *resolved = lxb_url_parse(&g_url_parser, g_base_url,
+		(const lxb_char_t *)src, src_len);
+	if (!resolved)
+		return false;
+
+	struct url_buf ub = { out, 0, out_cap };
+	lxb_url_serialize(resolved, url_serialize_cb, &ub, false);
+	out[ub.len] = '\0';
+
+	lxb_url_memory_destroy(resolved);
+	return true;
 }
 
 // --- DOM<->QuickJS binding layer, identical to browser.c's ---
@@ -291,6 +402,61 @@ static void setup_globals(JSContext *ctx)
 	JS_FreeValue(ctx, global);
 }
 
+// Runs already-fetched script source against ctx, reporting exceptions
+// the same way inline scripts do (script_find_cb below) -- `name` is
+// the resolved URL for external scripts (so an exception's stack trace
+// names the real source) or "<script>" for inline ones.
+static void eval_script(JSContext *ctx, const char *src, size_t len, const char *name)
+{
+	JSValue result = JS_Eval(ctx, src, len, name, JS_EVAL_TYPE_GLOBAL);
+	if (JS_IsException(result)) {
+		JSValue exc = JS_GetException(ctx);
+		const char *msg = JS_ToCString(ctx, exc);
+		printf("Uncaught exception (%s): %s\n", name, msg ? msg : "(no message)");
+		JS_FreeCString(ctx, msg);
+		JS_FreeValue(ctx, exc);
+	}
+	JS_FreeValue(ctx, result);
+}
+
+#define SCRIPT_URL_BUF_SIZE 2048
+
+// Fetches and runs one <script src="...">. A network/HTTP failure or
+// an unresolvable URL is reported and skipped, same "don't abort the
+// rest of the page" contract a throwing inline script already has --
+// this is not a special case, it's the same policy applied one layer
+// earlier (before the script even gets to run, instead of while it
+// runs).
+static void run_external_script(JSContext *ctx, const char *src, size_t src_len)
+{
+	char resolved[SCRIPT_URL_BUF_SIZE];
+	if (!resolve_script_url(src, src_len, resolved, sizeof(resolved))) {
+		printf("(could not resolve <script src=\"%.*s\">, skipping)\n",
+		       (int)src_len, src);
+		return;
+	}
+
+	struct growable_buf buf = { 0 };
+	long status = 0;
+	CURLcode res = fetch_url(resolved, &buf, &status, NULL, 0);
+
+	if (res != CURLE_OK) {
+		printf("(failed to fetch <script src=\"%s\">: %s)\n",
+		       resolved, curl_easy_strerror(res));
+		free(buf.data);
+		return;
+	}
+	if (status < 200 || status >= 300) {
+		printf("(failed to fetch <script src=\"%s\">: HTTP %ld)\n",
+		       resolved, status);
+		free(buf.data);
+		return;
+	}
+
+	eval_script(ctx, buf.data, buf.len, resolved);
+	free(buf.data);
+}
+
 static lxb_status_t script_find_cb(lxb_dom_node_t *node,
 				    lxb_css_selector_specificity_t spec, void *ctx_ptr)
 {
@@ -298,8 +464,11 @@ static lxb_status_t script_find_cb(lxb_dom_node_t *node,
 	JSContext *ctx = ctx_ptr;
 	lxb_dom_element_t *el = lxb_dom_interface_element(node);
 
-	if (lxb_dom_element_has_attribute(el, (const lxb_char_t *)"src", 3)) {
-		printf("(skipping <script src=...>, external scripts not fetched)\n");
+	size_t src_len = 0;
+	const lxb_char_t *src = lxb_dom_element_get_attribute(el,
+		(const lxb_char_t *)"src", 3, &src_len);
+	if (src) {
+		run_external_script(ctx, (const char *)src, src_len);
 		return LXB_STATUS_OK;
 	}
 
@@ -308,15 +477,7 @@ static lxb_status_t script_find_cb(lxb_dom_node_t *node,
 	if (!text || len == 0)
 		return LXB_STATUS_OK;
 
-	JSValue result = JS_Eval(ctx, (const char *)text, len, "<script>", JS_EVAL_TYPE_GLOBAL);
-	if (JS_IsException(result)) {
-		JSValue exc = JS_GetException(ctx);
-		const char *msg = JS_ToCString(ctx, exc);
-		printf("Uncaught exception: %s\n", msg ? msg : "(no message)");
-		JS_FreeCString(ctx, msg);
-		JS_FreeValue(ctx, exc);
-	}
-	JS_FreeValue(ctx, result);
+	eval_script(ctx, (const char *)text, len, "<script>");
 
 	return LXB_STATUS_OK;
 }
@@ -350,41 +511,39 @@ int main(int argc, char **argv)
 
 	curl_global_init(CURL_GLOBAL_DEFAULT);
 
-	CURL *h = curl_easy_init();
-	if (!h) {
-		printf("curl_easy_init() failed\n");
-		curl_global_cleanup();
-		return 1;
-	}
-
 	struct growable_buf resp = { 0 };
+	long status = 0;
+	char effective_url[SCRIPT_URL_BUF_SIZE];
 
-	curl_easy_setopt(h, CURLOPT_URL, url);
-	curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
-	curl_easy_setopt(h, CURLOPT_WRITEDATA, &resp);
-	curl_easy_setopt(h, CURLOPT_USERAGENT, "BareMetal-browser/1.0");
-	curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-	set_ca_bundle(h);
-	curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
-	curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
-	curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L);
-
-	CURLcode res = curl_easy_perform(h);
+	CURLcode res = fetch_url(url, &resp, &status, effective_url, sizeof(effective_url));
 	if (res != CURLE_OK) {
 		printf("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-		curl_easy_cleanup(h);
 		curl_global_cleanup();
 		free(resp.data);
 		return 1;
 	}
 
-	long status = 0;
-	curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
 	printf("status: %ld\n", status);
 	printf("body: %zu byte(s)\n\n", resp.len);
 
-	curl_easy_cleanup(h);
-	curl_global_cleanup();
+	// curl_global_cleanup() moved to the very end of main() -- run_scripts()
+	// below calls fetch_url() again for every external <script src>, and
+	// calling curl_easy_init() after curl_global_cleanup() without a fresh
+	// curl_global_init() is undefined behavior per libcurl's own contract.
+	// This exact bug produced a real Exception 0x13 (#GP) boot crash the
+	// first time this was tried against a page with an external script
+	// (iana.org's jQuery) -- global cleanup must bracket every curl call
+	// in the process, not just the first one.
+
+	// External <script src="..."> is resolved against the page's final,
+	// post-redirect URL -- the correct base per the HTML/URL specs, not
+	// necessarily the URL originally requested. lxb_url_parser_clean()
+	// resets the reusable parser before this first real parse the same
+	// way it's reset before each later script-src parse.
+	lxb_url_parser_init(&g_url_parser, NULL);
+	g_base_url = lxb_url_parse(&g_url_parser, NULL,
+		(const lxb_char_t *)effective_url, strlen(effective_url));
+	lxb_url_parser_clean(&g_url_parser);
 
 	// --- parse phase: hand the fetched bytes straight to lexbor ---
 	// resp.data/resp.len is length-delimited, not a C string -- passed
@@ -415,7 +574,11 @@ int main(int argc, char **argv)
 	JS_FreeContext(ctx);
 	JS_FreeRuntime(rt);
 	lxb_html_document_destroy(g_document);
+	if (g_base_url)
+		lxb_url_memory_destroy(g_base_url);
+	lxb_url_parser_destroy(&g_url_parser, false);
 	free(resp.data);
+	curl_global_cleanup();
 
 	return 0;
 }

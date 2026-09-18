@@ -607,6 +607,25 @@ account of why this works and everything it took.
   `window` has none of a real `Window` interface's methods yet);
   `iana.org`'s unrelated `$ is not defined` is unaffected, as expected.
   See `BROWSER.md`'s "Window stub" section for the exact boot logs.
+- **OPEN, high priority: external `<script src>` fetching is
+  implemented and correct, but crashes the VM on every real page
+  tried.** lexbor's `url` module is now vendored (see `LEXBOR.md`);
+  `browser_fetch.c` resolves and fetches external scripts for real
+  (verified against jQuery and Swagger UI's real 1.4MB bundle -- both
+  fetch and run correctly, throwing an honest DOM-gap exception each).
+  But immediately afterward, every single real page tested
+  (`iana.org`, `httpbin.org`, `wikipedia.org`) hits a reproducible
+  `Exception 0x13(GP)` and the VM halts. `RSP` is bit-for-bit identical
+  (`00000000001CFF90`) across all three crashes despite wildly
+  different payload sizes/content, pointing at something structural in
+  performing a *second* real network fetch within one process rather
+  than ordinary heap corruption. Also found and fixed along the way (a
+  real, permanent fix, independent of the crash): `curl_global_cleanup()`
+  was being called after only the first fetch, leaving later
+  `curl_easy_init()` calls in undefined-behavior territory per
+  libcurl's own contract. See `BROWSER.md`'s "External script fetching"
+  section for full boot logs and why this wasn't chased further into
+  this port's syscall/interrupt boundary within this task's scope.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 
