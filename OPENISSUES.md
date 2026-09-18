@@ -633,6 +633,24 @@ account of why this works and everything it took.
   `BareMetal-Firecracker` ended this investigation unmodified. See
   `BROWSER.md`'s "External script fetching" / "The crash, root-caused"
   sections for the full story and boot logs.
+- **Fixed:** the two `wikipedia.org` DOM gaps from the "window stub"
+  entry above -- `document.documentElement`/`.body`/`.head` (direct
+  lexbor accessors, not a selector query), `Element.className` (a
+  dedicated getter, `""` not `null` when absent -- matches real DOM
+  semantics, unlike `getAttribute("class")`), and
+  `window.addEventListener`/`removeEventListener` as honest no-op
+  stubs (accepted, never invoked -- there's still no event loop).
+  Re-tested against `wikipedia.org`: the `className`/`documentElement`
+  `TypeError` is gone, the inline script now runs further before
+  hitting a new, later `TypeError: not a function`; its two external
+  scripts (not attempted by any prior round's write-up) also fetch and
+  run with real distinct errors, no crash. Full regression sweep
+  (`example.com`, `httpbin.org`, `iana.org`, static `browser.c`) shows
+  no regressions -- see `BROWSER.md`'s "DOM properties and Window stub
+  methods" section for exact boot logs. `getElementById`/
+  `querySelectorAll`/DOM mutation, external-script-triggered
+  `document.write`, and any `Window` interface method beyond the two
+  event-listener stubs remain open, addable follow-ups.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 

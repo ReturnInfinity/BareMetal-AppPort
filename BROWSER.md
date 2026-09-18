@@ -36,6 +36,27 @@ lexbor's DOM API, the same way a small C `jsdom` would be built.
 - **`Element.getAttribute(name)`** -- `lxb_dom_element_get_attribute()`;
   returns `null` when the attribute is absent, same as the real DOM
   method.
+- **`Element.className`** (getter) -- also `lxb_dom_element_get_attribute()`
+  for `"class"`, but returns `""` (not `null`) when the attribute is
+  absent, matching real DOM `className` semantics -- unlike
+  `getAttribute("class")`, a page doing `el.className.split(' ')` on a
+  perfectly ordinary class-less element won't crash.
+- **`document.documentElement`/`.body`/`.head`** (getters) -- direct
+  lexbor accessors (`lxb_dom_document_element()`,
+  `lxb_html_document_body_element()`, `lxb_html_document_head_element()`),
+  not a `querySelector("html"/"body"/"head")` CSS-selector query --
+  lexbor already tracks these three as plain struct fields/inline
+  accessors. Each resolves to JS `null` if the document is malformed
+  enough not to have one, same convention `querySelector()` uses for
+  "no match".
+- **`window.addEventListener`/`removeEventListener`** -- honest no-op
+  stubs (bound on the global object, so both `window.addEventListener`
+  and a bare `addEventListener` work, matching how real pages use
+  either form). A call is accepted and its listener silently never
+  invoked -- there is genuinely no `DOMContentLoaded`/`load`/click
+  event ever fired (no event loop, see non-goals below), so this isn't
+  a faked event system, just a method that no longer throws
+  `TypeError: not a function` purely because it didn't exist.
 - **Inline `<script>` execution** -- after parsing an HTML document,
   every `<script>` element without a `src` attribute is found (again
   via `lxb_selectors_find()`, query `"script"`) in document order, its
@@ -88,14 +109,17 @@ addable follow-up, not a discovered blocker:
   crash is a real, characterized finding in its own right, not a
   reason to hide the code that found it.
 - **No event loop, no `setTimeout`/`setInterval`, no `fetch()`/XHR
-  exposed to JS, and `window` has no methods/properties of its own
-  beyond what's a plain global** (`window.document` works because
-  `document` is global; `window.addEventListener` does not exist and
-  throws `TypeError: not a function` if called). This is synchronous
-  load-and-run only: parse once, run every inline `<script>` once,
-  exit. A real page's `<script>` that expects event listeners, async
-  APIs, or DOM properties beyond `querySelector`/`textContent`/
-  `tagName`/`getAttribute` (e.g. `document.documentElement`) will
+  exposed to JS.** This is synchronous load-and-run only: parse once,
+  run every inline/external `<script>` once, in document order, exit.
+  `addEventListener` no longer throws (see "What's bound" above), but
+  a registered listener is never called -- there is no
+  `DOMContentLoaded`/`load`/click event to ever fire it.
+- **`getElementById`/`querySelectorAll`/DOM mutation still not
+  bound**, and `window` has no method beyond the two event-listener
+  stubs above -- no `window.matchMedia`/`requestAnimationFrame`/etc.
+  A real page's `<script>` that expects any of these, or DOM
+  properties beyond `querySelector`/`textContent`/`tagName`/
+  `getAttribute`/`className`/`documentElement`/`body`/`head`, will
   throw a `ReferenceError`/`TypeError` on first use -- expected under
   this scope, not a bug to chase.
 - **No CSS cascade/computed style/layout, ever** -- this stays a
@@ -399,6 +423,62 @@ re-investigated blind next time: the exception dump's RIP field is
 correct as originally written, at least for GP under this kernel/
 hypervisor combination.
 
+### DOM properties and Window stub methods
+
+The next of the remaining follow-ups: `document.documentElement`/
+`.body`/`.head`, `Element.className`, and
+`window.addEventListener`/`removeEventListener`, closing the two real
+gaps `wikipedia.org`'s scripts hit after the window-stub round
+(`cannot read property 'className' of undefined` and
+`TypeError: not a function`). Added identically to both `browser.c`
+and `browser_fetch.c` (see "What's bound" above for the exact API).
+
+Re-tested `https://www.wikipedia.org/` (the page these errors came
+from) via `browser_fetch.c`:
+
+```
+title: Wikipedia
+
+Uncaught exception (<script>): TypeError: not a function
+Uncaught exception (https://www.wikipedia.org/portal/wikipedia.org/assets/js/index-7ecb9c7f8e.js): ReferenceError: Element is not defined
+Uncaught exception (https://www.wikipedia.org/portal/wikipedia.org/assets/js/gt-ie9-507b16b6be.js): TypeError: not a function
+```
+
+The `className`/`documentElement` `TypeError` is gone -- the inline
+script now runs further before hitting a *new*, later
+`TypeError: not a function` (some other method call this scope
+doesn't implement, not chased further -- that's the expected shape of
+progress this project has shown every round). Its two external
+scripts, never attempted by any prior round's write-up because the
+crash predated getting this far, now also fetch and run with their
+own distinct real errors and no crash: `Element is not defined` (a
+page checking `typeof Element`/`instanceof Element` against a global
+constructor this scope doesn't bind) and another `not a function`.
+
+Full regression sweep, all unchanged in behavior from before this
+round except where a page's own external scripts newly succeed at
+fetching (they always could -- this round didn't touch fetching logic,
+only DOM/window bindings):
+
+- `https://example.com/` -- identical (`body: 559 byte(s)`, `title:
+  Example Domain`, no scripts).
+- `https://httpbin.org/` -- no crash; all three external scripts fetch
+  and run: Swagger UI's bundle and standalone preset each throw
+  `TypeError: not a function`, and jQuery now throws
+  `TypeError: cannot read property 'createElement' of undefined` --
+  a new, more specific gap (`document.createElement`, DOM mutation,
+  still not bound, as documented) than whatever line it failed on
+  before `documentElement` existed.
+- `https://www.iana.org/domains/reserved` -- no crash; jQuery and
+  `dtable.js` each throw `TypeError: not a function` (progressing
+  further/differently than the pre-`documentElement` run); the page's
+  own inline script still throws `$ is not defined`, for the same
+  legitimate reason as before (jQuery's own init fails before
+  assigning the `$`/`jQuery` globals).
+- Static `examples/lexbor/browser/browser.c` test -- byte-for-byte
+  identical boot output, since its fixture never exercises
+  `documentElement`/`body`/`head`/`className`/`addEventListener`.
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run
@@ -418,18 +498,26 @@ fetching and running genuinely large real scripts (jQuery, and Swagger
 UI's 1.4MB bundle) with no crash, on every page tested.
 
 For the DOM+JS binding layer itself, the trend from earlier rounds
-holds all the way through: `httpbin.org`'s `relative-time.js`-class
-scripts run clean with zero exceptions when they don't need anything
-beyond this scope's DOM surface; `$ is not defined` on `iana.org` is
-now resolved at the fetch level (jQuery genuinely loads and runs) but
-still fails, now for the legitimate reason that jQuery's own init code
-needs DOM properties this scope doesn't implement; `wikipedia.org` and
-`iana.org` both progress to new, more specific DOM-gap exceptions once
-their real external scripts actually run -- the same "failing later,
-for narrower reasons" pattern every round has shown, now extended to
-scripts that were previously never even fetched. No event handling, no
-`fetch`/XHR from JS, no `getElementById`/`querySelectorAll`/DOM
-mutation, and `window` is a bare alias with none of a real `Window`
-interface's methods remain the honest gaps -- each a distinct, addable
-follow-up, not a structural blocker. There is no longer an open
-network-fetch crash on this list.
+holds all the way through four rounds now (growable buffer, window
+stub, external script fetching, DOM properties/Window methods):
+`httpbin.org`'s `relative-time.js`-class scripts run clean with zero
+exceptions when they don't need anything beyond this scope's DOM
+surface; `$ is not defined` on `iana.org` is resolved at the fetch
+level (jQuery genuinely loads and runs) but still fails, now past
+`documentElement`-class checks and into a *different* `not a function`
+gap; `wikipedia.org`'s inline script no longer fails on
+`className`/`documentElement` at all, progressing to a later, more
+specific `not a function`; every external script on every page now
+fetches and runs (no crash, ever, since the crash fix) to its own
+real, distinct exception. The pattern holds: each round's fix makes
+real pages fail later, for narrower and more specific reasons, never
+the same wall twice. `window.addEventListener`/`removeEventListener`
+no longer throw, closing that specific gap, though `window` still has
+no other method (`matchMedia`, `requestAnimationFrame`, etc.). No
+event handling ever fires (no event loop, by design), no `fetch`/XHR
+from JS, and no `getElementById`/`querySelectorAll`/DOM mutation
+(`document.createElement`, newly surfaced by name via `httpbin.org`'s
+jQuery, is exactly this gap) remain the honest gaps -- each a distinct,
+addable follow-up, not a structural blocker. There is no longer an
+open network-fetch crash, and no longer an open `documentElement`/
+`className`/`addEventListener` gap on this list.

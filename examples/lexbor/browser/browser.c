@@ -112,9 +112,30 @@ static JSValue element_getAttribute(JSContext *ctx, JSValueConst this_val,
 	return JS_NewStringLen(ctx, (const char *)value, len);
 }
 
+// Real DOM Element.className is a live view of the `class` attribute,
+// but unlike getAttribute("class") it returns "" (not null) when the
+// attribute is absent -- a page doing `el.className.split(' ')` would
+// otherwise crash on a perfectly normal, class-less element.
+static JSValue element_get_className(JSContext *ctx, JSValueConst this_val)
+{
+	lxb_dom_node_t *node = JS_GetOpaque(this_val, element_class_id);
+	if (!node)
+		return JS_UNDEFINED;
+
+	size_t len = 0;
+	const lxb_char_t *value = lxb_dom_element_get_attribute(
+		lxb_dom_interface_element(node),
+		(const lxb_char_t *)"class", 5, &len);
+	if (!value)
+		return JS_NewStringLen(ctx, "", 0);
+
+	return JS_NewStringLen(ctx, (const char *)value, len);
+}
+
 static const JSCFunctionListEntry element_proto_funcs[] = {
 	JS_CGETSET_DEF("textContent", element_get_textContent, NULL),
 	JS_CGETSET_DEF("tagName", element_get_tagName, NULL),
+	JS_CGETSET_DEF("className", element_get_className, NULL),
 	JS_CFUNC_DEF("getAttribute", 1, element_getAttribute),
 };
 
@@ -198,6 +219,70 @@ static JSValue document_querySelector(JSContext *ctx, JSValueConst this_val,
 	return make_element(ctx, result.found);
 }
 
+// document.documentElement/.body/.head -- direct lexbor accessors, not
+// a CSS-selector query like querySelector() uses: lexbor already tracks
+// these three as plain struct fields/inline accessors
+// (lxb_dom_document_element()/lxb_html_document_body_element()/
+// lxb_html_document_head_element()), so there's no need to run
+// "html"/"body"/"head" through the selector engine. Each can
+// legitimately be NULL for a malformed/incomplete document -- resolves
+// to JS null in that case, same convention querySelector() uses for
+// "no match".
+static JSValue document_get_documentElement(JSContext *ctx, JSValueConst this_val)
+{
+	(void)ctx;
+	(void)this_val;
+	lxb_dom_element_t *el = lxb_dom_document_element(&g_document->dom_document);
+	if (!el)
+		return JS_NULL;
+	return make_element(ctx, lxb_dom_interface_node(el));
+}
+
+static JSValue document_get_body(JSContext *ctx, JSValueConst this_val)
+{
+	(void)ctx;
+	(void)this_val;
+	lxb_html_body_element_t *el = lxb_html_document_body_element(g_document);
+	if (!el)
+		return JS_NULL;
+	return make_element(ctx, lxb_dom_interface_node(el));
+}
+
+static JSValue document_get_head(JSContext *ctx, JSValueConst this_val)
+{
+	(void)ctx;
+	(void)this_val;
+	lxb_html_head_element_t *el = lxb_html_document_head_element(g_document);
+	if (!el)
+		return JS_NULL;
+	return make_element(ctx, lxb_dom_interface_node(el));
+}
+
+static const JSCFunctionListEntry document_props[] = {
+	JS_CFUNC_DEF("querySelector", 1, document_querySelector),
+	JS_CGETSET_DEF("documentElement", document_get_documentElement, NULL),
+	JS_CGETSET_DEF("body", document_get_body, NULL),
+	JS_CGETSET_DEF("head", document_get_head, NULL),
+};
+
+// Real pages very commonly register listeners during initial script
+// execution (window.addEventListener('DOMContentLoaded', ...) is
+// close to universal). These are honest no-ops, not a faked event
+// system: there is genuinely no DOMContentLoaded/load/click event ever
+// fired here (see BROWSER.md's non-goals -- no event loop at all), so
+// a registered listener is accepted and silently never called, rather
+// than the call itself throwing TypeError: not a function just because
+// the method didn't exist.
+static JSValue window_addEventListener(JSContext *ctx, JSValueConst this_val,
+					int argc, JSValueConst *argv)
+{
+	(void)ctx;
+	(void)this_val;
+	(void)argc;
+	(void)argv;
+	return JS_UNDEFINED;
+}
+
 static JSValue js_console_log(JSContext *ctx, JSValueConst this_val,
 			       int argc, JSValueConst *argv)
 {
@@ -225,8 +310,8 @@ static void setup_globals(JSContext *ctx)
 	JS_SetPropertyStr(ctx, global, "console", console);
 
 	JSValue document = JS_NewObject(ctx);
-	JS_SetPropertyStr(ctx, document, "querySelector",
-			   JS_NewCFunction(ctx, document_querySelector, "querySelector", 1));
+	JS_SetPropertyFunctionList(ctx, document, document_props,
+				    sizeof(document_props) / sizeof(document_props[0]));
 	JS_SetPropertyStr(ctx, global, "document", document);
 
 	// A real browser's `window` *is* the global object (window ===
@@ -239,6 +324,18 @@ static void setup_globals(JSContext *ctx)
 	// takes ownership of the value handed to it, and `global` still
 	// needs its own reference freed below.
 	JS_SetPropertyStr(ctx, global, "window", JS_DupValue(ctx, global));
+
+	// addEventListener/removeEventListener bound directly on `global` --
+	// since window IS global, this covers both `window.addEventListener`
+	// and a bare `addEventListener(...)` call, matching how a real page
+	// can use either form. Same no-op stub for both: a real
+	// implementation would need to actually remove a previously-added
+	// listener, but since neither is ever invoked (no event loop), there
+	// is no listener registry for "remove" to need to touch.
+	JS_SetPropertyStr(ctx, global, "addEventListener",
+			   JS_NewCFunction(ctx, window_addEventListener, "addEventListener", 2));
+	JS_SetPropertyStr(ctx, global, "removeEventListener",
+			   JS_NewCFunction(ctx, window_addEventListener, "removeEventListener", 2));
 
 	JS_FreeValue(ctx, global);
 }
