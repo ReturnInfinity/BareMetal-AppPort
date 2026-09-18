@@ -25,6 +25,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-python.sh"
 "$SCRIPT_DIR/scripts/get-rust.sh"
 "$SCRIPT_DIR/scripts/get-zig.sh"
+"$SCRIPT_DIR/scripts/get-quickjs.sh"
 
 BUILD_DIR="build"
 
@@ -54,6 +55,8 @@ SODIUM_PORT="port/libsodium_port"
 LWEXT4_DIR="$BUILD_DIR/lwext4-58bcf89"
 LWEXT4_INC="$LWEXT4_DIR/include"
 LWEXT4_PORT="port/lwext4_port"
+
+QUICKJS_DIR="$BUILD_DIR/quickjs-ng-0.16.2"
 
 PYTHON_DIR="$BUILD_DIR/Python-3.14.7"
 PYTHON_HOST_BUILD="$BUILD_DIR/host-python-build"
@@ -131,6 +134,27 @@ SQLITE_CFLAGS="$CFLAGS -I $SQLITE_PORT -DSQLITE_CUSTOM_INCLUDE=sqlite_baremetal_
 # generated or needed (see setup.sh's "Building libsodium" comment below
 # for why not).
 SODIUM_CFLAGS="$CFLAGS -DSODIUM_STATIC -DCONFIGURED=1 -I $SODIUM_INC -I $SODIUM_INC/sodium"
+
+# quickjs-ng needs no config header at all (unlike sqlite/libsodium
+# above) -- its own CMakeLists.txt only ever adds four .c files to the
+# library target (dtoa.c, libregexp.c, libunicode.c, quickjs.c; qjs.c/
+# qjsc.c are the CLI/compiler, quickjs-libc.c is the optional POSIX
+# std/os module -- neither is built here) and gates everything else
+# behind plain feature-test macros this compiler already satisfies on
+# its own (verified against quickjs-ng 0.16.2's actual source): gcc
+# predefines __linux__ regardless of -ffreestanding/-nostdlib (it's a
+# target-triple macro, not an environment one), which routes cutils.h's
+# js__malloc_usable_size() to musl's real malloc_usable_size() (musl
+# 1.2.6 does implement it, glibc-compat) instead of the "unknown"
+# fallback other freestanding targets would need to stub out.
+# -DGCC_BUILTIN_ATOMICS forces quickjs-c-atomics.h's __atomic_*()
+# builtin-based path (only the JS Atomics.* opcodes use this, not
+# anything load-bearing at startup) instead of its "#include
+# <stdatomic.h>" branch -- musl 1.2.6 doesn't ship a stdatomic.h at all
+# (added in later musl releases), and this sidesteps needing one by
+# using a header the file already carries as its own fallback for old
+# GCC versions.
+QUICKJS_CFLAGS="$CFLAGS -D_GNU_SOURCE -DGCC_BUILTIN_ATOMICS"
 
 # lwext4 headers pull in musl's the same way, plus lwext4's own
 # include/ tree. -DCONFIG_USE_DEFAULT_CFG=0 makes lwext4's own
@@ -285,6 +309,20 @@ done
 # own glue (tls_shim.c, net_shim.c, ext4_shim.c, ...), not here.
 echo "- Building sqlite"
 run_quiet gcc $SQLITE_CFLAGS -o "$BUILD_DIR/sqlite_sqlite3.o" "$SQLITE_DIR/sqlite3.c"
+
+# quickjs-ng's own qjs_sources CMake variable, straight from
+# CMakeLists.txt -- the whole engine (parser, bytecode compiler,
+# interpreter, GC, builtins) minus the CLI/compiler tools and the
+# optional POSIX libc module (see QUICKJS_CFLAGS's comment above). No
+# per-app port glue needed the way sqlite_vfs.c/tls_shim.c are: the
+# engine itself never touches the filesystem or network on its own --
+# an app that wants document/fetch bindings supplies them itself via
+# JS_NewCFunction, same as any other embedder.
+echo "- Building quickjs"
+for src in dtoa libregexp libunicode quickjs; do
+	obj="$BUILD_DIR/quickjs_$src.o"
+	gcc $QUICKJS_CFLAGS -o "$obj" "$QUICKJS_DIR/$src.c"
+done
 
 # Like mbedTLS/curl above: libsodium's own src/libsodium/Makefile.am
 # unconditionally lists *every* implementation file for every primitive in

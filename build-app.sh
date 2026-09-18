@@ -50,6 +50,9 @@ SODIUM_DIR="$BUILD_DIR/libsodium-1.0.22/src/libsodium"
 SODIUM_INC="$SODIUM_DIR/include"
 SODIUM_PORT="port/libsodium_port"
 
+QUICKJS_DIR="$BUILD_DIR/quickjs-ng-0.16.2"
+QUICKJS_INC="$QUICKJS_DIR"
+
 LWEXT4_DIR="$BUILD_DIR/lwext4-58bcf89"
 LWEXT4_INC="$LWEXT4_DIR/include"
 LWEXT4_PORT="port/lwext4_port"
@@ -99,6 +102,11 @@ fi
 
 if ! compgen -G "$BUILD_DIR/sodium_*.o" >/dev/null; then
 	echo "error: libsodium objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
+	exit 1
+fi
+
+if ! compgen -G "$BUILD_DIR/quickjs_*.o" >/dev/null; then
+	echo "error: quickjs objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
 	exit 1
 fi
 
@@ -226,7 +234,7 @@ LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -I $PORT -DCONFIG_USE_DEFA
 # needs). gcc's own freestanding headers (stdatomic.h) are added back
 # the same way setup.sh's PYTHON_CFLAGS does, for the same reason.
 PYTHON_GCC_FREESTANDING_INC="$(gcc -print-file-name=include)"
-APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\" -I $LWIP_INC -I $LWIP_PORT -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal -DPy_BUILD_CORE"
+APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\" -I $LWIP_INC -I $LWIP_PORT -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal -DPy_BUILD_CORE -I $QUICKJS_INC"
 
 echo "Building..."
 
@@ -308,6 +316,16 @@ for obj in "$BUILD_DIR"/python_*.o; do
 	PYTHON_OBJS="$PYTHON_OBJS $obj"
 done
 
+# Like LWIP_OBJS/MBEDTLS_OBJS/CURL_OBJS/SODIUM_OBJS/LWEXT4_OBJS/
+# PYTHON_OBJS above: quickjs's four object files are built once by
+# setup.sh, just picked up here. No per-app quickjs glue exists yet
+# (see QUICKJS.md) -- unlike sqlite_vfs.o/tls_shim.o, the engine itself
+# needs nothing app-specific to link.
+QUICKJS_OBJS=""
+for obj in "$BUILD_DIR"/quickjs_*.o; do
+	QUICKJS_OBJS="$QUICKJS_OBJS $obj"
+done
+
 echo "Linking..."
 
 # Two stages, not a direct-to-binary `ld -T c.ld` link: c.ld's
@@ -334,7 +352,7 @@ ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -
 	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" "$BUILD_DIR/cacert_data.o" \
 	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" "$BUILD_DIR/dlfcn_shim.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS $QUICKJS_OBJS "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
 echo "Built $APP_NAME"
