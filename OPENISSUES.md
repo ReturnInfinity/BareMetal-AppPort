@@ -565,6 +565,12 @@ account of why this works and everything it took.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default** to
   boot at all -- see `LEXBOR.md`'s boot-testing note, same story as
   Python/QuickJS.
+- **Fetch -> parse pipeline verified working** (`examples/lexbor/
+  fetch/fetch.c`): libcurl GET into a buffer, straight into
+  `lxb_html_document_parse`, real `<title>`/`<a>`-count queries
+  against the result. No new networking setup was needed -- DHCP
+  fallback and `baremetal.sh`'s existing `tap0` auto-attach already
+  covered it. See `LEXBOR.md`'s "Fetch + parse example" section.
 
 ## General
 

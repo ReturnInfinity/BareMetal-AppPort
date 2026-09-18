@@ -140,17 +140,50 @@ Lexbor match 1: <p class="greeting">
 Lexbor says: 1 match(es)
 ```
 
+## Fetch + parse example
+
+`examples/lexbor/fetch/fetch.c` -- the first real fetch-then-parse
+pipeline: libcurl (same pattern as the repo-root `curltest.c`: same
+CA-bundle handling, same fixed-size `write_cb` buffer, same
+`https://example.com/` target, kept identical on purpose so this
+example's expected output stays predictable) does a real HTTPS GET
+into an in-memory buffer, then that buffer is handed straight to
+`lxb_html_document_parse` -- no intermediate copy, no assumption the
+fetched bytes are a null-terminated C string. Two small real DOM
+queries follow: `lxb_html_document_title()` for the `<title>` text, and
+a `lxb_selectors_find()` over the CSS selector `a` (same API
+`examples/lexbor/hello/hello.c` already used) to count anchor tags.
+
+No new `setup.sh`/`build-app.sh` wiring was needed -- curl and lexbor
+are both already linked into every app unconditionally, confirming
+that assumption held. Networking itself needed no extra setup either:
+this port's `net_glue.c` falls back to DHCP when the Firecracker `ip=`
+kernel param is absent, and `baremetal.sh start` already auto-attaches
+`tap0` as the guest NIC when it exists on the host -- nothing app- or
+port-side to configure beyond the usual `MEMSIZE` bump.
+
+Verified booting for real, twice, through the actual `build-app.sh` /
+`BareMetal-Firecracker` pipeline:
+
+```
+status: 200
+body: 559 byte(s) kept (RESPONSE_BUF_SIZE cap)
+
+title: Example Domain
+<a> tag count: 1
+```
+
 ## Not yet done
 
 - No DOM<->QuickJS binding layer yet -- lexbor and QuickJS are each
   linked into every app already, but nothing connects them (no
   `document`/`window` JS globals, no running `<script>` tags found
   during parsing). That's the next phase.
-- No `fetch`/curl integration -- the example parses a hardcoded string,
-  not a downloaded page.
 - `encoding`/`url` modules not built (see "What's vendored" above) --
   follow-ups once a real fetched page needs charset detection or
-  relative-URL resolution, not blockers.
+  relative-URL resolution, not blockers. `example.com`'s page is plain
+  ASCII/UTF-8 with no relative URLs, so the fetch example above never
+  exercises either gap.
 - `fs.c` intentionally never built -- if some future module actually
   needs `lexbor_fs_*` (unlikely for the DOM+JS scope this project is
   aiming for), it would first need `opendir`/`readdir`/`stat` added to
