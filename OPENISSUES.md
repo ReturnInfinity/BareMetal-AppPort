@@ -544,6 +544,28 @@ account of why this works and everything it took.
   of the headless-browser plan (lexbor for HTML/CSS/DOM, hand-written
   bindings between the two) hasn't been started.
 
+## Lexbor (see `LEXBOR.md`; no `port/lexbor_port/` needed)
+
+- **`fs.c` (directory listing / whole-file-read helpers) is not
+  built.** Nothing in the built modules calls `lexbor_fs_*` (confirmed
+  by grep), so this isn't reachable yet -- but if some future module
+  addition ever needs it, it would require real `opendir`/`readdir`
+  support in `posix_shim.c`, which doesn't exist (see "Missing common
+  syscalls" above doesn't even list these -- they're not implemented
+  at all, not just falling through to `-ENOSYS`).
+- **`encoding`/`url`/`unicode`/`punycode`/`style`/`engine` modules not
+  built**, by scope choice, not a blocker -- see `LEXBOR.md`'s "What's
+  vendored" for why each was left out and what would need adding first
+  (real-world charset detection, relative-URL resolution, CSS cascade/
+  layout respectively).
+- **No DOM<->QuickJS bindings yet** -- lexbor and QuickJS are each
+  linked into every app, but nothing connects them: no `document`/
+  `window` JS globals, no `<script>` execution during parsing. Next
+  phase of the headless-browser plan.
+- **MEMSIZE needs bumping well past the 4MiB Firecracker default** to
+  boot at all -- see `LEXBOR.md`'s boot-testing note, same story as
+  Python/QuickJS.
+
 ## General
 
 - **No dynamic linking, by design** — everything is statically linked
