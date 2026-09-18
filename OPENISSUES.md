@@ -581,11 +581,18 @@ account of why this works and everything it took.
   `<script src>` fetching, no event loop/timers/`fetch()` from JS** --
   all explicit scope cuts for this pass, not blockers; see `BROWSER.md`'s
   "Explicit non-goals / follow-ups".
-- **Live fetch + live script execution together isn't wired up as an
-  example yet** -- `examples/lexbor/fetch/fetch.c` (fetch->parse) and
-  `examples/lexbor/browser/browser.c` (parse->run-scripts, static HTML
-  only) each work independently; combining them is the natural next
-  integration example.
+- **Live fetch + live script execution now wired up and boot-tested
+  against four real URLs** -- `examples/lexbor/browser-fetch/
+  browser_fetch.c` (new; doesn't modify `fetch.c` or `browser.c`).
+  Every real page tried failed, each for a different documented
+  reason: no `window` (httpbin.org), a missing global from a correctly-
+  skipped external script (`$`/jQuery, iana.org), and a fixed 32KB
+  fetch buffer silently truncating a larger page mid-document
+  (wikipedia.org, 119KB) -- see `BROWSER.md`'s new section for the
+  exact boot logs. `RESPONSE_BUF_SIZE`'s fixed size (already a `fetch.c`
+  limitation) is now confirmed to also affect script content, not just
+  tag/title queries -- a growable/streaming fetch buffer is a real
+  follow-up for fetching anything beyond small pages.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 

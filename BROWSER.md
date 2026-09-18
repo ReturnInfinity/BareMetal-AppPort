@@ -121,23 +121,73 @@ tagName=P class=greeting
 missing is null
 ```
 
+## Live fetch + live script execution: `examples/lexbor/browser-fetch/browser_fetch.c`
+
+The stretch goal flagged above -- actually tried, not just reasoned
+about. Combines `fetch.c`'s curl-fetch (same CA-bundle/`write_cb`
+buffer handling, same argv[1]-URL-with-fallback pattern) with this
+file's binding layer (`console.log`/`document.querySelector`/inline-
+`<script>` execution) into one new example. Neither `fetch.c` nor
+`browser.c` was modified -- this is new glue combining both, reusing
+their logic verbatim rather than changing either's proven behavior.
+
+Boot-tested for real (`tap0` up, real DHCP, real TLS) against four
+different live URLs, on purpose picked to see what actually happens
+against the real web rather than a single cherry-picked success:
+
+- **`https://example.com/`** (the default, no arg needed) -- no inline
+  `<script>` at all, so nothing runs; only `title: Example Domain`
+  prints. Confirms the pipeline does nothing observable (correctly)
+  when a page has no script content, rather than erroring.
+- **`https://httpbin.org/`** -- three `<script src=...>` tags correctly
+  skipped (printed as such), then the one inline `<script>` (Swagger
+  UI's bootstrap) throws `ReferenceError: window is not defined` on
+  its first statement. Real, expected, matches the "no `window`
+  object" non-goal above exactly.
+- **`https://www.iana.org/domains/reserved`** -- same shape, but a
+  *different* real failure: the inline `<script>` throws
+  `ReferenceError: $ is not defined` -- it assumes jQuery, which was
+  loaded via a skipped `<script src>`, so the global it expects was
+  never defined. A different missing-global reason than the `window`
+  case, both equally expected under this scope.
+- **`https://www.wikipedia.org/`** -- a genuinely new finding: this
+  page is 119KB, over `RESPONSE_BUF_SIZE` (32KB), so the fetched body
+  hit the same silent-truncation cap `fetch.c` always had (`body:
+  32767 byte(s) kept`). `<title>` still parsed correctly (it's near
+  the top of the document), but the inline `<script>` that ran threw
+  yet another distinct error, `TypeError: cannot read property
+  'className' of undefined`, consistent with running against a
+  DOM/JS environment truncated mid-document. Not a bug in this
+  integration -- `RESPONSE_BUF_SIZE` is a fixed, documented cap
+  `fetch.c` already carried; this is the first example whose behavior
+  under that cap actually depended on more than a `<title>`/tag-count
+  query, so it's the first time the cap's effect on *script* content
+  became visible. A real embedder would need a resizable/streaming
+  buffer instead of a fixed 32KB one for pages this size -- noted as a
+  follow-up, not fixed here.
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
-Close, for toy/simple pages: fetch (curl, already proven), parse
-(lexbor, already proven), and now run scripts against a real DOM with
-real output -- the full pipeline exists and works end to end for a page
-whose scripts only touch `document.querySelector`/`textContent`/
-`tagName`/`getAttribute` and plain JS.
+Close, for toy/simple pages: fetch (curl), parse (lexbor), and run
+scripts against a real DOM with real output -- the full pipeline exists
+and works end to end for a page whose scripts only touch
+`document.querySelector`/`textContent`/`tagName`/`getAttribute` and
+plain JS, live network fetch included, verified above with
+`browser_fetch.c`.
 
-Far, for anything resembling a real-world page: no `window` object, no
-event handling (`DOMContentLoaded`, click handlers, anything -- there's
-no event loop to dispatch them from), no `fetch`/XHR so a page can't
-make its own follow-up requests, no external `<script src>` (most real
-sites' actual logic lives there, not inline), and no
-`getElementById`/`querySelectorAll`/DOM mutation, so even simple
-"framework-shaped" pages that build up the DOM via JS after load won't
-do anything observable. Running `examples/lexbor/fetch/fetch.c`'s
-fetched `https://example.com/` page through this binding layer would
-work today (it has no inline `<script>` at all) but is not yet wired up
-as an example -- combining live fetch with live script execution is the
-natural next integration example, not a new capability.
+Far, for anything resembling a real-world page -- now confirmed against
+four actual live sites, not just reasoned about: every one of them
+failed, each for a *different* concrete reason (no `window`, missing
+`$` because its defining external script was correctly not fetched,
+and a fixed-size fetch buffer truncating a larger real page mid-
+document). No event handling (`DOMContentLoaded`, click handlers --
+there's no event loop to dispatch them from), no `fetch`/XHR so a page
+can't make its own follow-up requests, no external `<script src>`
+(confirmed above to be exactly where most real sites' actual logic
+lives, not inline), no `getElementById`/`querySelectorAll`/DOM
+mutation, and a fixed 32KB fetch buffer that silently truncates
+anything larger. Each failure mode is a distinct, addable follow-up
+(external script fetching, a real `window` stub, a growable fetch
+buffer) rather than one big blocker -- but real-world pages currently
+fail for real, varied, and now-documented reasons rather than
+hypothetical ones.
