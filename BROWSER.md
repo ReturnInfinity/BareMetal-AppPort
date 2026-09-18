@@ -1324,6 +1324,59 @@ committed, being a large derived artifact easy to regenerate from this
 recipe) would need to be re-run with a partial subset of the 614 stub
 slots restored to real content to test intermediate sizes.
 
+### Attempted threshold narrowing: found a reconstruction artifact, not a clean answer
+
+Followed the step above -- re-ran the pruned-bundle recipe (eval the
+real bundle, capture each module's real source via V8's own
+`Function.prototype.toString()`, diff against the known-clean pruned
+array to find the 614 stubbed indices, restore a chosen fraction of
+them back to real source) to build intermediate variants at roughly
+0%, 25%, 50%, 75%, and 100% restored.
+
+**Validated the reconstruction mechanism first:** at 100% restored,
+the rebuilt file is byte-for-byte identical (`cmp` confirmed) to the
+real original `swagger-bundle.js` -- the array-boundary extraction and
+join logic are correct.
+
+**But at 0% restored -- which should be equivalent to the already-
+verified-clean pruned-bundle.js -- the reconstruction is NOT
+equivalent in practice.** It differs by 119 bytes from the real
+pruned-bundle.js file (536,392 vs. 536,273) because this reconstruction
+re-wraps the array in the original bundle's full UMD prelude/suffix
+(`!function(e,t){"object"==typeof exports...}(this,function(){return
+...})`), whereas the actual pruned-bundle.js on disk has that outer
+UMD shell stripped, keeping only the inner flat
+`!function(e){...}([...])` form. Boot-tested this "0%" reconstruction
+12 times: **7/12 crashed** (58%, all but one the same `gc_obj_list`
+assertion) -- compared to the real pruned-bundle.js's 15/15 clean, both
+tested back-to-back through the identical build/boot harness as a
+direct control.
+
+**This means the intermediate variants built this way are not valid
+data points for a pure size/module-count bisection** -- the
+reconstruction process itself (most likely the reintroduced UMD
+wrapper, though not confirmed in isolation) has a large, confounding
+effect independent of the module content changes being tested. Rather
+than report misleading 25%/50%/75% numbers built on a flawed
+methodology, this round stopped here instead of building on top of an
+unverified confound.
+
+**Real, narrower next step now identified:** a byte-range truncation
+approach (keep the real bundle's array elements as verbatim raw text
+slices up to some point, replacing everything after with stubs,
+without the eval/`toString()`/rejoin round-trip and without touching
+the UMD wrapper at all) would avoid this confound entirely -- not yet
+attempted. Separately, isolating whether the UMD wrapper's presence
+alone (independent of size) affects the crash rate would also be worth
+a dedicated, controlled test.
+
+**Process note:** this round was done directly (not via a forked
+subagent) after `Agent`/fork launches began failing with `Fork is not
+available inside a forked worker` and, once, silently returning
+fabricated-looking internal briefing text instead of doing any work --
+an apparent tooling issue after many sequential fork launches in one
+session, reported separately, not a finding about this codebase.
+
 ## Honest assessment: how close is this to "a minimal headless browser"?
 
 Close, for toy/simple pages: fetch (curl), parse (lexbor), and run

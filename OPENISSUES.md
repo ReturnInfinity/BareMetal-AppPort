@@ -848,8 +848,21 @@ account of why this works and everything it took.
   `Schema`-singleton leak was real but very likely a correlated
   symptom, not the cause. Still not root-caused or fixed at the
   QuickJS-ng-internals level; see `BROWSER.md`'s "Bisection result"
-  section for the full methodology and the un-attempted next step
-  (binary-search the size threshold between 536KB and 1.4MB).
+  section for the full methodology.
+- **Attempted threshold narrowing hit a reconstruction artifact, not a
+  clean answer.** Rebuilding intermediate-size variants (via eval +
+  `Function.prototype.toString()` + rejoin, same recipe as the 536KB
+  pruned file) validated correctly at the extremes (100% restored is
+  byte-identical to the real bundle), but at 0% restored -- which
+  should equal the known-clean pruned-bundle.js -- differed by 119
+  bytes (re-wraps the array in the original's UMD prelude, which the
+  real pruned file has stripped) and crashed **7/12** (58%) against the
+  real file's 15/15 clean in a direct back-to-back control. The
+  intermediate 25%/50%/75% variants built the same way were not
+  boot-tested, since they'd rest on the same unverified confound. See
+  `BROWSER.md`'s "Attempted threshold narrowing" section for the full
+  writeup and the real next step (byte-range truncation of verbatim
+  original text, no eval/toString round-trip).
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 
