@@ -1,18 +1,21 @@
 // fetch.c -- the first real fetch -> parse pipeline: libcurl (see
 // curltest.c at the repo root for the plain HTTP/HTTPS-only version
-// this borrows its CA-bundle/write-callback handling from) GETs
-// FETCH_URL into an in-memory buffer, then lexbor (see
-// examples/lexbor/hello/hello.c for the standalone parser demo) parses
-// that buffer into a real DOM and answers two small real queries
-// against it: the document's <title> text, and how many <a> tags it
-// contains (via a CSS selector, same lxb_selectors_find() pattern
-// hello.c already used).
+// this borrows its CA-bundle/write-callback handling from) GETs a URL
+// into an in-memory buffer, then lexbor (see examples/lexbor/hello/
+// hello.c for the standalone parser demo) parses that buffer into a
+// real DOM and answers two small real queries against it: the
+// document's <title> text, and how many <a> tags it contains (via a
+// CSS selector, same lxb_selectors_find() pattern hello.c already
+// used).
 //
-// FETCH_URL is the same https://example.com/ curltest.c already
-// fetches, on purpose -- a small, stable, dependency-free page is more
-// useful here as a known-good target than picking a new one, and it
-// keeps this example's expected output predictable: one <title>
-// ("Example Domain") and exactly one <a> tag.
+// The URL comes from argv[1] -- crt0.c's fc_parse_args_param() already
+// turns `./baremetal.sh start "https://..."` 's kernel `args=` boot
+// param into a real argv, so this app doesn't need to do anything
+// special to accept one. FETCH_URL (the same https://example.com/
+// curltest.c fetches) is only the fallback when no arg is given, kept
+// as a known-good default with predictable output (one <title>,
+// "Example Domain", and exactly one <a> tag) -- not a hardcoded target
+// anymore.
 
 #include <stdio.h>
 #include <string.h>
@@ -71,10 +74,12 @@ static lxb_status_t count_a_cb(lxb_dom_node_t *node, lxb_css_selector_specificit
 	return LXB_STATUS_OK;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+	const char *url = argc > 1 ? argv[1] : FETCH_URL;
+
 	printf("BareMetal fetch+parse -- libcurl %s + lexbor\n", curl_version());
-	printf("GET %s\n\n", FETCH_URL);
+	printf("GET %s\n\n", url);
 
 	curl_global_init(CURL_GLOBAL_DEFAULT);
 
@@ -85,7 +90,7 @@ int main(void)
 		return 1;
 	}
 
-	curl_easy_setopt(h, CURLOPT_URL, FETCH_URL);
+	curl_easy_setopt(h, CURLOPT_URL, url);
 	curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
 	curl_easy_setopt(h, CURLOPT_USERAGENT, "BareMetal-fetch/1.0");
 	curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
