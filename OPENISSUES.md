@@ -744,6 +744,29 @@ account of why this works and everything it took.
   code itself (`iana.org`, whose scripts never call `createElement`/
   `appendChild`, had zero crashes across its own regression runs). See
   `BROWSER.md`'s "DOM mutation" section for exact boot logs.
+- **Fixed:** the `getElementById`/`querySelectorAll` gap above, closing
+  out the original DOM follow-up list entirely (only `Node.removeChild`,
+  `navigator`, and most `Window` methods remain named gaps).
+  `document.querySelectorAll`/`Element.querySelectorAll` reuse
+  `document_querySelector`'s exact scaffolding with a collect-all
+  callback, returning a real JS `Array` (`JS_NewArray()` +
+  `JS_SetPropertyUint32()`, `.length`/indexing verified with real
+  `JS_Eval`'d test code); `document.getElementById` is a direct
+  attribute-equality tree walk rather than a `"#"+id` CSS-selector
+  query, to match exact id-string semantics without selector-escaping
+  edge cases. Hermetic round-trip test added to `browser.c`'s static
+  fixture (byId hit/miss, `querySelectorAll` length/indexing/zero-match)
+  -- boot-verified. Regression sweep (`example.com`/`iana.org`/
+  `wikipedia.org`) unchanged. `httpbin.org` re-surfaced the already-
+  parked intermittent crash twice in a row this round, this time
+  printing `Assertion failed: list_empty(&rt->gc_obj_list)` (a QuickJS-
+  ng-internal GC-list consistency check) immediately before the crash
+  dump -- sharper evidence than any prior round had (previously only
+  raw fault `RIP`s), pointing concretely at a real reference/lifetime
+  leak rather than random corruption. **Not re-investigated further**,
+  per the user's standing decision to stop chasing this bug -- recorded
+  as a new data point. See `BROWSER.md`'s "`getElementById` /
+  `querySelectorAll`" section for exact boot logs.
 - **MEMSIZE needs bumping well past the 4MiB Firecracker default**,
   same story as every other QuickJS/lexbor example.
 

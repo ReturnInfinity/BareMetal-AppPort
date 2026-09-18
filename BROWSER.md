@@ -41,6 +41,28 @@ lexbor's DOM API, the same way a small C `jsdom` would be built.
   absent, matching real DOM `className` semantics -- unlike
   `getAttribute("class")`, a page doing `el.className.split(' ')` on a
   perfectly ordinary class-less element won't crash.
+- **`document.querySelectorAll(selector)`** and
+  **`Element.querySelectorAll(selector)`** -- share `querySelector`'s
+  exact parse/init scaffolding (`query_selector_all()`), just with a
+  collect-all callback (`qsa_find_cb`) instead of keep-first, and
+  return a real JS `Array` (`JS_NewArray()` + `JS_SetPropertyUint32()`
+  per match) -- verified with real `JS_Eval`'d test code that `.length`
+  and numeric indexing both work correctly, not assumed. The
+  element-scoped version passes that element itself as the search
+  root: `lxb_selectors_find()` already excludes the root node from
+  matching by default (confirmed by reading `lxb_selectors_tree()`'s
+  `LXB_SELECTORS_OPT_MATCH_ROOT` check in lexbor's own source -- that
+  option is never set here), which happens to be exactly real
+  `querySelectorAll()`'s "descendants only, never the element itself"
+  semantics, with no extra exclusion logic needed.
+- **`document.getElementById(id)`** -- deliberately a direct
+  depth-first tree walk (`find_by_id_recursive()`, matching by
+  `id`-attribute string equality), not a `"#" + id` CSS-selector query.
+  A bare `#id` selector can't represent every string a real `id`
+  attribute can legally hold (a leading digit, a space, `.`/`:`, ...)
+  without escaping this scope doesn't implement -- the tree walk
+  matches real `getElementById()`'s exact-string-equality semantics
+  with no selector-syntax edge cases to worry about at all.
 - **`document.documentElement`/`.body`/`.head`** (getters) -- direct
   lexbor accessors (`lxb_dom_document_element()`,
   `lxb_html_document_body_element()`, `lxb_html_document_head_element()`),
@@ -97,11 +119,12 @@ completion design -- there is nothing for QuickJS's GC to free when an
 Kept deliberately small for a first pass -- each of these is a real,
 addable follow-up, not a discovered blocker:
 
-- **`getElementById`/`querySelectorAll`** -- `querySelector` (single
-  result) covers the binding-layer plumbing; both would reuse the same
-  `lxb_selectors_find()` call, just with a different callback
-  (collect-all instead of keep-first) or a direct `id` attribute
-  lookup instead of a full selector parse.
+- **`getElementById`/`querySelectorAll`** -- now bound (see "What's
+  bound" above): `document.querySelectorAll`/`Element.querySelectorAll`
+  reuse `querySelector`'s exact scaffolding with a collect-all callback
+  returning a real JS `Array`; `getElementById` is a direct tree walk
+  rather than a CSS-selector query, to match exact id-string-equality
+  semantics without selector-escaping edge cases.
 - **DOM mutation** -- `document.createElement`/`Element.appendChild`/
   `.setAttribute`/`.remove` are now bound (see "DOM mutation" below).
   `Node.removeChild(child)` (the older, two-party form that must throw
@@ -123,15 +146,15 @@ addable follow-up, not a discovered blocker:
   `addEventListener` no longer throws (see "What's bound" above), but
   a registered listener is never called -- there is no
   `DOMContentLoaded`/`load`/click event to ever fire it.
-- **`getElementById`/`querySelectorAll` still not bound**, `Node.
-  removeChild` still not bound (see above), and `window` has no method
-  beyond the two event-listener stubs and `navigator` doesn't exist at
-  all -- no `window.matchMedia`/`requestAnimationFrame`/etc. A real
-  page's `<script>` that expects any of these, or DOM properties beyond
-  `querySelector`/`textContent`/`tagName`/`getAttribute`/`className`/
-  `documentElement`/`body`/`head`/`createElement`/`appendChild`/
-  `setAttribute`/`remove`, will throw a `ReferenceError`/`TypeError` on
-  first use -- expected under this scope, not a bug to chase.
+- **`Node.removeChild` still not bound** (see above), and `window` has
+  no method beyond the two event-listener stubs and `navigator` doesn't
+  exist at all -- no `window.matchMedia`/`requestAnimationFrame`/etc. A
+  real page's `<script>` that expects any of these, or DOM properties
+  beyond `querySelector`/`querySelectorAll`/`getElementById`/
+  `textContent`/`tagName`/`getAttribute`/`className`/`documentElement`/
+  `body`/`head`/`createElement`/`appendChild`/`setAttribute`/`remove`,
+  will throw a `ReferenceError`/`TypeError` on first use -- expected
+  under this scope, not a bug to chase.
 - **No CSS cascade/computed style/layout, ever** -- this stays a
   DOM+JS headless browser, not a pixel-rendering one (see `QUICKJS.md`/
   `LEXBOR.md`'s framing).
@@ -149,8 +172,9 @@ that repo.
 
 `examples/lexbor/browser/browser.c` parses a small static HTML string
 (no network -- kept hermetic, see `LEXBOR.md`'s `fetch.c` for the
-curl+lexbor pipeline this would combine with for a real fetched page)
-containing four `<script>` tags, each exercising one thing:
+curl+lexbor pipeline this would combine with for a real fetched page),
+now up to seven `<script>` tags as later rounds added bindings to
+exercise:
 
 1. `null.foo;` -- an intentional `TypeError`, proving a throwing
    script doesn't abort the rest of the page.
@@ -160,15 +184,32 @@ containing four `<script>` tags, each exercising one thing:
 3. `.tagName`/`.getAttribute("class")` on the same element.
 4. `document.querySelector("#nope")` -- proves a non-matching selector
    resolves to JS `null` rather than throwing or crashing.
+5. `typeof Element`/`document.body instanceof Element` -- the isolated
+   check for the global `Element` constructor (see "Global `Element`
+   constructor" below).
+6. The full DOM-mutation round-trip: `createElement`, `setAttribute`,
+   `appendChild`, then a fresh `querySelector()` proving the new
+   element is genuinely in the tree.
+7. `getElementById` (hit against a second static `<p id="msg2">`, and a
+   miss) and `querySelectorAll("p")` (`.length` plus per-index
+   `.tagName` against both `<p>` tags, and a zero-match selector
+   proving a real empty array comes back, not `null`/`undefined`).
 
 Verified booting for real through the actual `build-app.sh` /
-`BareMetal-Firecracker` pipeline, first attempt:
+`BareMetal-Firecracker` pipeline:
 
 ```
 Uncaught exception: TypeError: cannot read property 'foo' of null
 DOM says: Hello
 tagName=P class=greeting
 missing is null
+typeof Element=function
+body instanceof Element=true
+created tagName=DIV
+byId msg2 text=World
+byId miss=null
+qsa p length=2 tagNames=P,P
+qsa none length=0
 ```
 
 ## Live fetch + live script execution: `examples/lexbor/browser-fetch/browser_fetch.c`
@@ -661,6 +702,80 @@ created tagName=DIV
 - Static `examples/lexbor/browser/browser.c` test -- the original five
   scripts' output unchanged; the new 6th script's output shown above.
 
+## `getElementById` / `querySelectorAll`
+
+The last two items from the original DOM follow-up list, closing it
+out entirely (only `Node.removeChild`, `navigator`, and most `Window`
+methods remain as named gaps after this). Added identically to both
+`examples/lexbor/browser/browser.c` and `examples/lexbor/browser-fetch/
+browser_fetch.c`, same as every prior binding-layer change.
+
+**`document.querySelectorAll(selector)`/`Element.querySelectorAll(selector)`**
+share `document_querySelector`'s exact CSS-parser/selector-init
+scaffolding via a new `query_selector_all()` helper -- only the
+callback changes (`qsa_find_cb` collects every match instead of
+keeping the first) and, for the element-scoped version, the search
+root (that element instead of the whole document). Each match is
+appended to a real JS `Array` via `JS_NewArray()` +
+`JS_SetPropertyUint32()`; verified with real `JS_Eval`'d test code
+(not assumed) that QuickJS maintains a correct `.length` and that
+numeric indexing (`arr[0].tagName`) works. The element-scoped case's
+"don't match the element itself, only its descendants" semantics come
+for free: reading `lxb_selectors_tree()` in lexbor's own source shows
+`root` is only included in matching when the caller explicitly sets
+`LXB_SELECTORS_OPT_MATCH_ROOT`, which this port never does -- exactly
+real `querySelectorAll()`'s scoping rule, no extra logic needed.
+
+**`document.getElementById(id)`** is deliberately a direct recursive
+tree walk (`find_by_id_recursive()`, matching by `id`-attribute string
+equality via `lxb_dom_element_get_attribute()`), not a `"#" + id`
+CSS-selector query the way `querySelector()` works. A bare `#id`
+selector can't represent every string a real `id` attribute is legally
+allowed to hold (a leading digit, an embedded space, `.`/`:`/etc.)
+without CSS escaping this scope doesn't implement -- the tree walk
+matches real DOM `getElementById()`'s exact-string-equality contract
+with none of that edge-case surface.
+
+**Hermetic test** (`browser.c`'s static fixture, 7th `<script>`):
+`getElementById("msg2")` finds a second static `<p>` by id;
+`getElementById("nope")` returns `null`; `querySelectorAll("p")`
+returns `.length === 2` with correct per-index `.tagName`; a
+zero-match selector (`.nope`) returns a real empty array
+(`.length === 0`), not `null`/`undefined`. All passed on boot (see
+"Example" above for the full transcript).
+
+**Regression sweep via `browser_fetch.c`:**
+- `example.com` -- identical to documented baseline.
+- `iana.org` -- identical (`not a function` on jQuery's external
+  script, `$ is not defined` on the inline one) -- neither script
+  touches `getElementById`/`querySelectorAll`.
+- `wikipedia.org` -- identical (`navigator is not defined`,
+  `not a function`) -- same reason, unaffected.
+- `httpbin.org` -- **the already-parked intermittent crash resurfaced,
+  2 boots in a row this time, with new evidence worth recording even
+  though it wasn't chased further** (per the standing decision to stop
+  investigating it): both crashes now print
+  `Assertion failed: list_empty(&rt->gc_obj_list) (quickjs.c:
+  JS_FreeRuntime: 2704)` immediately before the register dump -- a
+  QuickJS-ng-internal consistency check, run at `JS_FreeRuntime()`
+  time, catching that its own GC object list is *not* empty when it
+  should be. This is more specific than any prior evidence for this
+  bug (previous rounds only had raw fault `RIP`s) and points concretely
+  at a real reference/lifetime leak somewhere keeping a `JSValue` alive
+  past when it should've been collected -- consistent with, but not
+  proof of, the already-recorded hypothesis that this lives in the
+  binding layer's interaction with QuickJS's GC rather than genuinely
+  inside QuickJS-ng in isolation. Both crashes: identical `RIP`
+  (`FFFF80000020501F`) and `RSP`, after both of `httpbin.org`'s
+  external scripts (`swagger-ui-bundle.js`, `jquery.min.js`) had
+  already printed their own real, distinct exceptions -- same
+  "crashes only after scripts finish, during teardown" shape as every
+  previous occurrence. **Not re-investigated further, per the user's
+  explicit decision** -- recorded here as a new, sharper data point for
+  whoever resumes that investigation, not chased into a fix.
+- Static `browser.c` test -- see "Example" above for the full,
+  unchanged-plus-new-7th-script transcript.
+
 ## Stack-depth crash investigation (partial progress, not fully fixed)
 
 The "unreproduced anomaly" noted above (one `Exception 0x06 (UD)` on
@@ -843,31 +958,38 @@ partially-diagnosed, still-open QuickJS-internal crash that can occur
 after running several scripts from one fetched page.
 
 For the DOM+JS binding layer itself, the trend from earlier rounds
-holds all the way through five rounds now (growable buffer, window
+holds all the way through seven rounds now (growable buffer, window
 stub, external script fetching, DOM properties/window stub methods,
-global `Element`): `httpbin.org`'s `relative-time.js`-class scripts run
-clean with zero exceptions when they don't need anything beyond this
-scope's DOM surface; `$ is not defined` on `iana.org` is resolved at
-the fetch level (jQuery genuinely loads and runs) but still fails, now
-past `documentElement`-class checks and into a *different*
-`not a function` gap; `wikipedia.org`'s inline script no longer fails
-on `className`/`documentElement` at all, and its external script no
-longer fails on `Element is not defined`, progressing each time to a
-later, more specific error (`not a function`, then `navigator is not
-defined`); every external script on every page now fetches and runs
-(no crash, ever, since the crash fix -- except one unreproduced,
-uncorrelated anomaly noted above) to its own real, distinct exception.
-The pattern holds: each round's fix makes real pages fail later, for
-narrower and more specific reasons, never the same wall twice.
-`window.addEventListener`/`removeEventListener` no longer throw, and
-neither does referencing the global `Element`, though `window` still
-has no other method (`matchMedia`, `requestAnimationFrame`, etc.) and
-`navigator` doesn't exist at all. No event handling ever fires (no
-event loop, by design), no `fetch`/XHR from JS, and no
-`getElementById`/`querySelectorAll`/DOM mutation (`document.
-createElement`, surfaced by name via `httpbin.org`'s jQuery, is exactly
-this gap) remain the honest gaps -- each a distinct, addable follow-up,
-not a structural blocker. The original network-fetch crash (lexbor
-`url`-arena reuse) and the `documentElement`/`className`/
-`addEventListener`/`Element`-reference gap on this list, and `navigator`
-is a newly-named next candidate alongside DOM mutation.
+global `Element`, DOM mutation, `getElementById`/`querySelectorAll`):
+`httpbin.org`'s scripts run further with each round (a `not a function`
+became a more specific `cssFloat`/`createElement`-of-undefined gap once
+`documentElement`/`Element` existed); `$ is not defined` on `iana.org`
+is resolved at the fetch level (jQuery genuinely loads and runs) but
+still fails, now past `documentElement`-class checks and into a
+*different* `not a function` gap; `wikipedia.org`'s inline script no
+longer fails on `className`/`documentElement`/`Element` at all,
+progressing each time to a later, more specific error
+(`not a function`, then `navigator is not defined`); every external
+script on every page now fetches and runs to its own real, distinct
+exception. The pattern holds: each round's fix makes real pages fail
+later, for narrower and more specific reasons, never the same wall
+twice.
+
+Every item from the original DOM/`Window` follow-up list is now bound
+except `Node.removeChild` (deliberately deferred -- needs real
+DOM-exception-code translation, not just a lexbor call) and most of
+`Window`'s surface (`navigator` doesn't exist at all; `window` has
+only the two event-listener stubs, no `matchMedia`/
+`requestAnimationFrame`/etc.). No event handling ever fires (no event
+loop, by design), and no `fetch`/XHR from JS. What's genuinely
+unresolved is not a missing binding but a bug: **running multiple
+external scripts against one real page can still intermittently crash
+the VM** (see "Stack-depth crash investigation" above) -- narrowed
+significantly across three investigation rounds (a real stack-depth
+bug found and fixed; the remaining crash traced to specific QuickJS-ng
+internal functions and, most recently, to a `list_empty(&rt->
+gc_obj_list)` assertion failure pointing at a genuine reference leak
+somewhere in the binding layer) but not yet root-caused or fixed.
+Every other binding gap here is a distinct, addable follow-up, not a
+structural blocker; this crash is the one open item that's a real bug
+rather than a scope cut.

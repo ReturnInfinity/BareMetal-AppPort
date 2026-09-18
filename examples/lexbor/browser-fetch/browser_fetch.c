@@ -403,6 +403,13 @@ static JSValue element_remove(JSContext *ctx, JSValueConst this_val,
 	return JS_UNDEFINED;
 }
 
+// Defined further down (after document_querySelector's parse/init
+// scaffolding, which query_selector_all() reuses) -- forward-declared
+// here since element_proto_funcs needs it before that point in the
+// file.
+static JSValue element_querySelectorAll(JSContext *ctx, JSValueConst this_val,
+					 int argc, JSValueConst *argv);
+
 static const JSCFunctionListEntry element_proto_funcs[] = {
 	JS_CGETSET_DEF("textContent", element_get_textContent, NULL),
 	JS_CGETSET_DEF("tagName", element_get_tagName, NULL),
@@ -411,6 +418,7 @@ static const JSCFunctionListEntry element_proto_funcs[] = {
 	JS_CFUNC_DEF("appendChild", 1, element_appendChild),
 	JS_CFUNC_DEF("setAttribute", 2, element_setAttribute),
 	JS_CFUNC_DEF("remove", 0, element_remove),
+	JS_CFUNC_DEF("querySelectorAll", 1, element_querySelectorAll),
 };
 
 static void register_element_class(JSRuntime *rt, JSContext *ctx)
@@ -488,6 +496,135 @@ static JSValue document_querySelector(JSContext *ctx, JSValueConst this_val,
 	return make_element(ctx, result.found);
 }
 
+// querySelectorAll/getElementById -- see browser.c's matching comments
+// for the full rationale (real JS Array via JS_NewArray()+
+// JS_SetPropertyUint32(), verified .length/indexing; getElementById as
+// a direct tree walk rather than a "#"+id selector, to match exact
+// attribute-string-equality semantics without CSS-selector escaping
+// edge cases).
+struct qsa_result {
+	JSContext *ctx;
+	JSValue arr;
+	uint32_t count;
+};
+
+static lxb_status_t qsa_find_cb(lxb_dom_node_t *node,
+				 lxb_css_selector_specificity_t spec, void *ctx_ptr)
+{
+	(void)spec;
+	struct qsa_result *r = ctx_ptr;
+	JS_SetPropertyUint32(r->ctx, r->arr, r->count++, make_element(r->ctx, node));
+	return LXB_STATUS_OK;
+}
+
+static JSValue query_selector_all(JSContext *ctx, lxb_dom_node_t *root, JSValueConst sel_val)
+{
+	const char *sel = JS_ToCString(ctx, sel_val);
+	if (!sel)
+		return JS_EXCEPTION;
+
+	lxb_css_parser_t *parser = lxb_css_parser_create();
+	lxb_status_t status = lxb_css_parser_init(parser, NULL);
+	if (status != LXB_STATUS_OK) {
+		JS_FreeCString(ctx, sel);
+		lxb_css_parser_destroy(parser, true);
+		return JS_ThrowInternalError(ctx, "lxb_css_parser_init failed");
+	}
+
+	lxb_css_selector_list_t *list =
+		lxb_css_selectors_parse(parser, (const lxb_char_t *)sel, strlen(sel));
+	JS_FreeCString(ctx, sel);
+	if (parser->status != LXB_STATUS_OK) {
+		lxb_css_parser_destroy(parser, true);
+		return JS_ThrowTypeError(ctx, "invalid selector");
+	}
+
+	lxb_selectors_t *selectors = lxb_selectors_create();
+	status = lxb_selectors_init(selectors);
+	if (status != LXB_STATUS_OK) {
+		lxb_selectors_destroy(selectors, true);
+		lxb_css_parser_destroy(parser, true);
+		lxb_css_selector_list_destroy_memory(list);
+		return JS_ThrowInternalError(ctx, "lxb_selectors_init failed");
+	}
+
+	JSValue arr = JS_NewArray(ctx);
+	struct qsa_result result = { .ctx = ctx, .arr = arr, .count = 0 };
+	status = lxb_selectors_find(selectors, root, list, qsa_find_cb, &result);
+
+	lxb_selectors_destroy(selectors, true);
+	lxb_css_parser_destroy(parser, true);
+	lxb_css_selector_list_destroy_memory(list);
+
+	if (status != LXB_STATUS_OK) {
+		JS_FreeValue(ctx, arr);
+		return JS_ThrowInternalError(ctx, "lxb_selectors_find failed");
+	}
+
+	return arr;
+}
+
+static JSValue document_querySelectorAll(JSContext *ctx, JSValueConst this_val,
+					  int argc, JSValueConst *argv)
+{
+	(void)this_val;
+	if (argc < 1)
+		return JS_NewArray(ctx);
+	return query_selector_all(ctx, lxb_dom_interface_node(g_document), argv[0]);
+}
+
+static JSValue element_querySelectorAll(JSContext *ctx, JSValueConst this_val,
+					 int argc, JSValueConst *argv)
+{
+	lxb_dom_node_t *node = JS_GetOpaque(this_val, element_class_id);
+	if (!node)
+		return JS_ThrowTypeError(ctx, "querySelectorAll called on a null Element");
+	if (argc < 1)
+		return JS_NewArray(ctx);
+	return query_selector_all(ctx, node, argv[0]);
+}
+
+static lxb_dom_node_t *find_by_id_recursive(lxb_dom_node_t *node, const char *id, size_t id_len)
+{
+	for (; node != NULL; node = node->next) {
+		if (node->type == LXB_DOM_NODE_TYPE_ELEMENT) {
+			size_t len = 0;
+			const lxb_char_t *value = lxb_dom_element_get_attribute(
+				lxb_dom_interface_element(node),
+				(const lxb_char_t *)"id", 2, &len);
+			if (value && len == id_len && memcmp(value, id, id_len) == 0)
+				return node;
+		}
+
+		lxb_dom_node_t *found = find_by_id_recursive(node->first_child, id, id_len);
+		if (found)
+			return found;
+	}
+
+	return NULL;
+}
+
+static JSValue document_getElementById(JSContext *ctx, JSValueConst this_val,
+					int argc, JSValueConst *argv)
+{
+	(void)this_val;
+	if (argc < 1)
+		return JS_NULL;
+
+	const char *id = JS_ToCString(ctx, argv[0]);
+	if (!id)
+		return JS_EXCEPTION;
+
+	lxb_dom_node_t *root = lxb_dom_interface_node(g_document);
+	lxb_dom_node_t *found = find_by_id_recursive(root->first_child, id, strlen(id));
+	JS_FreeCString(ctx, id);
+
+	if (!found)
+		return JS_NULL;
+
+	return make_element(ctx, found);
+}
+
 // document.documentElement/.body/.head -- direct lexbor accessors, not
 // a CSS-selector query like querySelector() uses: lexbor already tracks
 // these three as plain struct fields/inline accessors
@@ -556,6 +693,8 @@ static JSValue document_createElement(JSContext *ctx, JSValueConst this_val,
 
 static const JSCFunctionListEntry document_props[] = {
 	JS_CFUNC_DEF("querySelector", 1, document_querySelector),
+	JS_CFUNC_DEF("querySelectorAll", 1, document_querySelectorAll),
+	JS_CFUNC_DEF("getElementById", 1, document_getElementById),
 	JS_CFUNC_DEF("createElement", 1, document_createElement),
 	JS_CGETSET_DEF("documentElement", document_get_documentElement, NULL),
 	JS_CGETSET_DEF("body", document_get_body, NULL),
