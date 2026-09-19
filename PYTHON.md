@@ -97,8 +97,9 @@ just pyconfig.h.in) against this port's files
   requires `MAP_ANONYMOUS` and rejects file-backed mappings -- the same
   shape. Functional, with the same caveat SQLite/curl/mbedTLS already
   live with (`OPENISSUES.md`'s "Heap" section): total interpreter heap
-  is capped at whatever `b_system(FREE_MEMORY)` reports at boot, and
-  freed arenas are reused but never shrink the process's footprint.
+  is capped at the boot RAM plus whatever hot-plug budget the host
+  allows (`b_system(GROW_MEMORY)`, `baremetal.sh`'s `MEMHOTPLUG_MAX`),
+  and freed arenas are reused but never shrink the process's footprint.
 - **Filesystem is in unusually good shape for this.** `ext4_shim.c` now
   backs real `stat`/`lstat`/`symlink`/`readlink`/`realpath` (`musl`'s
   `realpath()` composes `open`/`lstat`/`readlink`, all real here) --
@@ -408,10 +409,12 @@ Compiled with **zero new C shim code**, only config work:
   in 4 MiB before the heap even starts. Not yet measured: the actual
   *working-set* minimum once running (vs. just "large enough to load
   the binary and get through startup") -- 256 MiB was picked
-  generously to get a clean first boot, not tuned down. Confirms
-  `OPENISSUES.md`'s "no growth beyond the initial `b_system(FREE_MEMORY)`
-  ceiling" caveat is a real, not just theoretical, concern for Python
-  specifically -- pymalloc arenas, the bytecode compiler, and any real
+  generously to get a clean first boot, not tuned down. Memory hot-plug
+  (`OPENISSUES.md`'s "Heap growth is bounded by the host's hot-plug
+  budget") has since taken the edge off -- the heap now grows on demand
+  up to `baremetal.sh`'s `MEMHOTPLUG_MAX`, so `MEMSIZE` only has to fit
+  the image -- but memory remains a real, not just theoretical, concern
+  for Python specifically: pymalloc arenas, the bytecode compiler, and any real
   workload's object graph are all meaningfully larger than
   `hello.c`/`sqltest.c`'s footprint. `1-build.sh`/cloud deployment
   sizing (`3-upload.sh`) hasn't been looked at yet either.
