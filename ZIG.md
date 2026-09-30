@@ -166,9 +166,9 @@ forced by it, matching every other language here.
 
 **`-O ReleaseSmall` (never plain Debug mode) is required.** Zig's
 Debug-mode codegen for `std.Io.Writer`'s internals (the machinery
-`std.debug.print` goes through in Zig 0.15) emits some anonymous
-constant/vtable references as absolute 32-bit (`R_X86_64_32`)
-relocations that can't reach this port's high-canonical
+`std.debug.print` goes through since Zig 0.15; still true in 0.16) emits
+some anonymous constant/vtable references as absolute 32-bit
+(`R_X86_64_32`) relocations that can't reach this port's high-canonical
 (`0xFFFF8000...`) load address -- `ld` fails with "relocation truncated
 to fit". `ReleaseSmall`/`ReleaseFast` don't hit this (confirmed by a real
 link+boot of `std.debug.print` calls, both plain and formatted, under
@@ -215,8 +215,9 @@ every other language here already does), imported as the `bm` module
   hit the relocation-truncation issue described above; not something
   this port's build can paper over. Always pass `-O ReleaseSmall` (or
   `ReleaseFast`, untried but should behave the same way).
-- `examples/zig/webserver/webserver.zig` (real `std.net.Address.listen`/
-  `Server.accept`, matching `webserver.c`/`webserver-rs`/`webserver.py`):
+- `examples/zig/webserver/webserver.zig` (real `std.Io.net.IpAddress.listen`/
+  `Server.accept` through a single-threaded `std.Io.Threaded`, matching
+  `webserver.c`/`webserver-rs`/`webserver.py`):
   built via `build-zig-app.sh`, booted with real Firecracker networking
   (`BareMetal-Firecracker/scripts/mkbr0.sh`'s bridge/tap), and fetched
   with a real `curl` from the host -- `HTTP/1.1 200`, correct HTML body,
@@ -231,17 +232,20 @@ See `OPENISSUES.md`'s Zig section for the condensed version.
 
 - **Debug-mode builds don't link** (see "Build flow" above) -- use
   `-O ReleaseSmall`/`ReleaseFast`.
-- **`std.net.Stream.write()`/`writeAll()` (the current, non-deprecated
-  API) don't work -- use `std.posix.write()` instead.** Found while
-  building `examples/zig/webserver/webserver.zig`: Zig 0.15's rewritten
-  `Io.Writer` machinery backs `Stream.write()` with a real `sendmsg()`
+- **`std.Io.net.Stream.writer()` doesn't work -- write with a plain
+  `std.c.write()` on `stream.socket.handle` instead.** Found while
+  building `examples/zig/webserver/webserver.zig` (originally under Zig
+  0.15's `std.net.Stream.write()`; unchanged in 0.16's `std.Io.net`):
+  the `Io.Writer` machinery backs stream writes with a real `sendmsg()`
   syscall, and this port's `posix_shim.c` has no `SYS_sendmsg` (or
   `SYS_recvmsg`) case at all -- it falls through to the `-ENOSYS`
   default, which Zig's error-mapping doesn't expect from a real Linux
   `write()` and surfaces as `error.Unexpected`. Symptom: a connection
   that reads the client's request fine and then just closes with no
-  response, no crash. `std.posix.write()` (the plain `SYS_write` syscall
-  `Stream.write()` itself used before the 0.15 rework) works correctly,
+  response, no crash. A plain libc `write()` (the `SYS_write` syscall
+  `Stream.write()` itself used before the 0.15 rework -- Zig 0.16 removed
+  the `std.posix.write()` wrapper the example originally called) works
+  correctly,
   through the same `sys_write()`/`net_shim_send()` path `stream.read()`
   already uses on the way in -- see `webserver.zig`'s own comment on its
   local `writeAll()` helper. Fixing this for real would mean adding

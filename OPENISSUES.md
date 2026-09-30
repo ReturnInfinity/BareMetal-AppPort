@@ -502,9 +502,10 @@ account of why this works and everything it took.
   truncated to fit" at link time. `-O ReleaseSmall` (required regardless,
   see `build-zig-app.sh`) avoids this; an LLVM/Zig code-model
   limitation, not something this port's build can work around.
-- **`std.net.Stream.write()`/`writeAll()` don't work -- use
-  `std.posix.write()` instead.** Zig 0.15's `Io.Writer`-backed
-  `Stream.write()` sends via `sendmsg()`, and this port's `posix_shim.c`
+- **`std.Io.net.Stream.writer()` doesn't work -- use a plain
+  `std.c.write()` on the socket handle instead.** The `Io.Writer`-backed
+  stream writer (Zig 0.15's `std.net`, and still 0.16's `std.Io.net`)
+  sends via `sendmsg()`, and this port's `posix_shim.c`
   has no `SYS_sendmsg`/`SYS_recvmsg` case (`sys_writev`/`sys_readv` do
   handle socket fds correctly, `sendmsg`/`recvmsg` are a separate,
   unhandled syscall pair) -- silently drops to `-ENOSYS`, which Zig maps

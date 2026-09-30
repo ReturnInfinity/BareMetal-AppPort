@@ -43,7 +43,7 @@ case "$APP_SRC" in
 esac
 APP_NAME="$(basename "$APP_SRC" .zig).app"
 
-ZIG_VERSION="0.15.2"
+ZIG_VERSION="0.16.0"
 ZIG="$BUILD_DIR/zig-x86_64-linux-$ZIG_VERSION/zig"
 if [ ! -x "$ZIG" ]; then
 	echo "error: $ZIG not found -- run ./setup.sh first (see scripts/get-zig.sh)." >&2
