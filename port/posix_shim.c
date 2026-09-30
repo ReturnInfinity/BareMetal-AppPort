@@ -35,13 +35,23 @@
 // Heap (brk / anonymous mmap)
 //
 // There is no demand paging here: the app's mapped window is a single
-// fixed-size region set by the microVM's configured RAM (see
-// FIRECRACKER.md), and whatever we hand out has to already be backed
-// by real, mapped memory. This is a bump allocator starting right
-// after .bss (see __bss_stop in c.ld) and capped at the top of that
-// mapped window, queried once via b_system(FREE_MEMORY, 0, 0) (app RAM
+// contiguous region that starts out sized by the microVM's configured
+// RAM (see FIRECRACKER.md), and whatever we hand out has to already be
+// backed by real, mapped memory. This is a bump allocator starting
+// right after .bss (see __bss_stop in c.ld) and capped at the top of
+// that mapped window, queried via b_system(FREE_MEMORY, 0, 0) (app RAM
 // in MiB, counted from __image_base -- see c.ld). It does not
 // touch/zero memory itself, so the cap costs nothing until used.
+//
+// The window is not fixed for good, though: when the arena runs dry,
+// heap_grow() asks the kernel for more with b_system(GROW_MEMORY, mib)
+// and the kernel's virtio-mem driver hot-plugs RAM from Firecracker and
+// appends it to the same window, so heap_end simply moves up. How much
+// can be added is the host's call (Firecracker's /hotplug/memory
+// requested_size, see baremetal.sh's MEMHOTPLUG_* settings); once that
+// is exhausted, or on a VM with no virtio-mem device, GROW_MEMORY
+// returns the unchanged total and the allocation fails the way it
+// always did.
 //
 // mallocng routes any single allocation >=128KB through mmap()
 // regardless of whether brk() is working, so mmap() draws from this
@@ -82,9 +92,39 @@ static void heap_init(void)
 	heap_end = __image_base + app_ram_mib * 1024 * 1024;
 }
 
+// Try to push heap_end up by at least `need` bytes by hot-plugging more
+// RAM through the kernel (see the section comment above). The kernel
+// rounds the request up to whole virtio-mem blocks and clamps it to what
+// the host currently allows, so the window may grow by more or less than
+// asked -- callers re-check the space they need afterwards. Returns 1 if
+// heap_end moved at all, 0 if nothing could be added.
+static int heap_grow(u64 need)
+{
+	u64 want_mib = (need + 1024 * 1024 - 1) / (1024 * 1024);
+	if (want_mib == 0)
+		want_mib = 1;
+
+	// heap_end is always __image_base + (app RAM in MiB), see heap_init()
+	u64 have_mib = ((u64)heap_end - (u64)__image_base) / (1024 * 1024);
+	u64 now_mib = b_system(GROW_MEMORY, want_mib, 0);
+	if (now_mib <= have_mib)
+		return 0;
+
+	heap_end = __image_base + now_mib * 1024 * 1024;
+	return 1;
+}
+
 static long sys_brk(long addr)
 {
 	heap_init();
+
+	// A break past the current ceiling isn't necessarily a failure any
+	// more: grow the window first, then apply the usual checks. musl's
+	// mallocng falls back to mmap() if brk() can't deliver, and that
+	// path grows the same way (heap_alloc()), so this mostly just keeps
+	// its one-page-at-a-time meta-area growth cheap.
+	if ((char *)addr > heap_end)
+		heap_grow((u64)addr - (u64)heap_end);
 
 	// heap_cur is a single bump pointer shared between brk() (this
 	// function) and mmap()'s own bump path (heap_alloc(), below) --
@@ -179,14 +219,21 @@ static void *heap_alloc(size_t n)
 	// The alignment bump above can itself push p past heap_end, which
 	// would otherwise underflow this subtraction into a huge bogus
 	// "remaining" instead of correctly reporting exhaustion.
-	if ((u64)p > (u64)heap_end) {
-		report_oom((u64)p - (u64)heap_end);
-		return 0;
-	}
-	u64 remaining = (u64)heap_end - (u64)p;
-	if (n > remaining) {
-		report_oom((u64)n - remaining);
-		return 0;
+	// Short of room? Ask the kernel for more before giving up. Each
+	// heap_grow() that succeeds moves heap_end, so loop until the
+	// request fits or the host has nothing more to give.
+	for (;;) {
+		u64 short_by;
+		if ((u64)p > (u64)heap_end)
+			short_by = ((u64)p - (u64)heap_end) + n;
+		else if (n > (u64)heap_end - (u64)p)
+			short_by = n - ((u64)heap_end - (u64)p);
+		else
+			break;
+		if (!heap_grow(short_by)) {
+			report_oom(short_by);
+			return 0;
+		}
 	}
 
 	heap_cur = p + n;

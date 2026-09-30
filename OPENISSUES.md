@@ -125,10 +125,18 @@ Not implemented (all fall through to `-ENOSYS`):
   loop exhausting the arena, but freed mmap space still can't flow
   back to `brk()`-backed small allocations (see next point) or to the
   OS.
-- **No growth beyond the initial `b_system(FREE_MEMORY)` ceiling.** The
-  heap size is fixed once, at first use; there's no mechanism to claim
-  more RAM even if more becomes available (e.g. if BareMetal's own
-  memory management changes).
+- **Heap growth is bounded by the host's hot-plug budget.** When the
+  arena runs dry, `heap_grow()` (`posix_shim.c`) asks the kernel for
+  more RAM with `b_system(GROW_MEMORY, mib)`; BareMetal-Firecracker's
+  virtio-mem driver plugs blocks from Firecracker and appends them to
+  the app's window, so `heap_end` just moves up. That only works up to
+  the `requested_size_mib` the host has PATCHed into Firecracker's
+  `/hotplug/memory` (`baremetal.sh` sets it to `MEMHOTPLUG_MAX` right
+  after boot, and its `mem <mib>` command changes it later). Past that,
+  or on a VM with no virtio-mem device, allocations fail exactly as they
+  used to. Nothing is ever handed back to the host either: BareMetal
+  never unplugs, so lowering the budget below what's already plugged
+  does nothing.
 - **Large (≥128KB) `malloc()`s share the same bump arena as `brk()`.**
   Works, but means a single big allocation can exhaust room that
   smaller `brk()`-backed allocations would otherwise have used; the

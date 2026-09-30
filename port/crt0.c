@@ -306,6 +306,16 @@ static int image_fits_in_ram(void)
 	if (need_mib <= have_mib)
 		return 1;
 
+	/* Not enough boot RAM for the image -- but the kernel can hot-plug
+	 * more (virtio-mem, b_system(GROW_MEMORY)) if the host has left it a
+	 * budget, and that memory is appended to the very same window
+	 * zero_bss() is about to walk. Try that before declaring defeat;
+	 * FREE_MEMORY reports the enlarged total from here on, which is what
+	 * posix_shim.c's heap_init() later sizes the heap from. */
+	have_mib = b_system(GROW_MEMORY, need_mib - have_mib, 0);
+	if (need_mib <= have_mib)
+		return 1;
+
 	/* Stack-local, deliberately not static: this runs before
 	 * zero_bss() -- and *because* the image doesn't fit in RAM, static
 	 * storage (anywhere in .bss, not just past the ceiling) isn't
@@ -323,7 +333,7 @@ static int image_fits_in_ram(void)
 	out_str(&p, u64_to_dec(need_mib, numbuf + sizeof(numbuf)));
 	out_str(&p, " MiB of RAM but this VM only has ");
 	out_str(&p, u64_to_dec(have_mib, numbuf + sizeof(numbuf)));
-	out_str(&p, " MiB -- give the VM more memory.\n");
+	out_str(&p, " MiB -- give the VM more memory (MEMSIZE or MEMHOTPLUG_MAX in baremetal.sh).\n");
 
 	b_output(msg, (u64)(p - msg));
 	return 0;
