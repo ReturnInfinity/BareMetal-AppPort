@@ -504,7 +504,7 @@ account of why this works and everything it took.
   limitation, not something this port's build can work around.
 - **`std.Io.net.Stream.writer()` doesn't work -- use a plain
   `std.c.write()` on the socket handle instead.** The `Io.Writer`-backed
-  stream writer (Zig 0.15's `std.net`, and still 0.16's `std.Io.net`)
+  stream writer (Zig 0.15's `std.net`, and still 0.16/0.17's `std.Io.net`)
   sends via `sendmsg()`, and this port's `posix_shim.c`
   has no `SYS_sendmsg`/`SYS_recvmsg` case (`sys_writev`/`sys_readv` do
   handle socket fds correctly, `sendmsg`/`recvmsg` are a separate,
@@ -514,6 +514,12 @@ account of why this works and everything it took.
   for the full account and the workaround). A real fix would add
   `SYS_sendmsg`/`SYS_recvmsg` to `posix_shim.c`/`net_shim.c`; not
   attempted.
+- **Since Zig 0.17, `std.Io.net.Stream.reader()` doesn't work either --
+  use a plain `std.c.read()` on the socket handle instead.** 0.17's
+  `Io.Threaded` reads sockets via `recvmsg()` rather than 0.16's
+  `readv()`, hitting the same `SYS_recvmsg` gap -- the connection is
+  reset right after the client sends its request. Same real fix as
+  above.
 - **Not exhaustively audited beyond `std.debug.print`/`std.Thread`/basic
   TCP server sockets.** The rest of `std` (more of `std.fs`,
   `std.process`, UDP, ...) is presumed to work the same way (real libc

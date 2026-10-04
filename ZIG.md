@@ -166,7 +166,7 @@ forced by it, matching every other language here.
 
 **`-O ReleaseSmall` (never plain Debug mode) is required.** Zig's
 Debug-mode codegen for `std.Io.Writer`'s internals (the machinery
-`std.debug.print` goes through since Zig 0.15; still true in 0.16) emits
+`std.debug.print` goes through since Zig 0.15; still true in 0.17) emits
 some anonymous constant/vtable references as absolute 32-bit
 (`R_X86_64_32`) relocations that can't reach this port's high-canonical
 (`0xFFFF8000...`) load address -- `ld` fails with "relocation truncated
@@ -235,7 +235,7 @@ See `OPENISSUES.md`'s Zig section for the condensed version.
 - **`std.Io.net.Stream.writer()` doesn't work -- write with a plain
   `std.c.write()` on `stream.socket.handle` instead.** Found while
   building `examples/zig/webserver/webserver.zig` (originally under Zig
-  0.15's `std.net.Stream.write()`; unchanged in 0.16's `std.Io.net`):
+  0.15's `std.net.Stream.write()`; unchanged in 0.16/0.17's `std.Io.net`):
   the `Io.Writer` machinery backs stream writes with a real `sendmsg()`
   syscall, and this port's `posix_shim.c` has no `SYS_sendmsg` (or
   `SYS_recvmsg`) case at all -- it falls through to the `-ENOSYS`
@@ -246,9 +246,17 @@ See `OPENISSUES.md`'s Zig section for the condensed version.
   `Stream.write()` itself used before the 0.15 rework -- Zig 0.16 removed
   the `std.posix.write()` wrapper the example originally called) works
   correctly,
-  through the same `sys_write()`/`net_shim_send()` path `stream.read()`
-  already uses on the way in -- see `webserver.zig`'s own comment on its
-  local `writeAll()` helper. Fixing this for real would mean adding
+  through the same `sys_write()`/`net_shim_send()` path -- see
+  `webserver.zig`'s own comment on its local `writeAll()` helper.
+- **Since Zig 0.17, `std.Io.net.Stream.reader()` doesn't work either --
+  read with a plain `std.c.read()` on `stream.socket.handle` instead.**
+  0.16's `Io.Threaded` read sockets via `readv()` (which `sys_readv`
+  services), but 0.17 switched `netReadPosix` to `recvmsg()` (to carry
+  ancillary/control data) -- the same missing-syscall gap as the write
+  side. Symptom: the client sees its connection reset right after
+  sending the request (the handler bails on `error.Unexpected` and closes
+  the socket with unread data, so lwIP sends a RST), and nothing is
+  logged. `webserver.zig` now reads with `std.c.read()`. Fixing this for real would mean adding
   `SYS_sendmsg`/`SYS_recvmsg` to `posix_shim.c`/`net_shim.c` (flattening
   the iovecs into the existing `net_shim_send`/`recv`, similar to how
   `sys_writev`/`sys_readv` already do) -- not attempted here, out of
