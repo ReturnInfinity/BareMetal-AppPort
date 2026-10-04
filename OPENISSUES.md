@@ -153,6 +153,12 @@ Not implemented (all fall through to `-ENOSYS`):
   enforcement needs a uid/gid model this port has none of anywhere
   (matches the "no process model" cuts above) — not just a missing
   syscall.
+- **`rename()` replaces an existing target non-atomically.**
+  lwext4's `ext4_frename()` refuses an existing destination, so
+  `ext4_shim_rename()` removes it first (same file-vs-directory rules
+  as Linux, and a directory target only if empty), then renames -- a
+  failure in between would lose the old target. `renameat2()` flags
+  (`RENAME_NOREPLACE`/`RENAME_EXCHANGE`) aren't supported (`-EINVAL`).
 - **Block device capacity is a hard-coded upper bound, not the real
   disk size.** There's no `b_system()` call to ask the kernel how big
   the backing drive actually is, so `blockdev_baremetal.c` just

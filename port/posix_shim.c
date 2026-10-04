@@ -516,6 +516,17 @@ static long sys_rmdir(long dirfd, const char *path)
 	return ext4_shim_rmdir(dirfd, path);
 }
 
+// musl's rename() issues SYS_rename directly on this arch, renameat()
+// SYS_renameat; renameat2() only with flags=0 (no RENAME_NOREPLACE/
+// RENAME_EXCHANGE -- ext4_shim_rename() has no atomic primitive to
+// build either on).
+static long sys_renameat2(long olddirfd, const char *oldpath, long newdirfd, const char *newpath, long flags)
+{
+	if (flags)
+		return -EINVAL;
+	return ext4_shim_rename(olddirfd, oldpath, newdirfd, newpath);
+}
+
 // rmdir() has its own direct syscall number on this arch (see
 // arch/x86_64/bits/syscall.h.in), but unlinkat(..., AT_REMOVEDIR) is
 // how a program calling the *at() form removes a directory instead of
@@ -1090,6 +1101,9 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_ftruncate:                         return sys_ftruncate(a1, a2);
 	case SYS_mkdir:                               return sys_mkdir(AT_FDCWD, (const char *)a1);
 	case SYS_mkdirat:                               return sys_mkdir(a1, (const char *)a2);
+	case SYS_rename:                        return sys_renameat2(AT_FDCWD, (const char *)a1, AT_FDCWD, (const char *)a2, 0);
+	case SYS_renameat:                      return sys_renameat2(a1, (const char *)a2, a3, (const char *)a4, 0);
+	case SYS_renameat2:                     return sys_renameat2(a1, (const char *)a2, a3, (const char *)a4, a5);
 	case SYS_rmdir:                                   return sys_rmdir(AT_FDCWD, (const char *)a1);
 	case SYS_chdir:                                     return sys_chdir((const char *)a1);
 	case SYS_fchdir:                                     return sys_fchdir(a1);
