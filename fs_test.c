@@ -1,5 +1,5 @@
 // fs_test.c -- exercises open/write/read/lseek/fstat/stat/unlink,
-// chdir/getcwd, mkdir/opendir/readdir/rmdir, symlink/readlink, and
+// rename, chdir/getcwd, mkdir/opendir/readdir/rmdir, symlink/readlink, and
 // timestamps against the EXT2 image mounted by ext4_shim.c. Proves the
 // musl -> posix_shim -> ext4_shim -> lwext4 file I/O path works end to
 // end.
@@ -300,7 +300,45 @@ int main(void)
 		return 1;
 	}
 
-	unlink("/dir_test/a.txt");
+	// rmdir() of a non-empty directory must refuse, not delete its
+	// contents (lwext4's ext4_dir_rm() underneath is recursive -- see
+	// ext4_shim_rmdir()).
+	if (rmdir(dir_path) == 0 || errno != ENOTEMPTY) {
+		printf("rmdir() of a non-empty directory didn't fail with ENOTEMPTY\n");
+		return 1;
+	}
+	if (stat("/dir_test/a.txt", &st) < 0) {
+		printf("rmdir() of a non-empty directory removed its contents\n");
+		return 1;
+	}
+
+	// rename: move a file, then rename over an existing file (replaces
+	// it), then refuse a file over a directory.
+	if (rename("/dir_test/a.txt", "/dir_test/c.txt") < 0) {
+		printf("rename() failed: %s\n", strerror(errno));
+		return 1;
+	}
+	if (stat("/dir_test/a.txt", &st) == 0 || stat("/dir_test/c.txt", &st) < 0) {
+		printf("rename() didn't move the file\n");
+		return 1;
+	}
+	if (rename("/dir_test/c.txt", "/dir_test/b.txt") < 0) {
+		printf("rename() over an existing file failed: %s\n", strerror(errno));
+		return 1;
+	}
+	char rb[2] = { 0 };
+	fd = open("/dir_test/b.txt", O_RDONLY);
+	read(fd, rb, 1);
+	close(fd);
+	if (rb[0] != 'a' || stat("/dir_test/c.txt", &st) == 0) {
+		printf("rename() over an existing file didn't replace it\n");
+		return 1;
+	}
+	if (rename("/dir_test/b.txt", "/") == 0 || errno != EISDIR) {
+		printf("rename() of a file over a directory didn't fail with EISDIR\n");
+		return 1;
+	}
+
 	unlink("/dir_test/b.txt");
 	if (rmdir(dir_path) < 0) {
 		printf("rmdir() of a populated-then-emptied directory failed: %s\n", strerror(errno));

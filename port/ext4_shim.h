@@ -45,6 +45,7 @@ long ext4_shim_fchdir(long fd);
 
 long ext4_shim_mkdir(long dirfd, const char *path);
 long ext4_shim_rmdir(long dirfd, const char *path);
+long ext4_shim_rename(long olddirfd, const char *oldpath, long newdirfd, const char *newpath);
 
 // Fills buf with as many Linux struct dirent records (see
 // ext4_shim.c) as fit in len, used to back musl's readdir() (issued

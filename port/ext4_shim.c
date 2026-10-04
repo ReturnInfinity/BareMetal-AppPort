@@ -393,6 +393,77 @@ long ext4_shim_unlink(long dirfd, const char *path)
 	return r == EOK ? 0 : -r;
 }
 
+// 1 if the directory at p has no entries besides "." and "..", 0 if it
+// has any (or can't be opened). Needed before ever calling
+// ext4_dir_rm() on a path that's only supposed to go if it's empty:
+// ext4_dir_rm() is recursive (rm -rf), not rmdir().
+static int ext4_shim_dir_is_empty(const char *p)
+{
+	ext4_dir d;
+	if (ext4_dir_open(&d, p) != EOK)
+		return 0;
+	int empty = 1;
+	const ext4_direntry *de;
+	while ((de = ext4_dir_entry_next(&d)) != 0) {
+		if ((de->name_length == 1 && de->name[0] == '.') ||
+		    (de->name_length == 2 && de->name[0] == '.' && de->name[1] == '.'))
+			continue;
+		empty = 0;
+		break;
+	}
+	ext4_dir_close(&d);
+	return empty;
+}
+
+// rename()/renameat(). lwext4's ext4_frename() links the new name and
+// drops the old one (fixing up a moved directory's ".." too), but
+// refuses outright if the new name already exists -- where POSIX
+// rename() replaces it. That replacement is done here first, with the
+// same type rules Linux enforces (file over directory -> EISDIR,
+// directory over file -> ENOTDIR, directory only over an *empty*
+// directory -- checked explicitly, see ext4_shim_dir_is_empty()). Not
+// atomic the way a real rename() is: a failure between the remove and
+// the link would lose the old target -- acceptable for
+// a single-process, no-journal (see lwext4_port/generated/
+// ext4_config.h) EXT2 port, where nothing else can observe the gap.
+long ext4_shim_rename(long olddirfd, const char *oldpath, long newdirfd, const char *newpath)
+{
+	ext4_shim_mount();
+
+	char oldbuf[EXT4_SHIM_PATH_MAX];
+	char newbuf[EXT4_SHIM_PATH_MAX];
+	const char *op = ext4_shim_resolve(olddirfd, oldpath, oldbuf, sizeof(oldbuf));
+	const char *np = ext4_shim_resolve(newdirfd, newpath, newbuf, sizeof(newbuf));
+	if (!op || !np)
+		return -EBADF;
+
+	int old_is_dir = ext4_inode_exist(op, EXT4_DE_DIR) == EOK;
+	if (!old_is_dir && ext4_inode_exist(op, EXT4_DE_UNKNOWN) != EOK)
+		return -ENOENT;
+
+	if (strcmp(op, np) == 0)
+		return 0;
+
+	if (ext4_inode_exist(np, EXT4_DE_DIR) == EOK) {
+		if (!old_is_dir)
+			return -EISDIR;
+		if (!ext4_shim_dir_is_empty(np))
+			return -ENOTEMPTY;
+		int r = ext4_dir_rm(np);
+		if (r != EOK)
+			return -r;
+	} else if (ext4_inode_exist(np, EXT4_DE_UNKNOWN) == EOK) {
+		if (old_is_dir)
+			return -ENOTDIR;
+		int r = ext4_fremove(np);
+		if (r != EOK)
+			return -r;
+	}
+
+	int r = ext4_frename(op, np);
+	return r == EOK ? 0 : -r;
+}
+
 long ext4_shim_mkdir(long dirfd, const char *path)
 {
 	ext4_shim_mount();
@@ -414,6 +485,10 @@ long ext4_shim_rmdir(long dirfd, const char *path)
 	const char *p = ext4_shim_resolve(dirfd, path, pathbuf, sizeof(pathbuf));
 	if (!p)
 		return -EBADF;
+
+	// ext4_dir_rm() deletes recursively; rmdir() must refuse instead.
+	if (ext4_inode_exist(p, EXT4_DE_DIR) == EOK && !ext4_shim_dir_is_empty(p))
+		return -ENOTEMPTY;
 
 	int r = ext4_dir_rm(p);
 	return r == EOK ? 0 : -r;

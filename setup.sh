@@ -23,6 +23,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-libsodium.sh"
 "$SCRIPT_DIR/scripts/get-lwext4.sh"
 "$SCRIPT_DIR/scripts/get-python.sh"
+"$SCRIPT_DIR/scripts/get-lua.sh"
 "$SCRIPT_DIR/scripts/get-rust.sh"
 "$SCRIPT_DIR/scripts/get-zig.sh"
 
@@ -58,6 +59,9 @@ LWEXT4_PORT="port/lwext4_port"
 PYTHON_DIR="$BUILD_DIR/Python-3.14.7"
 PYTHON_HOST_BUILD="$BUILD_DIR/host-python-build"
 PYTHON_PORT="port/python_port"
+
+LUA_DIR="$BUILD_DIR/lua-5.5.1"
+LUA_PORT="port/lua_port"
 
 # Run a command, staying silent unless it fails -- then dump its output
 # and abort. Keeps musl/lwIP's noisy per-file build logs off the screen
@@ -197,6 +201,18 @@ PYTHON_GETPATH_DEFINES='-DPREFIX="/" -DEXEC_PREFIX="/" -DVERSION="3.14" -DVPATH=
 # regardless of what these say.
 PYTHON_DYNLOAD_DEFINES='-DSOABI="baremetal" -DPYTHON_ABI_STRING="3"'
 
+# Lua's own headers only need musl's. -DLUA_USE_POSIX is the subset of
+# luaconf.h's LUA_USE_LINUX this port can actually back: _setjmp/
+# _longjmp for error handling, mkstemp() for os.tmpname(), fseeko/
+# ftello for file:seek(), and popen() for io.popen() -- which fails
+# cleanly here (musl's popen()/system() both stop at pipe2(), -ENOSYS
+# on this port -- see OPENISSUES.md), so io.popen()/os.execute() return
+# Lua errors rather than misbehaving. LUA_USE_LINUX's other half,
+# LUA_USE_DLOPEN, is left off: port/dlfcn_shim.c can load a module, but
+# its curated dl_exports[] table doesn't expose the Lua C API a module
+# would need to call back into (see LUA.md).
+LUA_CFLAGS="$CFLAGS -DLUA_USE_POSIX"
+
 mkdir -p "$BUILD_DIR"
 
 echo -e "${BOLD}Building libraries${NORMAL}"
@@ -329,6 +345,23 @@ echo "- Building lwext4"
 for src in "$LWEXT4_DIR"/src/*.c; do
 	obj="$BUILD_DIR/lwext4_$(basename "$src" .c).o"
 	gcc $LWEXT4_CFLAGS -o "$obj" "$src"
+done
+
+# Every src/*.c file except the two standalone programs: lua.c (the
+# `lua` command -- port/lua_port/lua.c replaces it, see LUA.md) and
+# luac.c (the bytecode compiler, a separate program with its own
+# main()). What's left is Lua's own "liblua" set -- the same list as
+# its src/Makefile's CORE_O plus LIB_O. Named lua_*.o, the same
+# per-library prefix every other object here uses, so build-app.sh
+# can pick them up by glob and an app other than lua.app can embed
+# Lua too (--gc-sections drops it everywhere else).
+echo "- Building Lua"
+for src in "$LUA_DIR"/src/*.c; do
+	case "$(basename "$src")" in
+	lua.c|luac.c) continue ;;
+	esac
+	obj="$BUILD_DIR/lua_$(basename "$src" .c).o"
+	gcc $LUA_CFLAGS -o "$obj" "$src"
 done
 
 # Unlike every other library above, CPython needs a *native* build of
@@ -515,5 +548,12 @@ done
 # once, not a step build-app.sh itself needs to know about.
 echo "- Building python.app"
 "$SCRIPT_DIR/build-app.sh" "$PYTHON_PORT/python.c" "$PYTHON_PORT/config_baremetal.c" "$PYTHON_PORT/frozen_encodings_baremetal.c"
+
+
+# Same reasoning as python.app just above: lua.app is the point of the
+# Lua build, so it's built here once, ready to go. Its one source is
+# this port's own entry point -- see LUA.md.
+echo "- Building lua.app"
+"$SCRIPT_DIR/build-app.sh" "$LUA_PORT/lua.c"
 
 # echo -e "${BOLD}Library builds complete${NORMAL}"

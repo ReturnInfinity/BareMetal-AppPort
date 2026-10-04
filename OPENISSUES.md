@@ -153,6 +153,12 @@ Not implemented (all fall through to `-ENOSYS`):
   enforcement needs a uid/gid model this port has none of anywhere
   (matches the "no process model" cuts above) — not just a missing
   syscall.
+- **`rename()` replaces an existing target non-atomically.**
+  lwext4's `ext4_frename()` refuses an existing destination, so
+  `ext4_shim_rename()` removes it first (same file-vs-directory rules
+  as Linux, and a directory target only if empty), then renames -- a
+  failure in between would lose the old target. `renameat2()` flags
+  (`RENAME_NOREPLACE`/`RENAME_EXCHANGE`) aren't supported (`-EINVAL`).
 - **Block device capacity is a hard-coded upper bound, not the real
   disk size.** There's no `b_system()` call to ask the kernel how big
   the backing drive actually is, so `blockdev_baremetal.c` just
@@ -423,6 +429,28 @@ role as every other section here:
   growth beyond the initial `b_system(FREE_MEMORY)` ceiling" caveat
   (see "Heap" above) is a real, not just theoretical, concern for
   Python specifically.
+
+## Lua (`port/lua_port/`)
+
+Lua 5.5.1 is vendored unmodified (`scripts/get-lua.sh`), built with
+`-DLUA_USE_POSIX`; `port/lua_port/lua.c` is this port's own entry point
+in place of Lua's standalone `src/lua.c`. See `LUA.md` for the full
+account -- this section is the condensed version:
+
+- **No `io.popen()`/`os.execute()`** -- both return Lua errors (musl's
+  `popen()`/`system()` stop at `pipe2()`, `-ENOSYS` here), matching the
+  Process model section above.
+- **No binary (C) modules** -- `package.cpath` is empty, and
+  `LUA_USE_DLOPEN` is off: `dlfcn_shim.c`'s `dl_exports[]` doesn't
+  expose the Lua C API a module would call back into. Pure-Lua modules
+  in `/lua/` work via `require()`.
+- **No sockets** -- stock Lua has no networking library; nothing here
+  adds one yet (LuaSocket, or a small module over `net_shim.c`, would).
+- **No REPL** -- the program is always `/lua/main.lua`.
+- **~1 MiB of heap before hot-plug** -- `lua.app`'s own 512 KiB C stack
+  (sized in `lua.c`'s `LUA_C_STACK_BYTES` comment) lives in `.bss`,
+  inside the 2 MiB boot window; past that, Lua depends on virtio-mem
+  growth like every other app (Heap section above).
 
 ## C++ (`port/cpp_port/`)
 
