@@ -1,6 +1,7 @@
 // webserver.zig -- Zig counterpart to webserver.c/webserver-rs/
 // webserver.py: a single-threaded HTTP server with a hit counter, built
-// on std.net.Address.listen/Server.accept. Exercises the musl ->
+// on std.Io.net.IpAddress.listen/Server.accept (Zig 0.16's std.Io
+// interface, driven by a single-threaded std.Io.Threaded instance). Exercises the musl ->
 // posix_shim -> net_shim -> lwIP TCP server-side (bind/listen/accept)
 // path via real std, the same way the other languages' webservers
 // already do -- and, since Zig's socket calls route through libc the
@@ -13,8 +14,8 @@ const port: u16 = 80;
 
 var hit_count: u64 = 0;
 
-// std.net.Stream.write()/writeAll() (the current, non-deprecated API,
-// backed by Zig 0.15's Io.Writer machinery) sends via a real sendmsg()
+// std.Io.net.Stream.writer() (the only write API Stream has, backed by
+// the Io.Writer machinery since Zig 0.15) sends via a real sendmsg()
 // syscall -- this port's posix_shim.c has no SYS_sendmsg case at all
 // (net_shim_send() is only reachable from plain write()/SYS_write, which
 // sys_write() already special-cases for socket fds). That surfaced here
@@ -22,34 +23,43 @@ var hit_count: u64 = 0;
 // -ENOSYS default case, mapped by Zig's error set to something it
 // doesn't expect from a real Linux write()) -- curl saw a connection
 // that read the request fine and then closed with no response at all.
-// std.posix.write() below is the *old*, plain SYS_write wrapper
-// (Stream.write() used this too before Zig 0.15's Io.Writer rework) and
-// works correctly through the exact same sys_write()/net_shim_send()
+// std.c.write() below is a plain libc write() (SYS_write -- what
+// Stream.write() used before Zig 0.15's Io.Writer rework; Zig 0.16
+// dropped the std.posix.write() wrapper this used to call) and works
+// correctly through the exact same sys_write()/net_shim_send()
 // path stream.read() already uses on the way in. See ZIG.md's "Known
 // gaps" for the SYS_sendmsg/SYS_recvmsg gap this works around.
-fn writeAll(stream: std.net.Stream, bytes: []const u8) std.posix.WriteError!void {
+fn writeAll(stream: std.Io.net.Stream, bytes: []const u8) error{WriteFailed}!void {
     var index: usize = 0;
-    while (index < bytes.len)
-        index += try std.posix.write(stream.handle, bytes[index..]);
+    while (index < bytes.len) {
+        const rc = std.c.write(stream.socket.handle, bytes[index..].ptr, bytes.len - index);
+        if (rc <= 0) return error.WriteFailed;
+        index += @intCast(rc);
+    }
 }
 
-fn handleConnection(stream: std.net.Stream, peer: std.net.Address) void {
-    defer stream.close();
+fn handleConnection(io: std.Io, stream: std.Io.net.Stream) void {
+    defer stream.close(io);
 
+    // Reads go through Io's readv() path, which posix_shim already
+    // services for socket fds -- only the write side needs the
+    // workaround above.
     var buf: [4096]u8 = undefined;
-    const n = stream.read(&buf) catch return;
+    var reader = stream.reader(io, &.{});
+    var bufs: [1][]u8 = .{&buf};
+    const n = reader.interface.readVec(&bufs) catch return;
 
     // Don't bother parsing the request -- just grab the first line for
     // the log message, matching webserver-rs's posture.
     var request_line: []const u8 = "";
     if (std.mem.indexOfScalar(u8, buf[0..n], '\n')) |eol| {
-        request_line = std.mem.trimRight(u8, buf[0..eol], "\r");
+        request_line = std.mem.trimEnd(u8, buf[0..eol], "\r");
     }
 
     hit_count += 1;
 
     var log_buf: [256]u8 = undefined;
-    if (std.fmt.bufPrint(&log_buf, "Connection from {f} - {s}\n", .{ peer, request_line })) |msg| {
+    if (std.fmt.bufPrint(&log_buf, "Connection from {f} - {s}\n", .{ stream.socket.address, request_line })) |msg| {
         _ = std.c.write(1, msg.ptr, msg.len);
     } else |_| {}
 
@@ -137,21 +147,28 @@ export fn main(argc: c_int, argv: [*c][*c]u8, envp: [*c][*c]u8) callconv(.c) c_i
     _ = argv;
     _ = envp;
 
-    const address = std.net.Address.parseIp4("0.0.0.0", port) catch {
+    // No `pub fn main(init: std.process.Init)` here to hand us an Io (see
+    // build-zig-app.sh: this port supplies its own crt0/_start), so set up
+    // a single-threaded std.Io.Threaded ourselves -- this server never
+    // uses Io's async/concurrent features.
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+
+    const address = std.Io.net.IpAddress.parseIp4("0.0.0.0", port) catch {
         std.debug.print("parseIp4 failed\n", .{});
         return 1;
     };
 
-    var server = address.listen(.{ .reuse_address = true }) catch {
+    var server = address.listen(io, .{ .reuse_address = true }) catch {
         std.debug.print("listen() on port {d} failed\n", .{port});
         return 1;
     };
-    defer server.deinit();
+    defer server.deinit(io);
 
     std.debug.print("listening on port {d}\n", .{port});
 
     while (true) {
-        const conn = server.accept() catch continue;
-        handleConnection(conn.stream, conn.address);
+        const stream = server.accept(io) catch continue;
+        handleConnection(io, stream);
     }
 }

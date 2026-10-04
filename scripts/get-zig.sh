@@ -9,7 +9,7 @@ set -e
 # CPython/Lua) rather than installed system-wide -- unlike Rust, Zig's
 # compiler is a single self-contained tarball with no toolchain
 # manager needed.
-VERSION="0.15.2"
+VERSION="0.16.0"
 URL="https://ziglang.org/download/${VERSION}/zig-x86_64-linux-${VERSION}.tar.xz"
 TARBALL="zig-x86_64-linux-${VERSION}.tar.xz"
 ZIG_DIR="zig-x86_64-linux-${VERSION}"
