@@ -27,7 +27,7 @@ var hit_count: u64 = 0;
 // Stream.write() used before Zig 0.15's Io.Writer rework; Zig 0.16
 // dropped the std.posix.write() wrapper this used to call) and works
 // correctly through the exact same sys_write()/net_shim_send()
-// path stream.read() already uses on the way in. See ZIG.md's "Known
+// path std.c.read() uses on the way in. See ZIG.md's "Known
 // gaps" for the SYS_sendmsg/SYS_recvmsg gap this works around.
 fn writeAll(stream: std.Io.net.Stream, bytes: []const u8) error{WriteFailed}!void {
     var index: usize = 0;
@@ -41,13 +41,15 @@ fn writeAll(stream: std.Io.net.Stream, bytes: []const u8) error{WriteFailed}!voi
 fn handleConnection(io: std.Io, stream: std.Io.net.Stream) void {
     defer stream.close(io);
 
-    // Reads go through Io's readv() path, which posix_shim already
-    // services for socket fds -- only the write side needs the
-    // workaround above.
+    // Reads need the same workaround as writes: Zig 0.17 moved Io's
+    // stream reads from readv() to recvmsg(), which posix_shim doesn't
+    // service either (-ENOSYS -> error.Unexpected, and the unread request
+    // then turns the close into a RST). A plain libc read() goes through
+    // sys_read()'s socket-fd special case instead.
     var buf: [4096]u8 = undefined;
-    var reader = stream.reader(io, &.{});
-    var bufs: [1][]u8 = .{&buf};
-    const n = reader.interface.readVec(&bufs) catch return;
+    const rc = std.c.read(stream.socket.handle, &buf, buf.len);
+    if (rc <= 0) return;
+    const n: usize = @intCast(rc);
 
     // Don't bother parsing the request -- just grab the first line for
     // the log message, matching webserver-rs's posture.
