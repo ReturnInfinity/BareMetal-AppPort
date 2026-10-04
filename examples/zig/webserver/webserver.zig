@@ -1,8 +1,10 @@
 // webserver.zig -- Zig counterpart to webserver.c/webserver-rs/
 // webserver.py: a single-threaded HTTP server with a hit counter, built
-// on std.Io.net.IpAddress.listen/Server.accept (Zig 0.16's std.Io
-// interface, driven by a single-threaded std.Io.Threaded instance). Exercises the musl ->
-// posix_shim -> net_shim -> lwIP TCP server-side (bind/listen/accept)
+// on std.Io.net.IpAddress.listen/Server.accept (Zig 0.16+'s std.Io
+// interface, driven by a single-threaded std.Io.Threaded instance), and
+// on Stream.reader()/writer() for the request/response -- which go
+// through recvmsg()/sendmsg(). Exercises the musl -> posix_shim ->
+// net_shim -> lwIP TCP server-side (bind/listen/accept/recvmsg/sendmsg)
 // path via real std, the same way the other languages' webservers
 // already do -- and, since Zig's socket calls route through libc the
 // same way its file I/O does (see ZIG.md), this needs nothing from the
@@ -14,42 +16,13 @@ const port: u16 = 80;
 
 var hit_count: u64 = 0;
 
-// std.Io.net.Stream.writer() (the only write API Stream has, backed by
-// the Io.Writer machinery since Zig 0.15) sends via a real sendmsg()
-// syscall -- this port's posix_shim.c has no SYS_sendmsg case at all
-// (net_shim_send() is only reachable from plain write()/SYS_write, which
-// sys_write() already special-cases for socket fds). That surfaced here
-// as every response silently failing with error.Unexpected (posix_shim's
-// -ENOSYS default case, mapped by Zig's error set to something it
-// doesn't expect from a real Linux write()) -- curl saw a connection
-// that read the request fine and then closed with no response at all.
-// std.c.write() below is a plain libc write() (SYS_write -- what
-// Stream.write() used before Zig 0.15's Io.Writer rework; Zig 0.16
-// dropped the std.posix.write() wrapper this used to call) and works
-// correctly through the exact same sys_write()/net_shim_send()
-// path std.c.read() uses on the way in. See ZIG.md's "Known
-// gaps" for the SYS_sendmsg/SYS_recvmsg gap this works around.
-fn writeAll(stream: std.Io.net.Stream, bytes: []const u8) error{WriteFailed}!void {
-    var index: usize = 0;
-    while (index < bytes.len) {
-        const rc = std.c.write(stream.socket.handle, bytes[index..].ptr, bytes.len - index);
-        if (rc <= 0) return error.WriteFailed;
-        index += @intCast(rc);
-    }
-}
-
 fn handleConnection(io: std.Io, stream: std.Io.net.Stream) void {
     defer stream.close(io);
 
-    // Reads need the same workaround as writes: Zig 0.17 moved Io's
-    // stream reads from readv() to recvmsg(), which posix_shim doesn't
-    // service either (-ENOSYS -> error.Unexpected, and the unread request
-    // then turns the close into a RST). A plain libc read() goes through
-    // sys_read()'s socket-fd special case instead.
     var buf: [4096]u8 = undefined;
-    const rc = std.c.read(stream.socket.handle, &buf, buf.len);
-    if (rc <= 0) return;
-    const n: usize = @intCast(rc);
+    var reader = stream.reader(io, &.{});
+    var bufs: [1][]u8 = .{&buf};
+    const n = reader.interface.readVec(&bufs) catch return;
 
     // Don't bother parsing the request -- just grab the first line for
     // the log message, matching webserver-rs's posture.
@@ -140,8 +113,11 @@ fn handleConnection(io: std.Io, stream: std.Io.net.Stream) void {
     var head_buf: [256]u8 = undefined;
     const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len}) catch return;
 
-    writeAll(stream, head) catch return;
-    writeAll(stream, body) catch return;
+    var write_buf: [1024]u8 = undefined;
+    var writer = stream.writer(io, &write_buf);
+    writer.interface.writeAll(head) catch return;
+    writer.interface.writeAll(body) catch return;
+    writer.interface.flush() catch return;
 }
 
 export fn main(argc: c_int, argv: [*c][*c]u8, envp: [*c][*c]u8) callconv(.c) c_int {
