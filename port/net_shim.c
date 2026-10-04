@@ -467,17 +467,25 @@ static long bsock_read(struct bsock *s, void *buf, size_t len)
 	return (long)n;
 }
 
-// Pops the oldest queued datagram, copying up to len bytes into buf
-// (extra bytes in an oversized datagram are discarded, per recv(2)
-// UDP semantics) and reporting the sender's address if requested.
-static long udp_do_recv(struct bsock *s, void *buf, size_t len, ip4_addr_t *addr_out, u16_t *port_out)
+// Pops the oldest queued datagram, scattering up to the iovecs' total
+// capacity across them (extra bytes in an oversized datagram are
+// discarded, per recv(2) UDP semantics -- *truncated is set if so) and
+// reporting the sender's address if requested.
+static long udp_do_recvv(struct bsock *s, const struct iovec *iov, size_t iovcnt, int *truncated, ip4_addr_t *addr_out, u16_t *port_out)
 {
 	struct udp_dgram *d = &s->udpq[s->udpq_head];
 	struct pbuf *p = d->p;
-	size_t n = len < p->tot_len ? len : p->tot_len;
+	size_t n = 0;
 
-	pbuf_copy_partial(p, buf, n, 0);
+	for (size_t i = 0; i < iovcnt && n < p->tot_len; i++) {
+		size_t left = p->tot_len - n;
+		size_t chunk = iov[i].iov_len < left ? iov[i].iov_len : left;
+		pbuf_copy_partial(p, iov[i].iov_base, (u16_t)chunk, (u16_t)n);
+		n += chunk;
+	}
 
+	if (truncated)
+		*truncated = n < p->tot_len;
 	if (addr_out)
 		*addr_out = d->addr;
 	if (port_out)
@@ -488,6 +496,12 @@ static long udp_do_recv(struct bsock *s, void *buf, size_t len, ip4_addr_t *addr
 	s->udpq_count--;
 
 	return (long)n;
+}
+
+static long udp_do_recv(struct bsock *s, void *buf, size_t len, ip4_addr_t *addr_out, u16_t *port_out)
+{
+	struct iovec iov = { .iov_base = buf, .iov_len = len };
+	return udp_do_recvv(s, &iov, 1, NULL, addr_out, port_out);
 }
 
 static long udp_wait_rx(struct bsock *s)
@@ -505,6 +519,28 @@ static long udp_wait_rx(struct bsock *s)
 	return 0;
 }
 
+// Blocks until a TCP socket has bytes queued (returns 1), has hit EOF
+// (0), or has failed/timed out/been interrupted (negative errno).
+static long tcp_wait_rx(struct bsock *s)
+{
+	u32_t start = sys_now();
+	for (;;) {
+		if (s->rx_head)
+			return 1;
+		if (s->eof)
+			return 0;
+		if (s->state == SK_ERROR)
+			return -ECONNRESET;
+		net_poll();
+		if (s->rx_head || s->eof || s->state == SK_ERROR)
+			continue;
+		if (block_timed_out(start, s->rcv_timeout_ms))
+			return -ETIMEDOUT;
+		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
+			return -EINTR;
+	}
+}
+
 long net_shim_recv(long fd, void *buf, size_t len, long flags)
 {
 	(void)flags;
@@ -520,22 +556,10 @@ long net_shim_recv(long fd, void *buf, size_t len, long flags)
 	if (len == 0)
 		return 0;
 
-	u32_t start = sys_now();
-	for (;;) {
-		if (s->rx_head)
-			return bsock_read(s, buf, len);
-		if (s->eof)
-			return 0;
-		if (s->state == SK_ERROR)
-			return -ECONNRESET;
-		net_poll();
-		if (s->rx_head || s->eof || s->state == SK_ERROR)
-			continue;
-		if (block_timed_out(start, s->rcv_timeout_ms))
-			return -ETIMEDOUT;
-		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
-			return -EINTR;
-	}
+	long r = tcp_wait_rx(s);
+	if (r <= 0)
+		return r;
+	return bsock_read(s, buf, len);
 }
 
 long net_shim_recvfrom(long fd, void *buf, size_t len, long flags, void *addr, socklen_t *addrlenp)
@@ -589,17 +613,26 @@ static long bsock_write(struct bsock *s, const void *buf, size_t len)
 
 // dst/dst_port are only used when explicit -- a NULL dst sends to
 // the pcb's connect()-ed default remote, matching send()'s "no
-// address given" semantics.
-static long udp_do_send(struct bsock *s, const void *buf, size_t len, const ip4_addr_t *dst, u16_t dst_port)
+// address given" semantics. The iovecs are gathered into a single
+// datagram, per sendmsg(2).
+static long udp_do_sendv(struct bsock *s, const struct iovec *iov, size_t iovcnt, const ip4_addr_t *dst, u16_t dst_port)
 {
-	if (len > 0xFFFF)
-		return -EMSGSIZE;
+	size_t len = 0;
+	for (size_t i = 0; i < iovcnt; i++) {
+		if (iov[i].iov_len > 0xFFFF - len)
+			return -EMSGSIZE;
+		len += iov[i].iov_len;
+	}
 
 	struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
 	if (!p)
 		return -ENOMEM;
 
-	memcpy(p->payload, buf, len);
+	size_t off = 0;
+	for (size_t i = 0; i < iovcnt; i++) {
+		memcpy((char *)p->payload + off, iov[i].iov_base, iov[i].iov_len);
+		off += iov[i].iov_len;
+	}
 
 	err_t e = dst ? udp_sendto(s->upcb, p, dst, dst_port) : udp_send(s->upcb, p);
 	pbuf_free(p);
@@ -608,6 +641,12 @@ static long udp_do_send(struct bsock *s, const void *buf, size_t len, const ip4_
 		return e == ERR_MEM ? -ENOBUFS : (e == ERR_RTE ? -ENETUNREACH : -EIO);
 
 	return (long)len;
+}
+
+static long udp_do_send(struct bsock *s, const void *buf, size_t len, const ip4_addr_t *dst, u16_t dst_port)
+{
+	struct iovec iov = { .iov_base = (void *)buf, .iov_len = len };
+	return udp_do_sendv(s, &iov, 1, dst, dst_port);
 }
 
 long net_shim_send(long fd, const void *buf, size_t len, long flags)
@@ -657,6 +696,114 @@ long net_shim_sendto(long fd, const void *buf, size_t len, long flags, const voi
 	ip.addr = sin->sin_addr.s_addr;
 
 	return udp_do_send(s, buf, len, &ip, lwip_ntohs(sin->sin_port));
+}
+
+// sendmsg()/recvmsg(): the iovec forms of send()/recv() that Zig's
+// std.Io.net (0.15+ writes, 0.17+ reads) and other runtimes use instead
+// of write()/read(). No ancillary data is supported -- sending any is
+// -EOPNOTSUPP, and receiving always reports msg_controllen = 0 -- and,
+// as with send()/recv(), flags (MSG_NOSIGNAL, MSG_CMSG_CLOEXEC, ...)
+// are accepted and ignored.
+long net_shim_sendmsg(long fd, const struct msghdr *msg, long flags)
+{
+	struct bsock *s = &socks[fd - SOCK_FD_BASE];
+
+	if (msg->msg_controllen != 0)
+		return -EOPNOTSUPP;
+
+	if (s->type == SOCK_DGRAM) {
+		if (!msg->msg_name) {
+			if (s->state != SK_CONNECTED)
+				return -EDESTADDRREQ;
+			return udp_do_sendv(s, msg->msg_iov, msg->msg_iovlen, NULL, 0);
+		}
+		if (msg->msg_namelen < sizeof(struct sockaddr_in))
+			return -EINVAL;
+		const struct sockaddr_in *sin = msg->msg_name;
+		ip4_addr_t ip;
+		ip.addr = sin->sin_addr.s_addr;
+		return udp_do_sendv(s, msg->msg_iov, msg->msg_iovlen, &ip, lwip_ntohs(sin->sin_port));
+	}
+
+	// TCP: same shape as sys_writev() -- each iovec through the
+	// blocking send path, stopping early on a short write, and only
+	// reporting an error if nothing was sent at all.
+	long total = 0;
+	for (size_t i = 0; i < (size_t)msg->msg_iovlen; i++) {
+		const struct iovec *v = &msg->msg_iov[i];
+		if (v->iov_len == 0)
+			continue;
+		long n = net_shim_send(fd, v->iov_base, v->iov_len, flags);
+		if (n < 0)
+			return total ? total : n;
+		total += n;
+		if ((size_t)n < v->iov_len)
+			break;
+	}
+	return total;
+}
+
+long net_shim_recvmsg(long fd, struct msghdr *msg, long flags)
+{
+	(void)flags;
+	struct bsock *s = &socks[fd - SOCK_FD_BASE];
+
+	msg->msg_controllen = 0;
+	msg->msg_flags = 0;
+
+	if (s->type == SOCK_DGRAM) {
+		long r = udp_wait_rx(s);
+		if (r < 0)
+			return r;
+
+		ip4_addr_t src_ip;
+		u16_t src_port;
+		int truncated;
+		long n = udp_do_recvv(s, msg->msg_iov, msg->msg_iovlen, &truncated, &src_ip, &src_port);
+		if (truncated)
+			msg->msg_flags |= MSG_TRUNC;
+
+		if (msg->msg_name && msg->msg_namelen >= sizeof(struct sockaddr_in)) {
+			struct sockaddr_in sin;
+			memset(&sin, 0, sizeof(sin));
+			sin.sin_family = AF_INET;
+			sin.sin_port = lwip_htons(src_port);
+			sin.sin_addr.s_addr = src_ip.addr;
+			memcpy(msg->msg_name, &sin, sizeof(sin));
+			msg->msg_namelen = sizeof(sin);
+		}
+		return n;
+	}
+
+	// TCP: a connected stream has no per-message source address.
+	msg->msg_namelen = 0;
+
+	size_t cap = 0;
+	for (size_t i = 0; i < (size_t)msg->msg_iovlen; i++)
+		cap += msg->msg_iov[i].iov_len;
+	if (cap == 0)
+		return 0;
+
+	// Block only until the first bytes arrive, then fill as many
+	// iovecs as the already-queued data covers. Unlike sys_readv()'s
+	// per-iovec read() loop, this never blocks again once it has
+	// something to return -- a request that exactly fills the first
+	// iovec mustn't stall waiting for bytes the peer will only send
+	// after it gets a response.
+	long r = tcp_wait_rx(s);
+	if (r <= 0)
+		return r;
+
+	long total = 0;
+	for (size_t i = 0; i < (size_t)msg->msg_iovlen && s->rx_head; i++) {
+		char *base = msg->msg_iov[i].iov_base;
+		size_t len = msg->msg_iov[i].iov_len;
+		size_t off = 0;
+		while (off < len && s->rx_head)
+			off += (size_t)bsock_read(s, base + off, len - off);
+		total += (long)off;
+	}
+	return total;
 }
 
 // Only SO_RCVTIMEO/SO_SNDTIMEO actually do anything -- every other

@@ -219,6 +219,12 @@ Not implemented (all fall through to `-ENOSYS`):
 - **`setsockopt`/`getsockopt` only honor `SO_RCVTIMEO`/`SO_SNDTIMEO`**
   (above); every other option — `SO_REUSEADDR`, `TCP_NODELAY`, etc. —
   is still an accept-and-ignore stub with no effect.
+- **`sendmsg()`/`recvmsg()` carry no ancillary data.** The iovec
+  gather/scatter, `msg_name` (UDP destination/source) and `MSG_TRUNC`
+  all work (`net_shim.c`; see `msg_test.c`), but sending any control
+  message (`IP_TTL`, `SCM_RIGHTS`, ...) is `-EOPNOTSUPP`, and
+  `recvmsg()` always reports `msg_controllen = 0`. Flags are
+  accept-and-ignore, as with `send()`/`recv()`.
 - **Unaccepted connections are no longer leaked on listener `close()`.**
   Closing a listening socket now walks its accept queue
   (`net_shim.c`'s `close_queued_conn()`) and, for each connection lwIP
@@ -502,24 +508,6 @@ account of why this works and everything it took.
   truncated to fit" at link time. `-O ReleaseSmall` (required regardless,
   see `build-zig-app.sh`) avoids this; an LLVM/Zig code-model
   limitation, not something this port's build can work around.
-- **`std.Io.net.Stream.writer()` doesn't work -- use a plain
-  `std.c.write()` on the socket handle instead.** The `Io.Writer`-backed
-  stream writer (Zig 0.15's `std.net`, and still 0.16/0.17's `std.Io.net`)
-  sends via `sendmsg()`, and this port's `posix_shim.c`
-  has no `SYS_sendmsg`/`SYS_recvmsg` case (`sys_writev`/`sys_readv` do
-  handle socket fds correctly, `sendmsg`/`recvmsg` are a separate,
-  unhandled syscall pair) -- silently drops to `-ENOSYS`, which Zig maps
-  to `error.Unexpected`. Found and worked around building
-  `examples/zig/webserver/webserver.zig` (see `ZIG.md`'s "Known gaps"
-  for the full account and the workaround). A real fix would add
-  `SYS_sendmsg`/`SYS_recvmsg` to `posix_shim.c`/`net_shim.c`; not
-  attempted.
-- **Since Zig 0.17, `std.Io.net.Stream.reader()` doesn't work either --
-  use a plain `std.c.read()` on the socket handle instead.** 0.17's
-  `Io.Threaded` reads sockets via `recvmsg()` rather than 0.16's
-  `readv()`, hitting the same `SYS_recvmsg` gap -- the connection is
-  reset right after the client sends its request. Same real fix as
-  above.
 - **Not exhaustively audited beyond `std.debug.print`/`std.Thread`/basic
   TCP server sockets.** The rest of `std` (more of `std.fs`,
   `std.process`, UDP, ...) is presumed to work the same way (real libc

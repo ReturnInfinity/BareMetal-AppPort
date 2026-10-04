@@ -216,15 +216,19 @@ every other language here already does), imported as the `bm` module
   this port's build can paper over. Always pass `-O ReleaseSmall` (or
   `ReleaseFast`, untried but should behave the same way).
 - `examples/zig/webserver/webserver.zig` (real `std.Io.net.IpAddress.listen`/
-  `Server.accept` through a single-threaded `std.Io.Threaded`, matching
+  `Server.accept` through a single-threaded `std.Io.Threaded`, and
+  `Stream.reader()`/`Stream.writer()` for the request/response, matching
   `webserver.c`/`webserver-rs`/`webserver.py`):
   built via `build-zig-app.sh`, booted with real Firecracker networking
   (`BareMetal-Firecracker/scripts/mkbr0.sh`'s bridge/tap), and fetched
   with a real `curl` from the host -- `HTTP/1.1 200`, correct HTML body,
   hit counter incrementing across requests, request line logged to the
-  console for each connection. Confirms `bind`/`listen`/`accept`/`read`
-  all work through the musl -> `posix_shim` -> `net_shim` -> lwIP path
-  the same way they already did for every other language.
+  console for each connection. Confirms `bind`/`listen`/`accept` and
+  `recvmsg`/`sendmsg` (what `std.Io.net` streams read and write with --
+  `sendmsg` since Zig 0.15, `recvmsg` since 0.17) all work through the
+  musl -> `posix_shim` -> `net_shim` -> lwIP path. (Before `posix_shim.c`
+  handled `SYS_sendmsg`/`SYS_recvmsg`, both fell through to `-ENOSYS`
+  and the example had to use plain `std.c.write()`/`std.c.read()`.)
 
 ## Known gaps
 
@@ -232,35 +236,6 @@ See `OPENISSUES.md`'s Zig section for the condensed version.
 
 - **Debug-mode builds don't link** (see "Build flow" above) -- use
   `-O ReleaseSmall`/`ReleaseFast`.
-- **`std.Io.net.Stream.writer()` doesn't work -- write with a plain
-  `std.c.write()` on `stream.socket.handle` instead.** Found while
-  building `examples/zig/webserver/webserver.zig` (originally under Zig
-  0.15's `std.net.Stream.write()`; unchanged in 0.16/0.17's `std.Io.net`):
-  the `Io.Writer` machinery backs stream writes with a real `sendmsg()`
-  syscall, and this port's `posix_shim.c` has no `SYS_sendmsg` (or
-  `SYS_recvmsg`) case at all -- it falls through to the `-ENOSYS`
-  default, which Zig's error-mapping doesn't expect from a real Linux
-  `write()` and surfaces as `error.Unexpected`. Symptom: a connection
-  that reads the client's request fine and then just closes with no
-  response, no crash. A plain libc `write()` (the `SYS_write` syscall
-  `Stream.write()` itself used before the 0.15 rework -- Zig 0.16 removed
-  the `std.posix.write()` wrapper the example originally called) works
-  correctly,
-  through the same `sys_write()`/`net_shim_send()` path -- see
-  `webserver.zig`'s own comment on its local `writeAll()` helper.
-- **Since Zig 0.17, `std.Io.net.Stream.reader()` doesn't work either --
-  read with a plain `std.c.read()` on `stream.socket.handle` instead.**
-  0.16's `Io.Threaded` read sockets via `readv()` (which `sys_readv`
-  services), but 0.17 switched `netReadPosix` to `recvmsg()` (to carry
-  ancillary/control data) -- the same missing-syscall gap as the write
-  side. Symptom: the client sees its connection reset right after
-  sending the request (the handler bails on `error.Unexpected` and closes
-  the socket with unread data, so lwIP sends a RST), and nothing is
-  logged. `webserver.zig` now reads with `std.c.read()`. Fixing this for real would mean adding
-  `SYS_sendmsg`/`SYS_recvmsg` to `posix_shim.c`/`net_shim.c` (flattening
-  the iovecs into the existing `net_shim_send`/`recv`, similar to how
-  `sys_writev`/`sys_readv` already do) -- not attempted here, out of
-  scope for an app-level example.
 - **Not exhaustively audited beyond `std.debug.print`/`std.Thread`/
   basic TCP server sockets.** The rest of `std` (more of `std.fs`,
   `std.process`, UDP, ...) is presumed to work the same way file I/O

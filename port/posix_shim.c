@@ -866,6 +866,27 @@ static long sys_recvfrom(long fd, long buf, long len, long flags, long addr, lon
 	return net_shim_recvfrom(fd, (void *)buf, (size_t)len, flags, (void *)addr, (socklen_t *)addrlenp);
 }
 
+// UIO_MAXIOV, Linux's cap on msg_iovlen -- more is -EMSGSIZE there too.
+#define SHIM_MAX_IOV 1024
+
+static long sys_sendmsg(long fd, long msg, long flags)
+{
+	if (!net_shim_is_fd(fd))
+		return -ENOTSOCK;
+	if (((const struct msghdr *)msg)->msg_iovlen > SHIM_MAX_IOV)
+		return -EMSGSIZE;
+	return net_shim_sendmsg(fd, (const struct msghdr *)msg, flags);
+}
+
+static long sys_recvmsg(long fd, long msg, long flags)
+{
+	if (!net_shim_is_fd(fd))
+		return -ENOTSOCK;
+	if (((const struct msghdr *)msg)->msg_iovlen > SHIM_MAX_IOV)
+		return -EMSGSIZE;
+	return net_shim_recvmsg(fd, (struct msghdr *)msg, flags);
+}
+
 // SO_RCVTIMEO/SO_SNDTIMEO are wired through to net_shim.c (they bound
 // how long its blocking accept/connect/send/recv loops run -- see its
 // file header); every other option, and every non-socket fd, is still
@@ -1132,6 +1153,8 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_getpeername:        return sys_getpeername(a1, a2, a3);
 	case SYS_sendto:            return sys_sendto(a1, a2, a3, a4, a5, a6);
 	case SYS_recvfrom:           return sys_recvfrom(a1, a2, a3, a4, a5, a6);
+	case SYS_sendmsg:             return sys_sendmsg(a1, a2, a3);
+	case SYS_recvmsg:              return sys_recvmsg(a1, a2, a3);
 
 	// x86-64 musl's select()/poll() library functions issue these two
 	// syscalls directly (SYS_select/SYS_poll both exist on x86-64,
