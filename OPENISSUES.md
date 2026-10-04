@@ -430,6 +430,28 @@ role as every other section here:
   (see "Heap" above) is a real, not just theoretical, concern for
   Python specifically.
 
+## Lua (`port/lua_port/`)
+
+Lua 5.5.1 is vendored unmodified (`scripts/get-lua.sh`), built with
+`-DLUA_USE_POSIX`; `port/lua_port/lua.c` is this port's own entry point
+in place of Lua's standalone `src/lua.c`. See `LUA.md` for the full
+account -- this section is the condensed version:
+
+- **No `io.popen()`/`os.execute()`** -- both return Lua errors (musl's
+  `popen()`/`system()` stop at `pipe2()`, `-ENOSYS` here), matching the
+  Process model section above.
+- **No binary (C) modules** -- `package.cpath` is empty, and
+  `LUA_USE_DLOPEN` is off: `dlfcn_shim.c`'s `dl_exports[]` doesn't
+  expose the Lua C API a module would call back into. Pure-Lua modules
+  in `/lua/` work via `require()`.
+- **No sockets** -- stock Lua has no networking library; nothing here
+  adds one yet (LuaSocket, or a small module over `net_shim.c`, would).
+- **No REPL** -- the program is always `/lua/main.lua`.
+- **~1 MiB of heap before hot-plug** -- `lua.app`'s own 512 KiB C stack
+  (sized in `lua.c`'s `LUA_C_STACK_BYTES` comment) lives in `.bss`,
+  inside the 2 MiB boot window; past that, Lua depends on virtio-mem
+  growth like every other app (Heap section above).
+
 ## C++ (`port/cpp_port/`)
 
 The host's own `g++`/libstdc++.a (Ubuntu's, built against glibc) is

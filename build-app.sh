@@ -57,6 +57,9 @@ LWEXT4_PORT="port/lwext4_port"
 PYTHON_DIR="$BUILD_DIR/Python-3.14.7"
 PYTHON_PORT="port/python_port"
 
+LUA_DIR="$BUILD_DIR/lua-5.5.1"
+LUA_INC="$LUA_DIR/src"
+
 PORT="port"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,6 +112,11 @@ fi
 
 if ! compgen -G "$BUILD_DIR/python_*.o" >/dev/null; then
 	echo "error: Python objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
+	exit 1
+fi
+
+if ! compgen -G "$BUILD_DIR/lua_*.o" >/dev/null; then
+	echo "error: Lua objects are missing from $BUILD_DIR -- run ./setup.sh first." >&2
 	exit 1
 fi
 
@@ -225,8 +233,12 @@ LWEXT4_CFLAGS="$CFLAGS -I $LWEXT4_INC -I $LWEXT4_PORT -I $PORT -DCONFIG_USE_DEFA
 # files' own use of struct _frozen/_inittab/PyImport_FrozenModules
 # needs). gcc's own freestanding headers (stdatomic.h) are added back
 # the same way setup.sh's PYTHON_CFLAGS does, for the same reason.
+#
+# -I $LUA_INC is for lua.h/lauxlib.h/lualib.h (Lua ships its headers
+# alongside its sources in src/, no separate include/ tree) -- needed
+# by port/lua_port/lua.c and any other app embedding Lua.
 PYTHON_GCC_FREESTANDING_INC="$(gcc -print-file-name=include)"
-APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\" -I $LWIP_INC -I $LWIP_PORT -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal -DPy_BUILD_CORE"
+APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC -I $SODIUM_INC -I $MBEDTLS_INC -I $MBEDTLS_PORT -DMBEDTLS_CONFIG_FILE=\"baremetal_mbedtls_config.h\" -I $LWIP_INC -I $LWIP_PORT -isystem $PYTHON_GCC_FREESTANDING_INC -I $PYTHON_PORT -I $PYTHON_DIR -I $PYTHON_DIR/Include -I $PYTHON_DIR/Include/internal -DPy_BUILD_CORE -I $LUA_INC"
 
 echo "Building..."
 
@@ -308,6 +320,15 @@ for obj in "$BUILD_DIR"/python_*.o; do
 	PYTHON_OBJS="$PYTHON_OBJS $obj"
 done
 
+# Same again for Lua's core + standard library objects (setup.sh's
+# "Building Lua" step). port/lua_port/lua.c itself is an app source,
+# compiled above as build/lua.o -- no "lua_" prefix, so this glob never
+# double-links it.
+LUA_OBJS=""
+for obj in "$BUILD_DIR"/lua_*.o; do
+	LUA_OBJS="$LUA_OBJS $obj"
+done
+
 echo "Linking..."
 
 # Two stages, not a direct-to-binary `ld -T c.ld` link: c.ld's
@@ -334,7 +355,7 @@ ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -
 	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" "$BUILD_DIR/cacert_data.o" \
 	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" "$BUILD_DIR/dlfcn_shim.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS $LUA_OBJS "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
 echo "Built $APP_NAME"
