@@ -154,12 +154,9 @@
 #define HAVE_INET_NTOP 1
 #define HAVE_ACCEPT4 1 /* SYS_accept4 -- posix_shim.c's sys_accept4() */
 
-/* select()/poll() -- both wired up in posix_shim.c (see its
- * "select()/poll()" section): every fd this port recognizes is
- * reported ready immediately, with the real blocking happening for
- * real inside whichever recv()/send() follows. Good enough for
- * libcurl's easy-interface transfer loop (lib/select.c's
- * Curl_socket_check()), which is the only consumer that matters here. */
+/* select()/poll() -- both a real readiness wait in posix_shim.c (see
+ * its "select()/poll()" section), which is what libcurl's transfer
+ * loop (lib/select.c's Curl_socket_check()) waits in. */
 #define HAVE_SELECT 1
 #define HAVE_STRUCT_TIMEVAL 1
 #define HAVE_SUSECONDS_T 1
@@ -168,11 +165,10 @@
 #define HAVE_POLL_H 1
 #define HAVE_SYS_POLL_H 1
 
-/* fcntl() is an accept-and-ignore stub in posix_shim.c (every socket
- * is unconditionally blocking regardless of O_NONBLOCK) -- but it
- * always returns success, so curlx/nonblock.c's F_SETFL/O_NONBLOCK
- * path "works" (silently becomes a no-op) rather than falling through
- * to an ioctl(FIONBIO) path this port doesn't back either. */
+/* fcntl(F_SETFL, O_NONBLOCK) on a socket is real (net_shim.c's
+ * net_shim_fcntl()), so curlx/nonblock.c puts curl's sockets in
+ * non-blocking mode and curl runs its normal EINPROGRESS/EAGAIN +
+ * poll() transfer loop against them. */
 #define HAVE_FCNTL 1
 #define HAVE_FCNTL_H 1
 #define HAVE_FCNTL_O_NONBLOCK 1

@@ -54,6 +54,11 @@
 #define TCP_SND_BUF                (4 * TCP_MSS)
 #define TCP_SND_QUEUELEN           ((4 * TCP_SND_BUF) / TCP_MSS)
 
+// Enforce listen()'s backlog: once a listener's handshakes in progress
+// plus not-yet-accept()ed connections reach it, further SYNs are
+// dropped (the client retransmits) -- see net_shim.c's on_accept().
+#define TCP_LISTEN_BACKLOG         1
+
 // Our netif RX path always allocates PBUF_RAM (malloc-backed) pbufs
 // sized to the actual frame, not a fixed PBUF_POOL -- see
 // net_glue.c's netif poll function -- so PBUF_POOL_SIZE is unused.
