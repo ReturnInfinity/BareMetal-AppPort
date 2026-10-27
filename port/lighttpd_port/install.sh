@@ -43,11 +43,10 @@ remove_tree() {
 	local dir="$1"
 	debugfs -R "ls -p $dir" "$DISK" 2>/dev/null | while IFS=/ read -r _ _ mode _ _ name _; do
 		[ -z "$name" ] || [ "$name" = "." ] || [ "$name" = ".." ] && continue
-		if [ "${mode:0:2}" = "40" ]; then
-			remove_tree "$dir/$name"
-		else
-			echo "rm $dir/$name"
-		fi
+		case "$mode" in
+		040*) remove_tree "$dir/$name" ;; # debugfs prints octal modes zero-padded: 040755
+		*) echo "rm $dir/$name" ;;
+		esac
 	done
 	echo "rmdir $dir"
 }
