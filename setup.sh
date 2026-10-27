@@ -24,6 +24,7 @@ echo -e "${BOLD}Pulling libraries${NORMAL}"
 "$SCRIPT_DIR/scripts/get-lwext4.sh"
 "$SCRIPT_DIR/scripts/get-python.sh"
 "$SCRIPT_DIR/scripts/get-lua.sh"
+"$SCRIPT_DIR/scripts/get-lighttpd.sh"
 "$SCRIPT_DIR/scripts/get-rust.sh"
 "$SCRIPT_DIR/scripts/get-zig.sh"
 
@@ -62,6 +63,8 @@ PYTHON_PORT="port/python_port"
 
 LUA_DIR="$BUILD_DIR/lua-5.5.1"
 LUA_PORT="port/lua_port"
+LIGHTTPD_DIR="$BUILD_DIR/lighttpd-1.4.85"
+LIGHTTPD_PORT="port/lighttpd_port"
 
 # Run a command, staying silent unless it fails -- then dump its output
 # and abort. Keeps musl/lwIP's noisy per-file build logs off the screen
@@ -213,6 +216,13 @@ PYTHON_DYNLOAD_DEFINES='-DSOABI="baremetal" -DPYTHON_ABI_STRING="3"'
 # would need to call back into (see LUA.md).
 LUA_CFLAGS="$CFLAGS -DLUA_USE_POSIX"
 
+# lighttpd's own build defines (src/meson.build's defs) plus
+# port/lighttpd_port/config.h (-DHAVE_CONFIG_H) in place of the one
+# meson would generate -- see that file. The -I order matters:
+# port/lighttpd_port/ first, so its config.h and plugin-static.h are
+# the ones lighttpd's sources find.
+LIGHTTPD_CFLAGS="$CFLAGS -DHAVE_CONFIG_H -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -D_DEFAULT_SOURCE -D_GNU_SOURCE -I $LIGHTTPD_PORT -I $LIGHTTPD_DIR/src"
+
 mkdir -p "$BUILD_DIR"
 
 echo -e "${BOLD}Building libraries${NORMAL}"
@@ -363,6 +373,37 @@ for src in "$LUA_DIR"/src/*.c; do
 	obj="$BUILD_DIR/lua_$(basename "$src" .c).o"
 	gcc $LUA_CFLAGS -o "$obj" "$src"
 done
+
+# lighttpd: src/meson.build's common_src + main_src (the server itself),
+# plus exactly the modules port/lighttpd_port/plugin-static.h lists --
+# the two lists must match. configparser.c is generated from
+# configparser.y by lighttpd's bundled lemon, built for (and run on)
+# the host. server.c is built with main renamed away, so its
+# server_main() is what port/lighttpd_port/lighttpd.c calls. Archived
+# as liblighttpd.a rather than left as loose objects -- see
+# build-app.sh's LIGHTTPD_LIB comment for why.
+echo "- Building lighttpd"
+LIGHTTPD_SRCS="
+	algo_md5 algo_sha1 algo_splaytree array base64 buffer burl chunk
+	configfile-glue http_etag fdevent fdevent_fdnode fdlog_maint fdlog
+	gw_backend http_cgi http_chunk http_date http_header http_kv
+	http_status http-header-glue keyvalue log rand plugin reqpool request
+	ck sock_addr stat_cache sys-setjmp
+	configfile connections data_config h1 sock_addr_cache fdevent_impl
+	http_range network_write network response configparser
+	mod_access mod_accesslog mod_alias mod_auth mod_auth_api
+	mod_authn_file mod_dirlisting mod_evhost mod_expire mod_extforward
+	mod_fastcgi mod_indexfile mod_proxy mod_redirect mod_rewrite mod_scgi
+	mod_setenv mod_simple_vhost mod_staticfile mod_status
+"
+run_quiet gcc -O2 -o "$BUILD_DIR/lighttpd-lemon" "$LIGHTTPD_DIR/src/lemon.c"
+run_quiet "$BUILD_DIR/lighttpd-lemon" -q "-d$LIGHTTPD_DIR/src" "-T$LIGHTTPD_DIR/src/lempar.c" "$LIGHTTPD_DIR/src/configparser.y"
+rm -f "$BUILD_DIR"/lighttpd_*.o "$BUILD_DIR/liblighttpd.a"
+for src in $LIGHTTPD_SRCS; do
+	gcc $LIGHTTPD_CFLAGS -o "$BUILD_DIR/lighttpd_$src.o" "$LIGHTTPD_DIR/src/$src.c"
+done
+gcc $LIGHTTPD_CFLAGS -Dmain=lighttpd_unused_main -o "$BUILD_DIR/lighttpd_server.o" "$LIGHTTPD_DIR/src/server.c"
+ar rcs "$BUILD_DIR/liblighttpd.a" "$BUILD_DIR"/lighttpd_*.o
 
 # Unlike every other library above, CPython needs a *native* build of
 # itself first -- not to link against, but because a handful of its
@@ -555,5 +596,9 @@ echo "- Building python.app"
 # this port's own entry point -- see LUA.md.
 echo "- Building lua.app"
 "$SCRIPT_DIR/build-app.sh" "$LUA_PORT/lua.c"
+
+# Same again for lighttpd.app -- see LIGHTTPD.md.
+echo "- Building lighttpd.app"
+"$SCRIPT_DIR/build-app.sh" "$LIGHTTPD_PORT/lighttpd.c"
 
 # echo -e "${BOLD}Library builds complete${NORMAL}"
