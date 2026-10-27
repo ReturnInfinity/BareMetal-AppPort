@@ -329,6 +329,17 @@ for obj in "$BUILD_DIR"/lua_*.o; do
 	LUA_OBJS="$LUA_OBJS $obj"
 done
 
+# lighttpd (setup.sh's "Building lighttpd" step) is an archive, not a
+# list of objects like the libraries above: its globals have very
+# generic names (buffer_*, array_*, log_error, ...), so linking its
+# objects into every app risks clashing with another library's. As an
+# archive, ld only pulls it in for an app that calls server_main()
+# (port/lighttpd_port/lighttpd.c).
+LIGHTTPD_LIB=""
+if [ -f "$BUILD_DIR/liblighttpd.a" ]; then
+	LIGHTTPD_LIB="$BUILD_DIR/liblighttpd.a"
+fi
+
 echo "Linking..."
 
 # Two stages, not a direct-to-binary `ld -T c.ld` link: c.ld's
@@ -355,7 +366,7 @@ ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -
 	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" "$BUILD_DIR/cacert_data.o" \
 	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" "$BUILD_DIR/dlfcn_shim.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS $LUA_OBJS "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS $LUA_OBJS $LIGHTTPD_LIB "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
 echo "Built $APP_NAME"

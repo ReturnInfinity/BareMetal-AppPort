@@ -105,8 +105,13 @@ Not implemented (all fall through to `-ENOSYS`):
   arrives (`-EINTR`). Enough for an event-loop server driven by
   `poll()`/`select()` (see `poll_test.c`); a program that only knows
   how to use epoll needs it added.
-- `pipe`/`pipe2`/`dup`/`dup2`/`dup3`/`socketpair` — no in-process fd
-  duplication, pipes, or `AF_UNIX` socket pairs between fds.
+- `pipe`/`pipe2`/`dup`/`socketpair` — no in-process fd duplication,
+  pipes, or `AF_UNIX` socket pairs between fds. The one exception:
+  `dup2()`/`dup3()` onto fd 0-2, from `/dev/null` or another std fd
+  (`posix_shim.c`), which is all the common "detach from the
+  terminal" startup sequence needs (lighttpd won't start without it).
+  `open("/dev/null")` works too (reads return EOF, writes are
+  discarded); no other `/dev` node exists.
 - `chmod`/`chown`/`umask` — no concept of permissions or ownership on
   this port, even though lwext4 itself supports a mode/owner per inode
   (see `ext4_mode_set()`/`ext4_owner_set()` in lwext4's `ext4.h`) —
@@ -462,6 +467,22 @@ account -- this section is the condensed version:
   (sized in `lua.c`'s `LUA_C_STACK_BYTES` comment) lives in `.bss`,
   inside the 2 MiB boot window; past that, Lua depends on virtio-mem
   growth like every other app (Heap section above).
+
+## lighttpd (`port/lighttpd_port/`)
+
+lighttpd 1.4.85 is vendored unmodified (`scripts/get-lighttpd.sh`) and
+built from a hand-written `config.h` with a static module list. See
+`LIGHTTPD.md` for the full account -- this section is the condensed
+version:
+
+- **No CGI, and no spawned FastCGI/SCGI backends** -- no `fork()`/
+  `posix_spawn()` (Process model above). Proxying or FastCGI/SCGI to an
+  already-running backend works.
+- **No regex conditions or rewrites** -- PCRE2 isn't built in.
+- **No TLS, compression, Lua (`mod_magnet`) or WebDAV modules** yet.
+- **`server.max-fds` must be at least 128**, because lighttpd indexes
+  its tables by fd number and sockets start at 100. Concurrent
+  connections are bounded by `SOCK_MAX` (16) anyway.
 
 ## C++ (`port/cpp_port/`)
 

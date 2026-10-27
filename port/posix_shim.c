@@ -359,8 +359,76 @@ static long sys_munmap(long addr, long len)
 // I/O
 // -----------------------------------------------------------------------
 
+// -----------------------------------------------------------------------
+// /dev/null and std fd redirection
+//
+// open("/dev/null") gets an fd from its own small range (reads return
+// EOF, writes are discarded), and dup2()/dup3() can point a std fd
+// 0-2 at one of those -- or at another std fd -- which is all a
+// program needs to do the usual "detach stdin/stdout from the
+// terminal" dance at startup (lighttpd's server.c does exactly this
+// and refuses to start without it). That's the whole of it: there's
+// no general fd table to dup arbitrary fds within, so dup2() onto any
+// other fd number, or of an EXT2/socket fd, is still -ENOSYS, and
+// there's still no dup() at all (see SYS_fcntl's F_DUPFD comment in
+// the dispatcher below).
+// -----------------------------------------------------------------------
+
+#define DEVNULL_FD_BASE 90 // between ext4_shim.c's 3.. and net_shim.c's 100..
+#define DEVNULL_MAX     4
+
+static int devnull_used[DEVNULL_MAX];
+
+static int devnull_is_fd(long fd)
+{
+	return fd >= DEVNULL_FD_BASE && fd < DEVNULL_FD_BASE + DEVNULL_MAX && devnull_used[fd - DEVNULL_FD_BASE];
+}
+
+// What std fd 0/1/2 currently refers to.
+enum { STD_CONSOLE_IN, STD_CONSOLE_OUT, STD_DEVNULL };
+static int std_target[3] = { STD_CONSOLE_IN, STD_CONSOLE_OUT, STD_CONSOLE_OUT };
+
+static int std_is_devnull(long fd)
+{
+	return fd >= 0 && fd <= 2 && std_target[fd] == STD_DEVNULL;
+}
+
+static long devnull_open(void)
+{
+	for (int i = 0; i < DEVNULL_MAX; i++) {
+		if (!devnull_used[i]) {
+			devnull_used[i] = 1;
+			return DEVNULL_FD_BASE + i;
+		}
+	}
+	return -EMFILE;
+}
+
+static long sys_dup3(long oldfd, long newfd, long flags)
+{
+	if (flags & ~O_CLOEXEC)
+		return -EINVAL;
+	if (newfd < 0 || newfd > 2)
+		return -ENOSYS; // see above: only std fds can be redirected
+
+	int target;
+	if (devnull_is_fd(oldfd))
+		target = STD_DEVNULL;
+	else if (oldfd >= 0 && oldfd <= 2)
+		target = std_target[oldfd];
+	else if (oldfd < 0)
+		return -EBADF;
+	else
+		return -ENOSYS;
+
+	std_target[newfd] = target;
+	return newfd;
+}
+
 static long sys_write(long fd, long buf, long len)
 {
+	if (devnull_is_fd(fd) || std_is_devnull(fd))
+		return len;
 	if (ext4_shim_is_fd(fd))
 		return ext4_shim_write(fd, (const void *)buf, (size_t)len);
 	if (net_shim_is_fd(fd))
@@ -389,6 +457,8 @@ static int stdin_readable(void)
 
 static long sys_read(long fd, long buf, long len)
 {
+	if (devnull_is_fd(fd) || std_is_devnull(fd))
+		return 0;
 	if (ext4_shim_is_fd(fd))
 		return ext4_shim_read(fd, (void *)buf, (size_t)len);
 	if (net_shim_is_fd(fd))
@@ -470,6 +540,10 @@ static long sys_close(long fd)
 		return ext4_shim_close(fd);
 	if (net_shim_is_fd(fd))
 		return net_shim_close(fd);
+	if (devnull_is_fd(fd)) {
+		devnull_used[fd - DEVNULL_FD_BASE] = 0;
+		return 0;
+	}
 	if (fd == 0 || fd == 1 || fd == 2)
 		return 0;
 	return -EBADF;
@@ -491,12 +565,12 @@ static long sys_fstat(long fd, long stbuf)
 		st->st_mode = S_IFSOCK | 0666;
 		return 0;
 	}
-	if (fd != 0 && fd != 1 && fd != 2)
+	if (fd != 0 && fd != 1 && fd != 2 && !devnull_is_fd(fd))
 		return -EBADF;
 
 	struct stat *st = (struct stat *)stbuf;
 	memset(st, 0, sizeof(*st));
-	st->st_mode = S_IFCHR | 0620;
+	st->st_mode = (devnull_is_fd(fd) || std_is_devnull(fd)) ? S_IFCHR | 0666 : S_IFCHR | 0620;
 
 	return 0;
 }
@@ -505,11 +579,15 @@ static long sys_lseek(long fd, long offset, long whence)
 {
 	if (ext4_shim_is_fd(fd))
 		return ext4_shim_lseek(fd, offset, (int)whence);
+	if (devnull_is_fd(fd) || std_is_devnull(fd))
+		return 0; // as on Linux
 	return -ESPIPE; // std fds 0-2 are streams, not seekable
 }
 
 static long sys_open(long dirfd, const char *path, long flags, long mode)
 {
+	if (path && strcmp(path, "/dev/null") == 0)
+		return devnull_open();
 	return ext4_shim_open(dirfd, path, (int)flags, (int)mode);
 }
 
@@ -977,7 +1055,7 @@ static long sys_getsockopt(long fd, long level, long optname, long optval, long 
 
 static int fd_is_valid(long fd)
 {
-	return fd == 0 || fd == 1 || fd == 2 || ext4_shim_is_fd(fd) || net_shim_is_fd(fd);
+	return fd == 0 || fd == 1 || fd == 2 || ext4_shim_is_fd(fd) || net_shim_is_fd(fd) || devnull_is_fd(fd);
 }
 
 // fd's poll() revents for events right now; POLLNVAL if fd isn't open.
@@ -985,7 +1063,7 @@ static int fd_revents(long fd, int events)
 {
 	if (net_shim_is_fd(fd))
 		return net_shim_poll(fd, events);
-	if (ext4_shim_is_fd(fd))
+	if (ext4_shim_is_fd(fd) || devnull_is_fd(fd) || std_is_devnull(fd))
 		return events & (POLL_READ_EVENTS | POLL_WRITE_EVENTS);
 	if (fd == 0)
 		return (events & POLL_READ_EVENTS) && stdin_readable() ? events & POLL_READ_EVENTS : 0;
@@ -1227,6 +1305,8 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_readv:             return sys_readv(a1, a2, a3);
 	case SYS_writev:              return sys_writev(a1, a2, a3);
 	case SYS_close:                return sys_close(a1);
+	case SYS_dup2:                 return a1 == a2 && a2 >= 0 && a2 <= 2 ? a2 : sys_dup3(a1, a2, 0);
+	case SYS_dup3:                 return a1 == a2 ? -EINVAL : sys_dup3(a1, a2, a3);
 	case SYS_fstat:                 return sys_fstat(a1, a2);
 	case SYS_lseek:                  return sys_lseek(a1, a2, a3);
 	case SYS_ioctl:                    return sys_ioctl(a1, a2, a3);
