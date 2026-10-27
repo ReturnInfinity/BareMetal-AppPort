@@ -395,8 +395,8 @@
  * socket() itself and friends need no shim of their own (PYTHON.md's
  * Phase 2): Modules/socketmodule.c just calls ordinary socket()/
  * connect()/send()/recv(), which posix_shim.c already dispatches to
- * net_shim.c (SOCK_MAX=16 sockets, 30s timeout, no SO_REUSEADDR/
- * nonblocking -- same limits every other app here lives with) for
+ * net_shim.c (SOCK_MAX=16 sockets, 30s default timeout, no
+ * SO_REUSEADDR -- same limits every other app here lives with) for
  * every caller, not just Python's.
  * --------------------------------------------------------------------- */
 #define HAVE_GETADDRINFO 1

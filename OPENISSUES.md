@@ -95,17 +95,16 @@ one.
 ## Missing common syscalls
 
 Not implemented (all fall through to `-ENOSYS`):
-- `epoll_*` — no way to multiplex across multiple fds and learn
-  *which* is ready first. `poll`/`select` themselves are implemented
-  (`posix_shim.c`), but not as a real wait: every fd this port
-  recognizes is reported ready immediately for whatever of read/write
-  the caller asked about, with the real blocking then happening for
-  real inside whichever `read()`/`write()`/`recv()`/`send()` follows
-  (every one of those already blocks synchronously up to its own
-  timeout regardless). Good enough for libcurl's easy-interface
-  transfer loop (the reason these exist at all) and anything else
-  driving one blocking connection at a time; a program juggling
-  several fds to learn which one has data first won't get that.
+- `epoll_*`/`ppoll`/`pselect6` — only `poll()` and `select()` exist.
+  Those two are a real readiness wait (`posix_shim.c`): each pass
+  runs one `net_poll()` and checks every fd (sockets via
+  `net_shim_poll()`: data/EOF/a pending connection, send-buffer room,
+  a finished or failed `connect()`; EXT2 files always ready; fd 0 only
+  once a console byte is actually waiting), sleeping 1ms between
+  passes until something is ready, the timeout runs out, or a signal
+  arrives (`-EINTR`). Enough for an event-loop server driven by
+  `poll()`/`select()` (see `poll_test.c`); a program that only knows
+  how to use epoll needs it added.
 - `pipe`/`pipe2`/`dup`/`dup2`/`dup3`/`socketpair` — no in-process fd
   duplication, pipes, or `AF_UNIX` socket pairs between fds.
 - `chmod`/`chown`/`umask` — no concept of permissions or ownership on
@@ -219,12 +218,24 @@ Not implemented (all fall through to `-ENOSYS`):
   (delivered through the same signal mechanism described above). The
   30s default remains for any caller that never touches
   `setsockopt()`.
-- **No non-blocking mode.** `SOCK_NONBLOCK`/`O_NONBLOCK` and
-  `MSG_DONTWAIT` are accepted but not honored — every socket call
-  blocks (up to the timeout above) regardless.
-- **`setsockopt`/`getsockopt` only honor `SO_RCVTIMEO`/`SO_SNDTIMEO`**
-  (above); every other option — `SO_REUSEADDR`, `TCP_NODELAY`, etc. —
-  is still an accept-and-ignore stub with no effect.
+- **Non-blocking mode works** (`net_shim.c`): `O_NONBLOCK` set via
+  `SOCK_NONBLOCK`, `accept4(SOCK_NONBLOCK)`, `fcntl(F_SETFL)` or
+  `ioctl(FIONBIO)`, or `MSG_DONTWAIT` per call. `accept`/`recv`/`send`
+  then return `-EAGAIN` instead of waiting, and `connect` returns
+  `-EINPROGRESS`, its outcome reported through `POLLOUT`/`POLLERR` and
+  `getsockopt(SO_ERROR)`. `ioctl(FIONREAD)` reports queued bytes. Not
+  covered: `O_NONBLOCK` on non-socket fds (EXT2 I/O never waits on
+  anything external anyway; fd 0's `read()` still blocks).
+- **`listen()`'s backlog argument is ignored**; every listener gets
+  lwIP backlog `SOCK_MAX`. lwIP counts handshakes still in progress
+  against the backlog, unlike Linux's separate SYN queue, so a small
+  requested backlog would drop SYNs from a burst of clients that
+  Linux would take. Past `SOCK_MAX` the SYNs are dropped (the client
+  retransmits) rather than the connection reset.
+- **`setsockopt` only honors `SO_RCVTIMEO`/`SO_SNDTIMEO`** (above), and
+  `getsockopt` those plus `SO_ERROR`/`SO_TYPE`; every other option —
+  `SO_REUSEADDR`, `TCP_NODELAY`, etc. — is still an accept-and-ignore
+  stub with no effect.
 - **`sendmsg()`/`recvmsg()` carry no ancillary data.** The iovec
   gather/scatter, `msg_name` (UDP destination/source) and `MSG_TRUNC`
   all work (`net_shim.c`; see `msg_test.c`), but sending any control

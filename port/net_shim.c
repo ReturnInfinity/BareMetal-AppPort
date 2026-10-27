@@ -29,15 +29,27 @@
 // closest fit among the two this port exposes, and consistent with
 // send() sharing the same option.
 //
-// Scope: IPv4 TCP and UDP only (no raw sockets, no non-blocking mode;
-// only SO_RCVTIMEO/SO_SNDTIMEO are honored by setsockopt(), every
-// other option is still an accept-and-ignore stub). Good enough for a
-// TCP client or a single-threaded accept-serve-close TCP server, or a
-// UDP client/server exchanging whole datagrams.
+// Non-blocking mode (O_NONBLOCK via SOCK_NONBLOCK/accept4()/
+// fcntl(F_SETFL)/ioctl(FIONBIO), or MSG_DONTWAIT per call) runs the
+// same loops for exactly one net_poll() pass and then fails with
+// -EAGAIN instead of waiting; a non-blocking connect() returns
+// -EINPROGRESS and reports its outcome through POLLOUT/POLLERR and
+// getsockopt(SO_ERROR). net_shim_poll() reports real per-socket
+// readiness from the same state these loops wait on, which is what
+// posix_shim.c's poll()/select() are built on -- together, enough for
+// a single-threaded event-loop server juggling many connections.
+//
+// Scope: IPv4 TCP and UDP only (no raw sockets; only SO_RCVTIMEO/
+// SO_SNDTIMEO are honored by setsockopt(), and only those plus
+// SO_ERROR/SO_TYPE by getsockopt() -- every other option is still an
+// accept-and-ignore stub).
 // =============================================================================
 
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
@@ -53,7 +65,9 @@
 
 #define SOCK_FD_BASE          100
 #define SOCK_MAX              16
-#define ACCEPTQ_MAX           8
+// Can never usefully exceed the socket table, since every queued
+// connection already owns a slot -- see on_accept().
+#define ACCEPTQ_MAX           SOCK_MAX
 #define UDP_RXQ_MAX            8
 #define NET_BLOCK_TIMEOUT_MS  30000
 
@@ -116,6 +130,14 @@ struct bsock {
 	// net_shim_socket() and on_accept().
 	long rcv_timeout_ms;
 	long snd_timeout_ms;
+
+	// O_NONBLOCK -- see the file header.
+	int nonblock;
+
+	// Pending SO_ERROR (a positive errno), set when lwIP reports a
+	// connection failure and cleared by getsockopt(SO_ERROR) or by the
+	// connect() call that reports it.
+	int so_error;
 };
 
 static struct bsock socks[SOCK_MAX];
@@ -140,6 +162,12 @@ static void reset_sock(struct bsock *s)
 static int block_timed_out(u32_t start, long timeout_ms)
 {
 	return timeout_ms != 0 && (u32_t)(sys_now() - start) >= (u32_t)timeout_ms;
+}
+
+// O_NONBLOCK set on the socket, or MSG_DONTWAIT passed for this call.
+static int dont_wait(const struct bsock *s, long flags)
+{
+	return s->nonblock || (flags & MSG_DONTWAIT);
 }
 
 int net_shim_is_fd(long fd)
@@ -175,7 +203,12 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 static void on_err(void *arg, err_t err)
 {
 	struct bsock *s = arg;
-	(void)err;
+
+	if (s->state == SK_CONNECTING)
+		s->so_error = (err == ERR_RST) ? ECONNREFUSED : ETIMEDOUT;
+	else
+		s->so_error = (err == ERR_ABRT) ? ECONNABORTED : ECONNRESET;
+
 	// lwIP has already freed the pcb by the time this fires.
 	s->pcb = NULL;
 	s->state = SK_ERROR;
@@ -185,7 +218,12 @@ static err_t on_connected(void *arg, struct tcp_pcb *pcb, err_t err)
 {
 	struct bsock *s = arg;
 	(void)pcb;
-	s->state = (err == ERR_OK) ? SK_CONNECTED : SK_ERROR;
+	if (err == ERR_OK) {
+		s->state = SK_CONNECTED;
+	} else {
+		s->state = SK_ERROR;
+		s->so_error = ECONNREFUSED;
+	}
 	return ERR_OK;
 }
 
@@ -195,12 +233,25 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 
 	if (err != ERR_OK || !newpcb)
 		return ERR_VAL;
+	// Refusing here makes lwIP reset the (already-handshaken)
+	// connection. The listen backlog normally stops it getting this
+	// far -- see below -- so this is only reached with the socket
+	// table itself full.
 	if (listener->acceptq_count >= ACCEPTQ_MAX)
 		return ERR_MEM;
 
 	int slot = alloc_slot();
 	if (slot < 0)
 		return ERR_MEM;
+
+	// Keep counting this connection against the listener's backlog
+	// until the app actually accept()s it (net_shim_accept()'s
+	// tcp_backlog_accepted()), not just until the handshake finishes.
+	// Once handshakes-in-progress plus this queue reach the backlog,
+	// lwIP drops further SYNs and the client retransmits, as on Linux,
+	// instead of a burst of connections overflowing acceptq here and
+	// being reset.
+	tcp_backlog_delayed(newpcb);
 
 	struct bsock *ns = &socks[slot];
 	reset_sock(ns);
@@ -215,8 +266,6 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 	listener->acceptq[listener->acceptq_tail] = slot;
 	listener->acceptq_tail = (listener->acceptq_tail + 1) % ACCEPTQ_MAX;
 	listener->acceptq_count++;
-
-	tcp_accepted(listener->pcb);
 
 	return ERR_OK;
 }
@@ -258,6 +307,7 @@ long net_shim_socket(long domain, long type, long protocol)
 	struct bsock *s = &socks[slot];
 	reset_sock(s);
 	s->type = base_type;
+	s->nonblock = (type & SOCK_NONBLOCK) != 0;
 
 	if (base_type == SOCK_DGRAM) {
 		s->upcb = udp_new();
@@ -313,7 +363,7 @@ long net_shim_getsockname(long fd, void *addr, socklen_t *addrlenp)
 	if (s->type == SOCK_DGRAM) {
 		sin.sin_port = lwip_htons(s->upcb->local_port);
 		sin.sin_addr.s_addr = s->upcb->local_ip.addr;
-	} else {
+	} else if (s->pcb) { // NULL once reset (on_err())
 		sin.sin_port = lwip_htons(s->pcb->local_port);
 		sin.sin_addr.s_addr = s->pcb->local_ip.addr;
 	}
@@ -349,7 +399,16 @@ long net_shim_listen(long fd, long backlog)
 	if (s->type != SOCK_STREAM)
 		return -EOPNOTSUPP;
 
-	struct tcp_pcb *lpcb = tcp_listen_with_backlog(s->pcb, (u8_t)backlog);
+	// The requested backlog is deliberately not passed on. lwIP counts
+	// handshakes still in progress against it, where Linux keeps those
+	// in a separate SYN queue and applies the backlog only to finished,
+	// not-yet-accept()ed connections -- so a burst of connections
+	// bigger than a small listen() backlog would get SYNs dropped here
+	// that Linux accepts. What lwIP gets instead is the most acceptq
+	// can ever hold, so it never overflows (see on_accept()).
+	(void)backlog;
+
+	struct tcp_pcb *lpcb = tcp_listen_with_backlog(s->pcb, ACCEPTQ_MAX);
 	if (!lpcb)
 		return -EADDRINUSE;
 
@@ -361,7 +420,7 @@ long net_shim_listen(long fd, long backlog)
 	return 0;
 }
 
-long net_shim_accept(long fd, void *addr, socklen_t *addrlenp)
+long net_shim_accept(long fd, void *addr, socklen_t *addrlenp, long flags)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -375,6 +434,8 @@ long net_shim_accept(long fd, void *addr, socklen_t *addrlenp)
 		net_poll();
 		if (s->acceptq_count != 0)
 			break;
+		if (s->nonblock)
+			return -EAGAIN;
 		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -EAGAIN;
 		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
@@ -386,13 +447,22 @@ long net_shim_accept(long fd, void *addr, socklen_t *addrlenp)
 	s->acceptq_count--;
 
 	struct bsock *ns = &socks[slot];
+	ns->nonblock = (flags & SOCK_NONBLOCK) != 0; // not inherited from the listener, same as Linux
+
+	// ns->pcb is NULL if the connection was reset while still queued
+	// (on_err()) -- it's still handed over, as on Linux, and its first
+	// recv()/send() reports the reset.
+	if (ns->pcb)
+		tcp_backlog_accepted(ns->pcb);
 
 	if (addr && addrlenp && *addrlenp >= (socklen_t)sizeof(struct sockaddr_in)) {
 		struct sockaddr_in sin;
 		memset(&sin, 0, sizeof(sin));
 		sin.sin_family = AF_INET;
-		sin.sin_port = lwip_htons(ns->pcb->remote_port);
-		sin.sin_addr.s_addr = ns->pcb->remote_ip.addr;
+		if (ns->pcb) {
+			sin.sin_port = lwip_htons(ns->pcb->remote_port);
+			sin.sin_addr.s_addr = ns->pcb->remote_ip.addr;
+		}
 		memcpy(addr, &sin, sizeof(sin));
 		*addrlenp = sizeof(sin);
 	}
@@ -420,6 +490,13 @@ long net_shim_connect(long fd, const void *addr, long addrlen)
 		return 0;
 	}
 
+	if (s->state == SK_CONNECTING)
+		return -EALREADY;
+	if (s->state == SK_CONNECTED)
+		return -EISCONN;
+	if (s->state != SK_CLOSED || !s->pcb)
+		return -EINVAL;
+
 	tcp_arg(s->pcb, s);
 	tcp_recv(s->pcb, on_recv);
 	tcp_err(s->pcb, on_err);
@@ -435,13 +512,19 @@ long net_shim_connect(long fd, const void *addr, long addrlen)
 		net_poll();
 		if (s->state != SK_CONNECTING)
 			break;
+		if (s->nonblock)
+			return -EINPROGRESS; // outcome via POLLOUT/POLLERR + SO_ERROR
 		if (block_timed_out(start, s->snd_timeout_ms))
 			return -ETIMEDOUT;
 		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
 			return -EINTR;
 	}
 
-	return s->state == SK_CONNECTED ? 0 : -ECONNREFUSED;
+	if (s->state == SK_CONNECTED)
+		return 0;
+	long err = s->so_error ? s->so_error : ECONNREFUSED;
+	s->so_error = 0;
+	return -err;
 }
 
 static long bsock_read(struct bsock *s, void *buf, size_t len)
@@ -504,13 +587,15 @@ static long udp_do_recv(struct bsock *s, void *buf, size_t len, ip4_addr_t *addr
 	return udp_do_recvv(s, &iov, 1, NULL, addr_out, port_out);
 }
 
-static long udp_wait_rx(struct bsock *s)
+static long udp_wait_rx(struct bsock *s, int nonblock)
 {
 	u32_t start = sys_now();
 	while (s->udpq_count == 0) {
 		net_poll();
 		if (s->udpq_count != 0)
 			break;
+		if (nonblock)
+			return -EAGAIN;
 		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -ETIMEDOUT;
 		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
@@ -520,8 +605,10 @@ static long udp_wait_rx(struct bsock *s)
 }
 
 // Blocks until a TCP socket has bytes queued (returns 1), has hit EOF
-// (0), or has failed/timed out/been interrupted (negative errno).
-static long tcp_wait_rx(struct bsock *s)
+// (0), or has failed/timed out/been interrupted (negative errno) --
+// or, if nonblock, returns -EAGAIN after one net_poll() pass instead
+// of waiting.
+static long tcp_wait_rx(struct bsock *s, int nonblock)
 {
 	u32_t start = sys_now();
 	for (;;) {
@@ -531,9 +618,13 @@ static long tcp_wait_rx(struct bsock *s)
 			return 0;
 		if (s->state == SK_ERROR)
 			return -ECONNRESET;
-		net_poll();
+		if (s->state == SK_CLOSED || s->state == SK_LISTENING)
+			return -ENOTCONN;
+		net_poll(); // SK_CONNECTING waits for the connection like Linux
 		if (s->rx_head || s->eof || s->state == SK_ERROR)
 			continue;
+		if (nonblock)
+			return -EAGAIN;
 		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -ETIMEDOUT;
 		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
@@ -543,11 +634,10 @@ static long tcp_wait_rx(struct bsock *s)
 
 long net_shim_recv(long fd, void *buf, size_t len, long flags)
 {
-	(void)flags;
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
 	if (s->type == SOCK_DGRAM) {
-		long r = udp_wait_rx(s);
+		long r = udp_wait_rx(s, dont_wait(s, flags));
 		if (r < 0)
 			return r;
 		return udp_do_recv(s, buf, len, NULL, NULL);
@@ -556,10 +646,17 @@ long net_shim_recv(long fd, void *buf, size_t len, long flags)
 	if (len == 0)
 		return 0;
 
-	long r = tcp_wait_rx(s);
+	long r = tcp_wait_rx(s, dont_wait(s, flags));
 	if (r <= 0)
 		return r;
-	return bsock_read(s, buf, len);
+
+	// Like recvmsg() below: once something is queued, hand back as much
+	// of it as fits (bsock_read() only ever takes from one pbuf), never
+	// blocking again.
+	long total = 0;
+	while ((size_t)total < len && s->rx_head)
+		total += bsock_read(s, (char *)buf + total, len - total);
+	return total;
 }
 
 long net_shim_recvfrom(long fd, void *buf, size_t len, long flags, void *addr, socklen_t *addrlenp)
@@ -569,7 +666,7 @@ long net_shim_recvfrom(long fd, void *buf, size_t len, long flags, void *addr, s
 	if (s->type != SOCK_DGRAM)
 		return net_shim_recv(fd, buf, len, flags);
 
-	long r = udp_wait_rx(s);
+	long r = udp_wait_rx(s, dont_wait(s, flags));
 	if (r < 0)
 		return r;
 
@@ -651,7 +748,6 @@ static long udp_do_send(struct bsock *s, const void *buf, size_t len, const ip4_
 
 long net_shim_send(long fd, const void *buf, size_t len, long flags)
 {
-	(void)flags;
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
 	if (s->type == SOCK_DGRAM) {
@@ -662,15 +758,24 @@ long net_shim_send(long fd, const void *buf, size_t len, long flags)
 
 	if (len == 0)
 		return 0;
+	if (s->state == SK_CLOSED || s->state == SK_LISTENING)
+		return -ENOTCONN;
 
+	// A send() while a connect() is still in progress waits for it
+	// (or, non-blocking, fails with -EAGAIN), like Linux.
+	int nonblock = dont_wait(s, flags);
 	u32_t start = sys_now();
-	for (;;) {
-		long n = bsock_write(s, buf, len);
+	for (int polled = 0;; polled = 1) {
+		long n = (s->state == SK_CONNECTING) ? 0 : bsock_write(s, buf, len);
 		if (n != 0)
 			return n;
 		if (s->state == SK_ERROR)
 			return -ECONNRESET;
+		if (nonblock && polled)
+			return -EAGAIN; // still no room after one net_poll() pass
 		net_poll();
+		if (nonblock)
+			continue;
 		if (block_timed_out(start, s->snd_timeout_ms))
 			return -ETIMEDOUT;
 		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
@@ -745,14 +850,13 @@ long net_shim_sendmsg(long fd, const struct msghdr *msg, long flags)
 
 long net_shim_recvmsg(long fd, struct msghdr *msg, long flags)
 {
-	(void)flags;
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
 	msg->msg_controllen = 0;
 	msg->msg_flags = 0;
 
 	if (s->type == SOCK_DGRAM) {
-		long r = udp_wait_rx(s);
+		long r = udp_wait_rx(s, dont_wait(s, flags));
 		if (r < 0)
 			return r;
 
@@ -790,7 +894,7 @@ long net_shim_recvmsg(long fd, struct msghdr *msg, long flags)
 	// something to return -- a request that exactly fills the first
 	// iovec mustn't stall waiting for bytes the peer will only send
 	// after it gets a response.
-	long r = tcp_wait_rx(s);
+	long r = tcp_wait_rx(s, dont_wait(s, flags));
 	if (r <= 0)
 		return r;
 
@@ -837,6 +941,24 @@ long net_shim_getsockopt(long fd, long level, long optname, void *optval, sockle
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
+	// SO_ERROR is how a non-blocking connect()'s outcome is read back
+	// once poll() reports the socket writable (or POLLERR); reading it
+	// clears it, as on Linux.
+	if (level == SOL_SOCKET && (optname == SO_ERROR || optname == SO_TYPE)) {
+		if (!optval || !optlenp || (size_t)*optlenp < sizeof(int))
+			return -EINVAL;
+		int v;
+		if (optname == SO_ERROR) {
+			v = s->so_error;
+			s->so_error = 0;
+		} else {
+			v = s->type;
+		}
+		memcpy(optval, &v, sizeof(v));
+		*optlenp = sizeof(v);
+		return 0;
+	}
+
 	if (level != SOL_SOCKET || (optname != SO_RCVTIMEO && optname != SO_SNDTIMEO))
 		return 0;
 	if (!optval || !optlenp || (size_t)*optlenp < sizeof(struct timeval))
@@ -851,6 +973,126 @@ long net_shim_getsockopt(long fd, long level, long optname, void *optval, sockle
 	*optlenp = sizeof(tv);
 
 	return 0;
+}
+
+// fcntl() on a socket: only O_NONBLOCK is a real flag here.
+// F_GETFL reports O_RDWR plus O_NONBLOCK if set; F_SETFL takes
+// O_NONBLOCK and ignores everything else (O_APPEND/O_ASYNC/... have
+// no meaning on this port's sockets). F_DUPFD* fail for the same
+// reason posix_shim.c's non-socket fcntl() does -- there's no dup().
+// Everything else (F_GETFD/F_SETFD's FD_CLOEXEC, ...) is accept-and-
+// ignore.
+long net_shim_fcntl(long fd, long cmd, long arg)
+{
+	struct bsock *s = &socks[fd - SOCK_FD_BASE];
+
+	switch (cmd) {
+	case F_GETFL:
+		return O_RDWR | (s->nonblock ? O_NONBLOCK : 0);
+	case F_SETFL:
+		s->nonblock = (arg & O_NONBLOCK) != 0;
+		return 0;
+	case F_DUPFD:
+	case F_DUPFD_CLOEXEC:
+		return -EINVAL;
+	default:
+		return 0;
+	}
+}
+
+// ioctl() on a socket: FIONBIO (the other way to set O_NONBLOCK) and
+// FIONREAD (bytes readable right now without blocking -- for UDP, the
+// size of the next datagram, as on Linux).
+long net_shim_ioctl(long fd, long req, long arg)
+{
+	struct bsock *s = &socks[fd - SOCK_FD_BASE];
+	int *p = (int *)arg;
+
+	switch (req) {
+	case FIONBIO:
+		if (!p)
+			return -EFAULT;
+		s->nonblock = *p != 0;
+		return 0;
+	case FIONREAD:
+		if (!p)
+			return -EFAULT;
+		if (s->state == SK_LISTENING)
+			return -EINVAL;
+		net_poll();
+		if (s->type == SOCK_DGRAM)
+			*p = s->udpq_count ? s->udpq[s->udpq_head].p->tot_len : 0;
+		else
+			*p = s->rx_head ? s->rx_head->tot_len - s->rx_off : 0;
+		return 0;
+	default:
+		return -ENOTTY;
+	}
+}
+
+// Drains the NIC and services lwIP's timers once, if any socket is
+// open at all -- what posix_shim.c's poll()/select() call each time
+// around their wait loop before checking net_shim_poll(). With no
+// sockets there's nothing poll() could be waiting on here, and the
+// netif may never have been brought up (net_ensure_ready() runs on the
+// first socket() call).
+void net_shim_pump(void)
+{
+	for (int i = 0; i < SOCK_MAX; i++) {
+		if (socks[i].state != SK_FREE) {
+			net_poll();
+			return;
+		}
+	}
+}
+
+// Current readiness of a socket, as poll() revents for the requested
+// events. Mirrors exactly what the calls above would do right now:
+// POLLIN means recv()/accept() won't wait (data or EOF queued, a
+// connection waiting, or a failure to report), POLLOUT means send()
+// would accept at least one byte (or a pending connect() finished).
+// POLLERR/POLLHUP are always reported regardless of events, as poll(2)
+// specifies. Doesn't call net_poll() itself -- see net_shim_pump().
+int net_shim_poll(long fd, int events)
+{
+	struct bsock *s = &socks[fd - SOCK_FD_BASE];
+	int r = 0;
+
+	if (s->type == SOCK_DGRAM) {
+		if (s->udpq_count)
+			r |= POLLIN | POLLRDNORM;
+		r |= POLLOUT | POLLWRNORM;
+	} else {
+		switch (s->state) {
+		case SK_LISTENING:
+			if (s->acceptq_count)
+				r |= POLLIN | POLLRDNORM;
+			break;
+		case SK_CONNECTED:
+			if (s->rx_head || s->eof)
+				r |= POLLIN | POLLRDNORM;
+			if (s->eof)
+				r |= POLLRDHUP;
+			if (s->pcb && tcp_sndbuf(s->pcb) > 0 && tcp_sndqueuelen(s->pcb) < TCP_SND_QUEUELEN)
+				r |= POLLOUT | POLLWRNORM;
+			break;
+		case SK_ERROR:
+			// Readable (so a recv() surfaces the error, or any
+			// data that arrived before it) and writable (so a
+			// pending connect()'s caller wakes to read SO_ERROR).
+			r |= POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM | POLLHUP;
+			if (s->so_error)
+				r |= POLLERR;
+			break;
+		case SK_CLOSED:
+			r |= POLLOUT | POLLWRNORM | POLLHUP; // never connected, as Linux reports it
+			break;
+		default: // SK_CONNECTING
+			break;
+		}
+	}
+
+	return r & (events | POLLERR | POLLHUP);
 }
 
 // Tears down one already-accepted (tcp_accepted() called), not-yet-

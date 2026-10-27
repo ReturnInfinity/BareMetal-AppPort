@@ -372,6 +372,21 @@ static long sys_write(long fd, long buf, long len)
 	return len;
 }
 
+// One byte of console input that poll()/select() already pulled out
+// of b_input() to learn fd 0 was readable (b_input() has no peek), or
+// -1. sys_read() hands it back first.
+static int stdin_peek = -1;
+
+static int stdin_readable(void)
+{
+	if (stdin_peek < 0) {
+		u8 c = b_input();
+		if (c)
+			stdin_peek = c;
+	}
+	return stdin_peek >= 0;
+}
+
 static long sys_read(long fd, long buf, long len)
 {
 	if (ext4_shim_is_fd(fd))
@@ -386,6 +401,12 @@ static long sys_read(long fd, long buf, long len)
 	unsigned char *p = (unsigned char *)buf;
 	u8 c;
 
+	if (stdin_peek >= 0) {
+		c = (u8)stdin_peek;
+		stdin_peek = -1;
+		goto have_first;
+	}
+
 	// Block for the first byte, then greedily drain whatever else
 	// is immediately available without blocking. This spin stays
 	// T_RUNNING the whole time (b_input() never yields), so it's
@@ -399,6 +420,7 @@ static long sys_read(long fd, long buf, long len)
 		if (thread_shim_take_eintr())
 			return -EINTR;
 	}
+have_first:
 	p[0] = c;
 
 	long n = 1;
@@ -616,9 +638,11 @@ static long sys_fstatat(long dirfd, long path, long kstbuf, long flags)
 // (success => stay line-buffered, failure => switch to full
 // buffering); the winsize contents are never read, so nothing needs
 // to be filled in.
+// Sockets have their own FIONBIO/FIONREAD (net_shim_ioctl()).
 static long sys_ioctl(long fd, long req, long arg)
 {
-	(void)arg;
+	if (net_shim_is_fd(fd))
+		return net_shim_ioctl(fd, req, arg);
 	if ((fd == 0 || fd == 1 || fd == 2) && req == TIOCGWINSZ)
 		return 0;
 	return -ENOTTY;
@@ -846,10 +870,11 @@ static long sys_listen(long fd, long backlog)
 	return net_shim_listen(fd, backlog);
 }
 
+// SOCK_NONBLOCK is honored on the new socket; SOCK_CLOEXEC is
+// meaningless here (no exec) and ignored.
 static long sys_accept4(long fd, long addr, long addrlenp, long flags)
 {
-	(void)flags; // no non-blocking/cloexec accept modes in this port
-	return net_shim_accept(fd, (void *)addr, (socklen_t *)addrlenp);
+	return net_shim_accept(fd, (void *)addr, (socklen_t *)addrlenp, flags);
 }
 
 static long sys_connect(long fd, long addr, long addrlen)
@@ -920,85 +945,196 @@ static long sys_getsockopt(long fd, long level, long optname, long optval, long 
 // -----------------------------------------------------------------------
 // select()/poll()
 //
-// Every blocking I/O call in this port (ext4_shim_read/write, net_shim_send/
-// recv) already blocks internally for real (net_shim's up-to-30s
-// timeout) -- there is no non-blocking mode for a caller to actually
-// need readiness-multiplexing for (see OPENISSUES.md). So rather than
-// leaving these as -ENOSYS (which would break libcurl's easy-interface
-// transfer loop -- lib/select.c's Curl_socket_check() -- and anything
-// else that unconditionally calls select()/poll() before a read/write
-// as a matter of course), both are shimmed as an immediate "yes,
-// whatever you asked about is ready" instead of a real wait: every
-// fd this port recognizes (std fd 0-2, an EXT2 fd, a socket fd) is
-// reported ready for whatever of read/write the caller asked about,
-// with the real blocking then happening for real inside the read()/
-// write()/recv()/send() call that follows. This is honest about not
-// being a real multiplexer (a caller juggling several fds to learn
-// *which one* has data first won't get that -- it'll get "ready" for
-// all of them and then block for real on whichever it tries), but is
-// exactly the semantics this port's single-blocking-connection-at-a-
-// time callers (libcurl's easy interface included) actually drive.
+// A real readiness wait. Each pass runs one net_poll() (via
+// net_shim_pump(), so lwIP's callbacks update every socket's state)
+// and then asks each fd whether the call it's being polled for would
+// complete without waiting:
+//
+//   - sockets: net_shim_poll() -- data/EOF/a pending connection for
+//     POLLIN, send-buffer room or a finished connect() for POLLOUT,
+//     plus POLLERR/POLLHUP on failure (see its comment);
+//   - EXT2 files: always readable and writable, as regular files are on
+//     Linux (ext4_shim_read/write never wait on anything external);
+//   - fd 0: readable once a console byte is actually waiting (pulled
+//     out of b_input() into stdin_peek -- see sys_read());
+//   - fd 1/2: always writable.
+//
+// If nothing is ready and the timeout hasn't run out, the caller sleeps
+// POLL_WAIT_INTERVAL_NS via thread_shim_sleep_until() -- yielding to
+// other threads, same as net_shim.c's blocking loops -- and tries
+// again. The interval is shorter than net_shim.c's 10ms because an
+// event-loop server goes through poll() at least once per request, so
+// the wake-up latency here is added to every one of them; 1ms is the
+// kernel's tick, the shortest sleep that means anything. A caught
+// signal ends the wait with -EINTR. The timeout isn't written back
+// (Linux's select() does that; POSIX leaves it unspecified).
 // -----------------------------------------------------------------------
+
+#define POLL_WAIT_INTERVAL_NS 1000000ULL // 1ms
+
+#define POLL_READ_EVENTS  (POLLIN | POLLRDNORM)
+#define POLL_WRITE_EVENTS (POLLOUT | POLLWRNORM)
 
 static int fd_is_valid(long fd)
 {
 	return fd == 0 || fd == 1 || fd == 2 || ext4_shim_is_fd(fd) || net_shim_is_fd(fd);
 }
 
-static long sys_select(long nfds, long readfds_addr, long writefds_addr, long exceptfds_addr, long timeout_addr)
+// fd's poll() revents for events right now; POLLNVAL if fd isn't open.
+static int fd_revents(long fd, int events)
 {
-	fd_set *rfds = (fd_set *)readfds_addr;
-	fd_set *wfds = (fd_set *)writefds_addr;
-	fd_set *efds = (fd_set *)exceptfds_addr;
-	(void)timeout_addr;
+	if (net_shim_is_fd(fd))
+		return net_shim_poll(fd, events);
+	if (ext4_shim_is_fd(fd))
+		return events & (POLL_READ_EVENTS | POLL_WRITE_EVENTS);
+	if (fd == 0)
+		return (events & POLL_READ_EVENTS) && stdin_readable() ? events & POLL_READ_EVENTS : 0;
+	if (fd == 1 || fd == 2)
+		return events & POLL_WRITE_EVENTS;
+	return POLLNVAL;
+}
 
-	if (nfds < 0 || nfds > FD_SETSIZE)
-		return -EINVAL;
+// One poll pass over a caller-specific set of fds -- returns the number
+// ready (or a negative errno), filling in the caller's results.
+typedef long (*poll_scan_fn)(void *ctx);
 
-	long ready = 0;
-	for (long fd = 0; fd < nfds; fd++) {
-		int wanted = (rfds && FD_ISSET(fd, rfds)) || (wfds && FD_ISSET(fd, wfds));
-		if (!wanted)
-			continue;
-		if (!fd_is_valid(fd)) {
-			if (rfds)
-				FD_CLR(fd, rfds);
-			if (wfds)
-				FD_CLR(fd, wfds);
-			continue;
+// timeout_ns < 0 waits indefinitely; 0 checks once without waiting.
+static long poll_wait(poll_scan_fn scan, void *ctx, long long timeout_ns)
+{
+	u64 deadline = 0;
+	if (timeout_ns > 0)
+		deadline = b_system(TIMECOUNTER, 0, 0) + (u64)timeout_ns;
+
+	for (;;) {
+		net_shim_pump();
+		long n = scan(ctx);
+		if (n != 0 || timeout_ns == 0)
+			return n;
+
+		u64 now = b_system(TIMECOUNTER, 0, 0);
+		u64 wake = now + POLL_WAIT_INTERVAL_NS;
+		if (timeout_ns > 0) {
+			if (now >= deadline)
+				return 0;
+			if (wake > deadline)
+				wake = deadline;
 		}
-		ready++;
+		if (thread_shim_sleep_until(wake) == -EINTR)
+			return -EINTR;
 	}
-	if (efds)
-		FD_ZERO(efds);
+}
 
+struct poll_ctx {
+	struct pollfd *fds;
+	long nfds;
+};
+
+static long poll_scan(void *arg)
+{
+	struct poll_ctx *c = arg;
+	long ready = 0;
+
+	for (long i = 0; i < c->nfds; i++) {
+		struct pollfd *p = &c->fds[i];
+		p->revents = 0;
+		if (p->fd < 0)
+			continue; // negative fd: POSIX says ignore this entry
+		p->revents = (short)fd_revents(p->fd, p->events);
+		if (p->revents)
+			ready++;
+	}
 	return ready;
 }
 
 static long sys_poll(long fds_addr, long nfds, long timeout)
 {
-	(void)timeout;
-	struct pollfd *fds = (struct pollfd *)fds_addr;
+	if (nfds < 0)
+		return -EINVAL;
+
+	struct poll_ctx c = { (struct pollfd *)fds_addr, nfds };
+	return poll_wait(poll_scan, &c, timeout < 0 ? -1 : timeout * 1000000LL);
+}
+
+// select()'s fd_sets are in/out, so each pass scans the caller's
+// original sets (in) into scratch copies (out), and only the final,
+// returning pass's results are copied back.
+struct select_ctx {
+	long nfds;
+	fd_set *rfds, *wfds, *efds;
+	fd_set rout, wout;
+};
+
+static long select_scan(void *arg)
+{
+	struct select_ctx *c = arg;
 	long ready = 0;
 
-	for (long i = 0; i < nfds; i++) {
-		fds[i].revents = 0;
+	FD_ZERO(&c->rout);
+	FD_ZERO(&c->wout);
 
-		if (fds[i].fd < 0)
-			continue; // negative fd: POSIX says ignore this entry
-
-		if (!fd_is_valid(fds[i].fd)) {
-			fds[i].revents = POLLNVAL;
-			ready++;
+	for (long fd = 0; fd < c->nfds; fd++) {
+		int events = 0;
+		if (c->rfds && FD_ISSET(fd, c->rfds))
+			events |= POLLIN;
+		if (c->wfds && FD_ISSET(fd, c->wfds))
+			events |= POLLOUT;
+		if (!events)
 			continue;
-		}
 
-		fds[i].revents = fds[i].events & (POLLIN | POLLOUT);
-		if (fds[i].revents)
+		// Same mapping as Linux's select(): hangup/error count as
+		// readable, error as writable.
+		int r = fd_revents(fd, events);
+		if ((events & POLLIN) && (r & (POLLIN | POLLHUP | POLLERR))) {
+			FD_SET(fd, &c->rout);
 			ready++;
+		}
+		if ((events & POLLOUT) && (r & (POLLOUT | POLLERR))) {
+			FD_SET(fd, &c->wout);
+			ready++;
+		}
+	}
+	return ready;
+}
+
+static long sys_select(long nfds, long readfds_addr, long writefds_addr, long exceptfds_addr, long timeout_addr)
+{
+	if (nfds < 0 || nfds > FD_SETSIZE)
+		return -EINVAL;
+
+	struct select_ctx c;
+	c.nfds = nfds;
+	c.rfds = (fd_set *)readfds_addr;
+	c.wfds = (fd_set *)writefds_addr;
+	c.efds = (fd_set *)exceptfds_addr;
+
+	for (long fd = 0; fd < nfds; fd++) {
+		int wanted = (c.rfds && FD_ISSET(fd, c.rfds)) || (c.wfds && FD_ISSET(fd, c.wfds)) ||
+			(c.efds && FD_ISSET(fd, c.efds));
+		if (wanted && !fd_is_valid(fd))
+			return -EBADF;
 	}
 
-	return ready;
+	long long timeout_ns = -1;
+	if (timeout_addr) {
+		const struct timeval *tv = (const struct timeval *)timeout_addr;
+		if (tv->tv_sec < 0 || tv->tv_usec < 0)
+			return -EINVAL;
+		timeout_ns = tv->tv_sec * 1000000000LL + tv->tv_usec * 1000LL;
+	}
+
+	long n = poll_wait(select_scan, &c, timeout_ns);
+	if (n < 0)
+		return n;
+
+	// No out-of-band data on this port, so the exception set never
+	// has anything in it.
+	if (c.rfds)
+		*c.rfds = c.rout;
+	if (c.wfds)
+		*c.wfds = c.wout;
+	if (c.efds)
+		FD_ZERO(c.efds);
+	return n;
 }
 
 // -----------------------------------------------------------------------
@@ -1199,7 +1335,12 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	// sys_read's blocking fd-0 path. Fail this specific case instead,
 	// same "let it fail cleanly rather than lie" choice HAVE_DUP
 	// already makes for real dup().
+	//
+	// Sockets are the other exception: O_NONBLOCK is real there, so
+	// F_GETFL/F_SETFL go to net_shim_fcntl().
 	case SYS_fcntl:
+		if (net_shim_is_fd(a1))
+			return net_shim_fcntl(a1, a2, a3);
 		if (a2 == F_DUPFD || a2 == F_DUPFD_CLOEXEC)
 			return -EINVAL;
 		return 0;
