@@ -361,6 +361,11 @@ full reasoning) built directly over `posix_shim.c`/`ext4_shim.c`:
   one thread at a time, even though the port now has real threads (see
   "Process model" above); `sqltest.c` only ever has one thread open a
   database at all.
+- **`sqlite.app` (the shell, `port/sqlite_port/sqlite.c`) only runs a
+  script.** It always `.read`s `/sqlite/main.sql` and exits: there's no
+  interactive prompt. Shell commands that need a process (`.system`,
+  `.shell`, `.once -e`, piping `.output` through a command) fail,
+  since there's no `fork`/`popen` (Process model above).
 
 ## Python (`port/python_port/`)
 

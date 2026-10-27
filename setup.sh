@@ -601,4 +601,10 @@ echo "- Building lua.app"
 echo "- Building lighttpd.app"
 "$SCRIPT_DIR/build-app.sh" "$LIGHTTPD_PORT/lighttpd.c"
 
+# And sqlite.app: SQLite's own shell (the amalgamation's shell.c, which
+# port/sqlite_port/sqlite.c #includes), running /sqlite/main.sql off the
+# disk image. The library itself is build/sqlite_sqlite3.o, built above.
+echo "- Building sqlite.app"
+"$SCRIPT_DIR/build-app.sh" "$SQLITE_PORT/sqlite.c"
+
 # echo -e "${BOLD}Library builds complete${NORMAL}"
