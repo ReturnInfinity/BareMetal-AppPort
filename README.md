@@ -14,7 +14,7 @@ Run once, from this directory:
 ./setup.sh
 ```
 
-This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0, Mbed TLS 3.6.6, curl 8.21.0, the SQLite 3.46.1 amalgamation, a pinned lwext4 commit, CPython 3.14.7, Lua 5.5.1, and lighttpd 1.4.85 (all used as-is, unmodified), creating `build/musl-1.2.6/`, `build/lwip-2.2.0/`, `build/mbedtls-3.6.6/`, `build/curl-8.21.0/`, `build/sqlite-3.46.1/`, `build/lwext4-58bcf89/`, `build/Python-3.14.7/`, `build/lua-5.5.1/`, and `build/lighttpd-1.4.85/`. All are pinned versions -- the patch and the `port/lwip_port/`/`port/mbedtls_port/`/`port/curl_port/`/`port/sqlite_port/`/`port/lwext4_port/`/`port/python_port/`/`port/lua_port/`/`port/lighttpd_port/` glue are written against these exact releases. CPython also needs a one-time native host build (see `PYTHON.md`) to generate a handful of architecture-independent sources (the parser tables, frozen bytecode, ...) -- the only step here that isn't just a fetch-and-compile, and the reason a first `./setup.sh` run takes noticeably longer than a re-run. `setup.sh` finishes by building `python.app`, `lua.app`, and `lighttpd.app` itself, so they're ready to go immediately -- no separate `build-app.sh` invocation needed unless you change `port/python_port/`'s own sources (see Building an app below). (`setup.sh` just runs `scripts/get-musl.sh`, `scripts/get-lwip.sh`, `scripts/get-mbedtls.sh`, `scripts/get-curl.sh`, `scripts/get-sqlite.sh`, `scripts/get-lwext4.sh`, `scripts/get-python.sh`, `scripts/get-lua.sh`, and `scripts/get-lighttpd.sh` in turn, if you want to re-run one on its own.)
+This downloads musl 1.2.6 and applies the BareMetal port patch, then downloads lwIP 2.2.0, Mbed TLS 3.6.6, curl 8.21.0, the SQLite 3.46.1 amalgamation, a pinned lwext4 commit, CPython 3.14.7, Lua 5.5.1, and lighttpd 1.4.85 (all used as-is, unmodified), creating `build/musl-1.2.6/`, `build/lwip-2.2.0/`, `build/mbedtls-3.6.6/`, `build/curl-8.21.0/`, `build/sqlite-3.46.1/`, `build/lwext4-58bcf89/`, `build/Python-3.14.7/`, `build/lua-5.5.1/`, and `build/lighttpd-1.4.85/`. All are pinned versions -- the patch and the `port/lwip_port/`/`port/mbedtls_port/`/`port/curl_port/`/`port/sqlite_port/`/`port/lwext4_port/`/`port/python_port/`/`port/lua_port/`/`port/lighttpd_port/` glue are written against these exact releases. CPython also needs a one-time native host build (see `PYTHON.md`) to generate a handful of architecture-independent sources (the parser tables, frozen bytecode, ...) -- the only step here that isn't just a fetch-and-compile, and the reason a first `./setup.sh` run takes noticeably longer than a re-run. `setup.sh` finishes by building `python.app`, `lua.app`, `lighttpd.app`, and `sqlite.app` itself, so they're ready to go immediately -- no separate `build-app.sh` invocation needed unless you change `port/python_port/`'s own sources (see Building an app below). (`setup.sh` just runs `scripts/get-musl.sh`, `scripts/get-lwip.sh`, `scripts/get-mbedtls.sh`, `scripts/get-curl.sh`, `scripts/get-sqlite.sh`, `scripts/get-lwext4.sh`, `scripts/get-python.sh`, `scripts/get-lua.sh`, and `scripts/get-lighttpd.sh` in turn, if you want to re-run one on its own.)
 
 ## Building an app
 
@@ -78,6 +78,12 @@ See `PYTHON.md` for what each of those does and how to point
   interpreter with the full standard library. Runs `/lua/main.lua` off
   the EXT2 disk image as its program (`port/lua_port/install-main.sh`
   deploys one there) -- see `LUA.md`.
+- `port/sqlite_port/sqlite.c` -- builds into `sqlite.app`, SQLite's
+  own command-line shell (the amalgamation's `shell.c`). Runs
+  `/sqlite/main.sql` off the EXT2 disk image against
+  `/sqlite/main.db`, printing each statement and its results
+  (`port/sqlite_port/install-main.sh` deploys the script, and
+  optionally a database file). The database persists between runs.
 - `port/lighttpd_port/lighttpd.c` -- builds into `lighttpd.app`, the
   lighttpd 1.4.85 web server. Serves `/lighttpd/www` from the EXT2 disk
   image using `/lighttpd/lighttpd.conf` (`port/lighttpd_port/install.sh`
