@@ -984,6 +984,47 @@ long thread_shim_sleep_until(u64 target_ns)
 }
 
 // -----------------------------------------------------------------------
+// poll()/select() I/O wait
+//
+// Single-threaded (no scheduler running), this is one kernel
+// b_system(SLEEP_IO, ...): the CPU halts until the deadline or until a
+// network/keyboard/serial interrupt, whichever comes first, so an idle
+// event-loop server (lighttpd) wakes only for its own timeouts and lwIP's
+// timers rather than polling. The kernel's wake flag is only cleared by
+// SLEEP_IO itself, so a packet that arrived after the caller last looked
+// still ends this sleep at once rather than being missed.
+//
+// With the scheduler running, the thread instead parks for at most
+// threaded_slice_ns (the caller's old fixed polling interval: 1ms for
+// poll(), 10ms for net_shim.c's blocking calls and nanosleep()), as
+// before: SLEEP_IO would hold the CPU from every other thread (see
+// thread_shim_sleep_until()), and the scheduler's own periodic tick
+// already wakes the CPU every 1ms regardless, so there's nothing to save
+// there.
+// -----------------------------------------------------------------------
+
+#define IO_WAIT_MAX_NS 60000000000ULL // 60s -- keeps now + ns well clear of overflow
+
+long thread_shim_io_wait_until(u64 target_ns, u64 threaded_slice_ns)
+{
+	u64 now = b_system(TIMECOUNTER, 0, 0);
+	if (now >= target_ns)
+		return 0;
+
+	if (!g_active) {
+		u64 ns = target_ns - now;
+		if (ns > IO_WAIT_MAX_NS)
+			ns = IO_WAIT_MAX_NS;
+		b_system(SLEEP_IO, ns, 0);
+		return 0;
+	}
+
+	if (target_ns - now > threaded_slice_ns)
+		target_ns = now + threaded_slice_ns;
+	return thread_shim_sleep_until(target_ns);
+}
+
+// -----------------------------------------------------------------------
 // SYS_rt_sigaction / SYS_rt_sigprocmask / SYS_tkill / SYS_tgkill / SYS_kill
 //
 // posix_shim.c's dispatcher forwards these straight here -- see this

@@ -31,6 +31,11 @@ long net_shim_ioctl(long fd, long req, long arg);
 // net_poll() pass if any socket is open; net_shim_poll() then reports
 // fd's current readiness as poll() revents for the requested events.
 void net_shim_pump(void);
+
+// Nanoseconds until the next lwIP timer net_shim_pump() needs to service,
+// or ~0ULL if none (including when no socket is open, since
+// net_shim_pump() doesn't run lwIP at all then).
+u64 net_shim_next_timer_ns(void);
 int net_shim_poll(long fd, int events);
 
 #endif
