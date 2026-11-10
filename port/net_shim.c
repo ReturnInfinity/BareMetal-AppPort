@@ -72,15 +72,15 @@
 #define NET_BLOCK_TIMEOUT_MS  30000
 
 // Each blocking loop below calls net_poll() to drain the NIC/service
-// lwIP's timers, then -- if still not ready -- waits one interval via
-// thread_shim_sleep_until() rather than immediately looping back to
-// net_poll() again. Without this a blocking accept()/connect()/recv()/
-// send() with nothing to do (e.g. an idle listening server) spins at
-// 100% CPU for up to NET_BLOCK_TIMEOUT_MS on every call. Matches the
-// same scheduler-aware wait posix_shim.c's nanosleep() already uses --
-// a raw b_system(SLEEP, ...) HLT here would, same as it did there,
-// starve every other thread for the whole interval instead of just
-// this one socket's caller (see thread_shim_sleep_until()'s comment).
+// lwIP's timers, then -- if still not ready -- waits via net_wait()
+// rather than immediately looping back to net_poll() again. Without this
+// a blocking accept()/connect()/recv()/send() with nothing to do (e.g. an
+// idle listening server) spins at 100% CPU for up to NET_BLOCK_TIMEOUT_MS
+// on every call. net_wait() halts until the socket's own timeout, lwIP's
+// next timer, or a network interrupt, whichever comes first -- see
+// thread_shim_io_wait_until(). With the scheduler running it instead
+// parks this thread for at most NET_POLL_INTERVAL_NS, so other threads
+// keep running (a raw b_system(SLEEP, ...) HLT would starve them).
 #define NET_POLL_INTERVAL_NS  10000000ULL // 10ms
 
 enum { SK_FREE = 0, SK_CLOSED, SK_CONNECTING, SK_CONNECTED, SK_LISTENING, SK_ERROR };
@@ -162,6 +162,24 @@ static void reset_sock(struct bsock *s)
 static int block_timed_out(u32_t start, long timeout_ms)
 {
 	return timeout_ms != 0 && (u32_t)(sys_now() - start) >= (u32_t)timeout_ms;
+}
+
+// One wait in a blocking loop that started at `start` with SO_RCVTIMEO/
+// SO_SNDTIMEO timeout_ms (0 = none). Returns 0 or -EINTR; the caller
+// rechecks everything (including block_timed_out()) either way.
+static long net_wait(u32_t start, long timeout_ms)
+{
+	u64 now = b_system(TIMECOUNTER, 0, 0);
+	u64 wake = ~0ULL;
+	if (timeout_ms != 0) {
+		u32_t elapsed = (u32_t)(sys_now() - start);
+		u64 left_ms = elapsed >= (u32_t)timeout_ms ? 0 : (u32_t)timeout_ms - elapsed;
+		wake = now + left_ms * 1000000ULL;
+	}
+	u64 timer_ns = net_next_timer_ns();
+	if (timer_ns != ~0ULL && now + timer_ns < wake)
+		wake = now + timer_ns;
+	return thread_shim_io_wait_until(wake, NET_POLL_INTERVAL_NS);
 }
 
 // O_NONBLOCK set on the socket, or MSG_DONTWAIT passed for this call.
@@ -438,7 +456,7 @@ long net_shim_accept(long fd, void *addr, socklen_t *addrlenp, long flags)
 			return -EAGAIN;
 		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -EAGAIN;
-		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
+		if (net_wait(start, s->rcv_timeout_ms) == -EINTR)
 			return -EINTR;
 	}
 
@@ -516,7 +534,7 @@ long net_shim_connect(long fd, const void *addr, long addrlen)
 			return -EINPROGRESS; // outcome via POLLOUT/POLLERR + SO_ERROR
 		if (block_timed_out(start, s->snd_timeout_ms))
 			return -ETIMEDOUT;
-		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
+		if (net_wait(start, s->snd_timeout_ms) == -EINTR)
 			return -EINTR;
 	}
 
@@ -598,7 +616,7 @@ static long udp_wait_rx(struct bsock *s, int nonblock)
 			return -EAGAIN;
 		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -ETIMEDOUT;
-		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
+		if (net_wait(start, s->rcv_timeout_ms) == -EINTR)
 			return -EINTR;
 	}
 	return 0;
@@ -627,7 +645,7 @@ static long tcp_wait_rx(struct bsock *s, int nonblock)
 			return -EAGAIN;
 		if (block_timed_out(start, s->rcv_timeout_ms))
 			return -ETIMEDOUT;
-		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
+		if (net_wait(start, s->rcv_timeout_ms) == -EINTR)
 			return -EINTR;
 	}
 }
@@ -778,7 +796,7 @@ long net_shim_send(long fd, const void *buf, size_t len, long flags)
 			continue;
 		if (block_timed_out(start, s->snd_timeout_ms))
 			return -ETIMEDOUT;
-		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + NET_POLL_INTERVAL_NS) == -EINTR)
+		if (net_wait(start, s->snd_timeout_ms) == -EINTR)
 			return -EINTR;
 	}
 }

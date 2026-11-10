@@ -779,13 +779,16 @@ static long sys_clock_gettime(long clk_id, long ts_addr)
 	}
 }
 
-// nanosleep()/clock_nanosleep() -- thread_shim_sleep_until() (see that
-// function's comment for why this can't just chain raw b_system(SLEEP,
-// ...) HLTs: that would stop every other thread from running for the
-// entire sleep) in NET_POLL_INTERVAL_NS-sized chunks -- net_poll() is
-// still called between chunks so lwIP's timers/retransmits keep getting
-// serviced during a long sleep instead of stalling for its whole
-// duration.
+// nanosleep()/clock_nanosleep() -- thread_shim_io_wait_until() in chunks
+// that end at lwIP's next timer, with net_poll() between them, so lwIP's
+// timers/retransmits keep getting serviced during a long sleep instead of
+// stalling for its whole duration. A network interrupt also ends a chunk,
+// so packets arriving mid-sleep are taken off the NIC promptly; with
+// nothing on the network the CPU just stays halted. (With the scheduler
+// running, chunks are capped at NET_POLL_INTERVAL_NS instead, as before --
+// see thread_shim_io_wait_until(). It's not a raw b_system(SLEEP, ...)
+// HLT either way, which would stop every other thread from running for
+// the entire sleep.)
 //
 // A caught signal now legitimately interrupts a sleep early (see
 // thread_shim_sleep_until()'s own comment on why that's correct
@@ -799,9 +802,11 @@ static long sleep_until_ns(u64 target_ns, long rem_addr)
 	u64 now_ns;
 
 	while ((now_ns = b_system(TIMECOUNTER, 0, 0)) < target_ns) {
-		u64 remaining_ns = target_ns - now_ns;
-		u64 chunk_ns = remaining_ns < NET_POLL_INTERVAL_NS ? remaining_ns : NET_POLL_INTERVAL_NS;
-		long rc = thread_shim_sleep_until(now_ns + chunk_ns);
+		u64 wake_ns = target_ns;
+		u64 timer_ns = net_next_timer_ns();
+		if (timer_ns != ~0ULL && now_ns + timer_ns < wake_ns)
+			wake_ns = now_ns + timer_ns;
+		long rc = thread_shim_io_wait_until(wake_ns, NET_POLL_INTERVAL_NS);
 		net_poll();
 		if (rc == -EINTR) {
 			now_ns = b_system(TIMECOUNTER, 0, 0);
@@ -1048,6 +1053,8 @@ static long sys_getsockopt(long fd, long level, long optname, long optval, long 
 // back (Linux's select() does that; POSIX leaves it unspecified).
 // -----------------------------------------------------------------------
 
+#define POLL_THREADED_SLICE_NS 1000000ULL // 1ms -- see thread_shim_io_wait_until()
+
 #define POLL_READ_EVENTS  (POLLIN | POLLRDNORM)
 #define POLL_WRITE_EVENTS (POLLOUT | POLLWRNORM)
 
@@ -1097,7 +1104,7 @@ static long poll_wait(poll_scan_fn scan, void *ctx, long long timeout_ns)
 		u64 timer_ns = net_shim_next_timer_ns();
 		if (timer_ns != ~0ULL && now + timer_ns < wake)
 			wake = now + timer_ns;
-		if (thread_shim_io_wait_until(wake) == -EINTR)
+		if (thread_shim_io_wait_until(wake, POLL_THREADED_SLICE_NS) == -EINTR)
 			return -EINTR;
 	}
 }

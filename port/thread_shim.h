@@ -39,7 +39,9 @@ long thread_shim_sleep_until(u64 target_ns);
 // serial interrupt arrives, or a deliverable signal is pending (-EINTR).
 // May return early for no reason at all, so callers recheck whatever
 // they're waiting on and call it again -- see poll_wait() in posix_shim.c.
-long thread_shim_io_wait_until(u64 target_ns);
+// With the scheduler running, interrupts can't end the wait, so it is
+// instead capped at threaded_slice_ns -- the caller's own polling interval.
+long thread_shim_io_wait_until(u64 target_ns, u64 threaded_slice_ns);
 
 // True once the calling context is a worker thread (created via
 // thread_shim_clone()) rather than the app's original entry context.

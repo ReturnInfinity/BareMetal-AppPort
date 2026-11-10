@@ -995,15 +995,17 @@ long thread_shim_sleep_until(u64 target_ns)
 // still ends this sleep at once rather than being missed.
 //
 // With the scheduler running, the thread instead parks for at most
-// THREAD_SHIM_IDLE_POLL_NS, as before: SLEEP_IO would hold the CPU from
-// every other thread (see thread_shim_sleep_until()), and the scheduler's
-// own periodic tick already wakes the CPU every 1ms regardless, so
-// there's nothing to save there.
+// threaded_slice_ns (the caller's old fixed polling interval: 1ms for
+// poll(), 10ms for net_shim.c's blocking calls and nanosleep()), as
+// before: SLEEP_IO would hold the CPU from every other thread (see
+// thread_shim_sleep_until()), and the scheduler's own periodic tick
+// already wakes the CPU every 1ms regardless, so there's nothing to save
+// there.
 // -----------------------------------------------------------------------
 
 #define IO_WAIT_MAX_NS 60000000000ULL // 60s -- keeps now + ns well clear of overflow
 
-long thread_shim_io_wait_until(u64 target_ns)
+long thread_shim_io_wait_until(u64 target_ns, u64 threaded_slice_ns)
 {
 	u64 now = b_system(TIMECOUNTER, 0, 0);
 	if (now >= target_ns)
@@ -1017,8 +1019,8 @@ long thread_shim_io_wait_until(u64 target_ns)
 		return 0;
 	}
 
-	if (target_ns - now > THREAD_SHIM_IDLE_POLL_NS)
-		target_ns = now + THREAD_SHIM_IDLE_POLL_NS;
+	if (target_ns - now > threaded_slice_ns)
+		target_ns = now + threaded_slice_ns;
 	return thread_shim_sleep_until(target_ns);
 }
 
