@@ -1037,18 +1037,16 @@ static long sys_getsockopt(long fd, long level, long optname, long optval, long 
 //     out of b_input() into stdin_peek -- see sys_read());
 //   - fd 1/2: always writable.
 //
-// If nothing is ready and the timeout hasn't run out, the caller sleeps
-// POLL_WAIT_INTERVAL_NS via thread_shim_sleep_until() -- yielding to
-// other threads, same as net_shim.c's blocking loops -- and tries
-// again. The interval is shorter than net_shim.c's 10ms because an
-// event-loop server goes through poll() at least once per request, so
-// the wake-up latency here is added to every one of them; 1ms is the
-// kernel's tick, the shortest sleep that means anything. A caught
-// signal ends the wait with -EINTR. The timeout isn't written back
-// (Linux's select() does that; POSIX leaves it unspecified).
+// If nothing is ready and the timeout hasn't run out, the caller waits
+// via thread_shim_io_wait_until() until the earlier of the timeout and
+// lwIP's next timer -- or until a network/keyboard/serial interrupt ends
+// the wait early -- and then tries again. Nothing here polls on a fixed
+// interval, so an idle server with nothing arriving barely wakes at all
+// (the old 1ms polling loop cost ~2% host CPU on an idle lighttpd), while
+// an incoming packet is still picked up as soon as its interrupt lands.
+// A caught signal ends the wait with -EINTR. The timeout isn't written
+// back (Linux's select() does that; POSIX leaves it unspecified).
 // -----------------------------------------------------------------------
-
-#define POLL_WAIT_INTERVAL_NS 1000000ULL // 1ms
 
 #define POLL_READ_EVENTS  (POLLIN | POLLRDNORM)
 #define POLL_WRITE_EVENTS (POLLOUT | POLLWRNORM)
@@ -1090,14 +1088,16 @@ static long poll_wait(poll_scan_fn scan, void *ctx, long long timeout_ns)
 			return n;
 
 		u64 now = b_system(TIMECOUNTER, 0, 0);
-		u64 wake = now + POLL_WAIT_INTERVAL_NS;
+		u64 wake = ~0ULL;
 		if (timeout_ns > 0) {
 			if (now >= deadline)
 				return 0;
-			if (wake > deadline)
-				wake = deadline;
+			wake = deadline;
 		}
-		if (thread_shim_sleep_until(wake) == -EINTR)
+		u64 timer_ns = net_shim_next_timer_ns();
+		if (timer_ns != ~0ULL && now + timer_ns < wake)
+			wake = now + timer_ns;
+		if (thread_shim_io_wait_until(wake) == -EINTR)
 			return -EINTR;
 	}
 }

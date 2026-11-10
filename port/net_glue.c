@@ -333,6 +333,19 @@ void net_poll(void)
 	sys_check_timeouts();
 }
 
+unsigned long long net_next_timer_ns(void)
+{
+	u32_t ms = sys_timeouts_sleeptime();
+	if (ms == SYS_TIMEOUTS_SLEEPTIME_INFINITE)
+		return ~0ULL;
+	// sys_now() is in whole ms, so a timer can read as due (0) a little
+	// before sys_check_timeouts() agrees -- round up to 1ms rather than
+	// spinning until it does.
+	if (ms == 0)
+		ms = 1;
+	return (unsigned long long)ms * 1000000ULL;
+}
+
 int net_is_ready(void)
 {
 	// Covers both paths: DHCP sets the netif's IPv4 address once bound,

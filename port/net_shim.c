@@ -1046,6 +1046,15 @@ void net_shim_pump(void)
 	}
 }
 
+u64 net_shim_next_timer_ns(void)
+{
+	for (int i = 0; i < SOCK_MAX; i++) {
+		if (socks[i].state != SK_FREE)
+			return net_next_timer_ns();
+	}
+	return ~0ULL;
+}
+
 // Current readiness of a socket, as poll() revents for the requested
 // events. Mirrors exactly what the calls above would do right now:
 // POLLIN means recv()/accept() won't wait (data or EOF queued, a

@@ -35,6 +35,12 @@ long thread_shim_sched_yield(void);
 // SA_RESTART, so this doesn't check it).
 long thread_shim_sleep_until(u64 target_ns);
 
+// Waits for I/O: returns once target_ns is reached, a network/keyboard/
+// serial interrupt arrives, or a deliverable signal is pending (-EINTR).
+// May return early for no reason at all, so callers recheck whatever
+// they're waiting on and call it again -- see poll_wait() in posix_shim.c.
+long thread_shim_io_wait_until(u64 target_ns);
+
 // True once the calling context is a worker thread (created via
 // thread_shim_clone()) rather than the app's original entry context.
 // posix_shim.c's SYS_exit case uses this to decide whether a bare

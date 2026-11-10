@@ -13,6 +13,11 @@ void net_init(void);
 // -- see net_shim.c.
 void net_poll(void);
 
+// Nanoseconds until lwIP's next timer (TCP retransmit/delayed ACK, ARP,
+// DHCP, DNS, ...) is due, so a waiter can sleep exactly that long instead
+// of polling. ~0ULL if no timer is pending.
+unsigned long long net_next_timer_ns(void);
+
 // True once the netif has an address (statically configured, or DHCP
 // has bound one).
 int net_is_ready(void);
