@@ -66,7 +66,8 @@ fi
 # amd64) here, so it is still inside the range. Patched with an
 # -overlay instead of a forked GOROOT, so any host Go version works as
 # long as the line below still matches.
-GOROOT_RT="$(go env GOROOT)/src/runtime"
+GOROOT_SRC="$(go env GOROOT)/src"
+GOROOT_RT="$GOROOT_SRC/runtime"
 sed -E 's/^(\theapAddrBits = ).*$/\140/' "$GOROOT_RT/malloc.go" > "$GO_BUILD/malloc.go"
 if ! grep -q $'^\theapAddrBits = 40$' "$GO_BUILD/malloc.go"; then
 	echo "error: couldn't patch heapAddrBits in $GOROOT_RT/malloc.go -- this Go version may need build-go-app.sh updating." >&2
@@ -78,6 +79,7 @@ cat > "$GO_BUILD/overlay.json" <<EOF
 	"Replace": {
 		"$GOROOT_RT/malloc.go": "$GO_BUILD/malloc.go",
 		"$GOROOT_RT/bm_runtime.go": "$SCRIPT_DIR/$GO_PORT/bm_runtime.go",
+		"$GOROOT_SRC/crypto/x509/bm_x509.go": "$SCRIPT_DIR/$GO_PORT/bm_x509.go",
 		"$PKG_DIR/bm_main.go": "$SCRIPT_DIR/$GO_PORT/bm_main.go"
 	}
 }
@@ -87,10 +89,16 @@ EOF
 # port's musl headers, not the host's glibc ones.
 GO_CC="gcc -nostdinc -isystem $MUSL_INC -isystem $(gcc -print-file-name=include) -fno-stack-protector"
 
+# netcgo: resolve host names with musl's getaddrinfo() (dns_shim.c, using
+# the DNS server from DHCP or Firecracker's ip= parameter, like every other
+# language here) instead of Go's own resolver, which reads /etc/resolv.conf
+# and, without one, asks localhost.
+GO_TAGS="netcgo"
+
 ARCHIVE="$GO_BUILD/$APP_BASE.a"
 echo "Building Go package ($(go version | awk '{print $3}'))..."
 (cd "$PKG_DIR" && CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC="$GO_CC" \
-	go build -trimpath -buildmode=c-archive -overlay "$GO_BUILD/overlay.json" \
+	go build -trimpath -buildmode=c-archive -tags "$GO_TAGS" -overlay "$GO_BUILD/overlay.json" \
 	-o "$ARCHIVE" "${GO_TARGETS[@]}")
 rm -f "${ARCHIVE%.a}.h"
 

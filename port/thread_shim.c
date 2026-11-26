@@ -84,7 +84,8 @@
 #include "thread_shim.h"
 
 #define THREAD_SHIM_MAX_THREADS	32
-#define THREAD_SHIM_IDLE_POLL_NS	1000000ULL	// 1ms -- matches the kernel's own tick rate
+#define THREAD_SHIM_TICK_NS		1000000ULL	// 1ms scheduler tick, see tick_set()
+#define THREAD_SHIM_IDLE_MAX_NS		60000000000ULL	// 60s -- one idle_wait() at most
 
 enum thread_state {
 	T_FREE = 0,	// slot unused (also zero_bss()'s initial state)
@@ -111,6 +112,8 @@ struct bmos_thread {
 	int *ctid;			// CLONE_CHILD_CLEARTID target, or NULL
 	volatile int *wait_addr;	// futex address, valid while T_BLOCKED
 	u64 wait_deadline_ns;		// TIMECOUNTER deadline, 0 = no timeout
+	int io_wait;			// parked in thread_shim_io_wait_until()
+	u64 io_recheck_ns;		// ...and due a recheck by then if others are busy
 	enum wake_reason wake_reason;
 	struct bmos_thread *next;	// ready-queue link
 
@@ -345,8 +348,89 @@ static void scan_timeouts(void)
 			if (now >= t->wait_deadline_ns)
 				wake_thread_locked(t, WOKEN_TIMEOUT);
 		}
+		if (t->state == T_BLOCKED && t->io_wait) {
+			if (!have_now) {
+				now = b_system(TIMECOUNTER, 0, 0);
+				have_now = 1;
+			}
+			if (now >= t->io_recheck_ns)
+				wake_thread_locked(t, WOKEN_TIMEOUT);
+		}
 	}
 	irq_enable();
+}
+
+// -----------------------------------------------------------------------
+// Scheduler tick and idling
+//
+// The kernel is tickless: its LAPIC timer only fires when something asks
+// for it. Preemption and signal delivery both run from the CALLBACK_TIMER
+// tick (see this file's header), so once threads exist a 1ms periodic
+// tick is switched on with b_system(TIMER_SET, ...) -- but only while
+// some thread is running. When every thread is parked, idle_wait() turns
+// it off and halts in one b_system(SLEEP_IO, ...) until the earliest
+// thread deadline or an I/O (network/keyboard/serial) interrupt, so an
+// idle multi-threaded program (the Go runtime always is one, see GO.md)
+// costs next to nothing instead of waking 1000 times a second.
+//
+// Threads waiting for I/O (thread_shim_io_wait_until()) park with their
+// real deadline. An I/O interrupt during idle_wait() wakes all of them to
+// recheck. While other threads keep the CPU busy no SLEEP_IO runs, so
+// scan_timeouts() also wakes them every io_recheck_ns (the caller's old
+// polling interval). The kernel only clears its I/O wake flag inside
+// SLEEP_IO, so an interrupt that lands while threads are running still
+// ends the next idle_wait() at once rather than being lost.
+// -----------------------------------------------------------------------
+
+static int g_tick_on;
+
+static void tick_set(int on)
+{
+	if (g_tick_on == on)
+		return;
+	g_tick_on = on;
+	b_system(TIMER_SET, on ? THREAD_SHIM_TICK_NS : 0, 0);
+}
+
+static void wake_io_waiters(void)
+{
+	irq_disable();
+	for (int i = 0; i < THREAD_SHIM_ALL_THREADS; i++) {
+		struct bmos_thread *t = thread_at(i);
+		if (t->state == T_BLOCKED && t->io_wait)
+			wake_thread_locked(t, WOKEN_TIMEOUT);
+	}
+	irq_enable();
+}
+
+// Nothing is runnable: sleep until something could be.
+static void idle_wait(void)
+{
+	scan_timeouts();
+	if (g_ready_head)
+		return;
+
+	u64 deadline = ~0ULL;
+	irq_disable();
+	for (int i = 0; i < THREAD_SHIM_ALL_THREADS; i++) {
+		struct bmos_thread *t = thread_at(i);
+		if (t->state == T_BLOCKED && t->wait_deadline_ns && t->wait_deadline_ns < deadline)
+			deadline = t->wait_deadline_ns;
+	}
+	irq_enable();
+
+	u64 now = b_system(TIMECOUNTER, 0, 0);
+	if (deadline <= now)
+		return;
+	u64 ns = deadline - now;
+	if (ns > THREAD_SHIM_IDLE_MAX_NS)
+		ns = THREAD_SHIM_IDLE_MAX_NS;
+
+	tick_set(0);
+	u64 io = b_system(SLEEP_IO, ns, 0);
+	tick_set(1);
+	if (io)
+		wake_io_waiters();
 }
 
 // Switches away from bmos_current. If `requeue` is set, the current
@@ -407,8 +491,7 @@ static void reschedule(int requeue)
 		// tick) promotes someone -- possibly self -- back to ready.
 		irq_enable();
 		if (!requeue) {
-			scan_timeouts();
-			b_system(SLEEP, THREAD_SHIM_IDLE_POLL_NS, 0);
+			idle_wait();
 			continue;
 		}
 		return;
@@ -503,6 +586,8 @@ static int default_is_ignore(int sig)
 // the currently running thread (only a running thread can safely have a
 // handler called on its behalf -- see this section's header). Called
 // from thread_shim_timer_tick_c() below.
+static void deliver_signal(struct bmos_thread *t, int sig);
+
 static void deliver_pending_signals(struct bmos_thread *t)
 {
 	unsigned long deliverable = t->sig_pending & ~t->sig_blocked;
@@ -511,8 +596,11 @@ static void deliver_pending_signals(struct bmos_thread *t)
 
 	// Lowest-numbered pending signal first, same tie-break real Linux
 	// uses when more than one is deliverable at once.
-	int sig = __builtin_ctzl(deliverable) + 1;
+	deliver_signal(t, __builtin_ctzl(deliverable) + 1);
+}
 
+static void deliver_signal(struct bmos_thread *t, int sig)
+{
 	irq_disable();
 	t->sig_pending &= ~(1UL << (sig - 1));
 	irq_enable();
@@ -568,6 +656,21 @@ static void deliver_pending_signals(struct bmos_thread *t)
 	}
 
 	t->sig_blocked = saved_blocked;
+}
+
+// Every signal deliverable right now, once each, lowest first. A handler
+// that raises its own signal again leaves it for the next tick instead of
+// looping here -- musl's SIGCANCEL handler does exactly that when it can't
+// see a real signal frame (see this section's header).
+static void deliver_all_pending_signals(struct bmos_thread *t)
+{
+	unsigned long todo = t->sig_pending & ~t->sig_blocked;
+	while (todo) {
+		int sig = __builtin_ctzl(todo) + 1;
+		todo &= ~(1UL << (sig - 1));
+		if (t->sig_pending & ~t->sig_blocked & (1UL << (sig - 1)))
+			deliver_signal(t, sig);
+	}
 }
 
 // The timer tick registered with b_system(CALLBACK_TIMER, ...) -- see
@@ -657,6 +760,7 @@ static void thread_shim_init(void)
 	g_active = 1;
 
 	b_system(CALLBACK_TIMER, (u64)(unsigned long)thread_shim_timer_tick, 0);
+	tick_set(1); // see "Scheduler tick and idling"
 }
 
 static struct bmos_thread *alloc_thread_slot(void)
@@ -816,8 +920,7 @@ void thread_shim_exit_current(void)
 	struct bmos_thread *next = dequeue_ready_locked();
 	while (!next) {
 		irq_enable();
-		scan_timeouts();
-		b_system(SLEEP, THREAD_SHIM_IDLE_POLL_NS, 0);
+		idle_wait();
 		irq_disable();
 		next = dequeue_ready_locked();
 	}
@@ -895,8 +998,10 @@ static long futex_wait(volatile int *addr, int val, const struct timespec *timeo
 
 	enum wake_reason why = self->wake_reason;
 	self->wait_deadline_ns = 0;
-	if (why == WOKEN_INTR)
+	if (why == WOKEN_INTR) {
+		deliver_all_pending_signals(self); // before returning, see thread_shim_sleep_until()
 		return -EINTR;
+	}
 	return why == WOKEN_TIMEOUT ? -ETIMEDOUT : 0;
 }
 
@@ -989,28 +1094,35 @@ long thread_shim_sleep_until(u64 target_ns)
 
 	struct bmos_thread *self = g_current;
 
-	// Real nanosleep()/usleep() are never restarted after a caught
-	// signal regardless of SA_RESTART (see man 7 signal) -- so, unlike
-	// futex_wait(), WOKEN_INTR below doesn't need an SA_RESTART check;
-	// any deliverable signal ends the wait.
-	if (self->sig_pending & ~self->sig_blocked)
-		return -EINTR;
+	for (;;) {
+		// A deliverable signal runs its handler here, on this thread,
+		// before the wait returns -- as on Linux, where handlers run on
+		// the way out of the interrupted syscall. Then this port's rule
+		// (see deliver_pending_signals()): a handler without SA_RESTART
+		// ends the wait with EINTR, one with SA_RESTART lets it go on.
+		if (self->sig_pending & ~self->sig_blocked) {
+			deliver_all_pending_signals(self);
+			if (thread_shim_take_eintr())
+				return -EINTR;
+		}
 
-	if (b_system(TIMECOUNTER, 0, 0) >= target_ns)
-		return 0;
+		if (b_system(TIMECOUNTER, 0, 0) >= target_ns)
+			return 0;
 
-	irq_disable();
-	self->state = T_BLOCKED;
-	self->wait_addr = 0;
-	self->wait_deadline_ns = target_ns;
-	self->wake_reason = WOKEN_NONE;
-	irq_enable();
+		irq_disable();
+		self->state = T_BLOCKED;
+		self->wait_addr = 0;
+		self->wait_deadline_ns = target_ns;
+		self->wake_reason = WOKEN_NONE;
+		irq_enable();
 
-	reschedule(0);
+		reschedule(0);
 
-	enum wake_reason why = self->wake_reason;
-	self->wait_deadline_ns = 0;
-	return why == WOKEN_INTR ? -EINTR : 0;
+		enum wake_reason why = self->wake_reason;
+		self->wait_deadline_ns = 0;
+		if (why != WOKEN_INTR)
+			return 0;
+	}
 }
 
 // -----------------------------------------------------------------------
@@ -1024,13 +1136,11 @@ long thread_shim_sleep_until(u64 target_ns)
 // SLEEP_IO itself, so a packet that arrived after the caller last looked
 // still ends this sleep at once rather than being missed.
 //
-// With the scheduler running, the thread instead parks for at most
-// threaded_slice_ns (the caller's old fixed polling interval: 1ms for
-// poll(), 10ms for net_shim.c's blocking calls and nanosleep()), as
-// before: SLEEP_IO would hold the CPU from every other thread (see
-// thread_shim_sleep_until()), and the scheduler's own periodic tick
-// already wakes the CPU every 1ms regardless, so there's nothing to save
-// there.
+// With the scheduler running, a raw SLEEP_IO would hold the CPU from
+// every other thread, so the thread parks instead and the scheduler does
+// the SLEEP_IO once nothing at all is runnable -- see "Scheduler tick and
+// idling" above. threaded_slice_ns (1ms for poll(), 10ms for net_shim.c's
+// blocking calls) only matters while other threads keep the CPU busy.
 // -----------------------------------------------------------------------
 
 #define IO_WAIT_MAX_NS 60000000000ULL // 60s -- keeps now + ns well clear of overflow
@@ -1049,9 +1159,15 @@ long thread_shim_io_wait_until(u64 target_ns, u64 threaded_slice_ns)
 		return 0;
 	}
 
-	if (target_ns - now > threaded_slice_ns)
-		target_ns = now + threaded_slice_ns;
-	return thread_shim_sleep_until(target_ns);
+	// Parked with the real deadline; idle_wait() ends it early on an I/O
+	// interrupt, scan_timeouts() after threaded_slice_ns if other threads
+	// are keeping the CPU busy. See "Scheduler tick and idling".
+	struct bmos_thread *self = g_current;
+	self->io_recheck_ns = now + threaded_slice_ns;
+	self->io_wait = 1;
+	long r = thread_shim_sleep_until(target_ns);
+	self->io_wait = 0;
+	return r;
 }
 
 // -----------------------------------------------------------------------
@@ -1109,6 +1225,14 @@ long thread_shim_rt_sigprocmask(long how, long set, long oldset, long sigsetsize
 			return -EINVAL;
 		}
 		irq_enable();
+
+		// Like Linux, a signal this call unblocks is delivered before
+		// the call returns -- not left for the next timer tick, by
+		// which time the caller may already be parked in a blocking
+		// call that would just see it pending and fail with EINTR
+		// (raise() is exactly this: block all, tkill, restore mask).
+		if (g_active && self == g_current)
+			deliver_all_pending_signals(self);
 	}
 	return 0;
 }

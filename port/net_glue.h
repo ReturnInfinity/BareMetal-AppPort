@@ -13,6 +13,17 @@ void net_init(void);
 // -- see net_shim.c.
 void net_poll(void);
 
+// lwIP is single-threaded (NO_SYS), but thread_shim.c preempts. Every
+// path into lwIP holds this lock: net_poll() and net_next_timer_ns()
+// take it themselves, net_shim.c's socket calls and dns_shim.c's lookups
+// take it around their lwIP use. Recursive per thread. A thread about to
+// wait gives it up entirely with net_unlock_all() and takes it back with
+// net_relock(), so a blocked recv() never holds up another thread's I/O.
+void net_lock(void);
+void net_unlock(void);
+int net_unlock_all(void);
+void net_relock(int depth);
+
 // Nanoseconds until lwIP's next timer (TCP retransmit/delayed ACK, ARP,
 // DHCP, DNS, ...) is due, so a waiter can sleep exactly that long instead
 // of polling. ~0ULL if no timer is pending.

@@ -35,6 +35,10 @@ one.
   currently-running thread's pending, unblocked signals are checked and
   its handler called directly, as an ordinary C call, on every timer
   tick (~1ms) — no real hardware signal frame or `rt_sigreturn` needed.
+  Two places don't wait for a tick, matching Linux's "on the way out of
+  the syscall": `rt_sigprocmask()` runs any signal it unblocks before
+  returning (so `raise()` is synchronous), and a parked thread woken by a
+  signal runs the handler before its blocking call returns.
   A thread parked in `thread_shim_futex()`'s `FUTEX_WAIT` is woken early
   (`-EINTR`) the same way; `sleep_until_ns()` (`posix_shim.c`, backing
   `nanosleep`/`clock_nanosleep`) and every blocking call in
@@ -64,7 +68,16 @@ one.
   cases). `SYS_clone` builds a second call stack and context by hand
   rather than trapping into a real `clone(2)` (there's no kernel task
   table to fork into on this port), and `b_system(CALLBACK_TIMER, ...)`
-  drives a real round-robin timer tick between them — see
+  drives a real round-robin timer tick between them. The kernel is
+  tickless, so `thread_shim.c` switches the 1ms tick on
+  (`b_system(TIMER_SET, ...)`) only while some thread is running; when
+  every thread is parked it turns it off and halts in one `SLEEP_IO`
+  until the earliest thread deadline or an I/O interrupt, so an idle
+  multi-threaded program costs next to nothing. (Before this, nothing
+  switched the tick on at all after the kernel went tickless, so threads
+  weren't preempted and signals were never delivered.) lwIP isn't
+  thread-safe, so every call into it holds one lock (`net_lock()`,
+  `net_glue.h`), released while a socket call waits. See
   `thread_shim.c`'s file header for the full design and why that still
   gives genuine concurrency (a thread blocked inside another blocking
   `read()`/`recv()`/`nanosleep()` doesn't starve everyone else) despite
@@ -105,9 +118,9 @@ Not implemented (all fall through to `-ENOSYS`):
   runs one `net_poll()` and checks every fd (sockets via
   `net_shim_poll()`: data/EOF/a pending connection, send-buffer room,
   a finished or failed `connect()`; EXT2 files always ready; fd 0 only
-  once a console byte is actually waiting), sleeping 1ms between
-  passes until something is ready, the timeout runs out, or a signal
-  arrives (`-EINTR`). Enough for an event-loop server driven by
+  once a console byte is actually waiting), waiting between passes for
+  an I/O interrupt, until something is ready, the timeout runs out, or a
+  signal arrives (`-EINTR`). Enough for an event-loop server driven by
   `poll()`/`select()` (see `poll_test.c`).
 - `pipe`/`pipe2`/`dup`/`socketpair` — no in-process fd duplication,
   pipes, or `AF_UNIX` socket pairs between fds. The one exception:
@@ -605,14 +618,14 @@ account of why this works and everything it took.
 
 See `GO.md` for the full account.
 
-- **Networking (`net`, `net/http`) is untested.** The `epoll`/`eventfd`
-  support it runs on is in place.
-- **An idle Go app polls every 1 ms** rather than sleeping until an
-  interrupt, because it always has several threads (see
-  `thread_shim_io_wait_until()`).
+- **Networking is IPv4 only**, like the rest of the port. Host names
+  resolve through musl's `getaddrinfo()` (`-tags netcgo`); `LookupTXT`/
+  `LookupSRV`/`LookupMX` still use Go's own resolver, which has no
+  `/etc/resolv.conf` to read.
 - **Async preemption is off** (`port/go_port/bm_runtime.go`). Signal
   handlers here run without a real signal frame.
-- **The runtime is patched at build time** (`heapAddrBits`, via
+- **The standard library is patched at build time** (`heapAddrBits`,
+  plus small added files in `runtime` and `crypto/x509`, via
   `go build -overlay`); `build-go-app.sh` stops with an error if a new
   Go version changes the line it patches.
 

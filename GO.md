@@ -2,12 +2,13 @@
 
 Ordinary Go programs build into a BareMetal app, using the host's own Go
 toolchain (tested with Go 1.26.8). Goroutines, `sync`, channels, timers,
-`time.Sleep` and `os` file I/O on the EXT2 disk (from several goroutines at
-once) work. Networking (`net`, `net/http`) is next to be tested.
+`os` file I/O on the EXT2 disk, and `net/http` (server and client, DNS,
+HTTPS with certificate verification) work.
 
 ```
-./build-go-app.sh examples/go/hello/hello.go   # -> hello.app
-./build-go-app.sh path/to/package-dir           # a main package in a module
+./build-go-app.sh examples/go/hello/hello.go           # -> hello.app
+./build-go-app.sh examples/go/webserver/webserver.go   # net/http on :80
+./build-go-app.sh path/to/package-dir                   # a main package in a module
 ```
 
 From the top-level `BareMetal-App` repo, `./1-build.sh hello.go` does the
@@ -46,6 +47,10 @@ An `-overlay` changes two things in the Go runtime without forking GOROOT:
   so every mapping is real memory. 40 bits (what Go already uses on
   ios/arm64) shrinks that to a few MiB. The heap sits right above amd64's
   `arenaBaseOffset` (`0xffff800000000000`) here, so it stays in range.
+- **The port's CA bundle** (`port/go_port/bm_x509.go`, added to package
+  `crypto/x509`). `/etc/ssl/cacert.pem`, where `install-cacert.sh` puts it
+  on disk.img, is appended to the files Go's root loader tries. Programs
+  that don't use TLS don't link it.
 - **Async preemption off** (`port/go_port/bm_runtime.go`, added to package
   `runtime`). Same as `GODEBUG=asyncpreemptoff=1`, which a BareMetal app
   has no environment to set. Async preemption delivers `SIGURG` and resumes
@@ -87,6 +92,24 @@ An `-overlay` changes two things in the Go runtime without forking GOROOT:
   Plain level-triggered reporting would make the netpoller spin.
 - **Small stubs**: `gettid`, `getpid`, `sched_getaffinity` (one CPU),
   `prlimit64`/`getrlimit`/`setrlimit`, `mprotect`, `prctl`.
+- **DNS through the port's resolver.** `build-go-app.sh` builds with
+  `-tags netcgo`, so host lookups go through musl's `getaddrinfo()` and
+  `dns_shim.c` (DHCP's DNS server, or Firecracker's `ip=` one), like every
+  other language here. Go's own resolver reads `/etc/resolv.conf`, which
+  doesn't exist, and falls back to asking localhost.
+- **A working scheduler tick, and quiet idling** (`thread_shim.c`). Since
+  the kernel went tickless nothing had switched the 1 ms tick on, so
+  threads were never preempted and signals never delivered. The tick now
+  runs while any thread is running. When all are parked, the scheduler
+  turns it off and halts in one `SLEEP_IO` until the earliest deadline or
+  an I/O interrupt. An idle Go web server went from 2.3% of a host CPU
+  to about 0.15%.
+- **An lwIP lock** (`net_lock()`, `net_glue.h`). Once threads really were
+  preempted, two of Go's threads in lwIP at once tripped
+  `tcp_write: no pbufs on queue` under parallel 1 MiB downloads. Every
+  path into lwIP now holds one recursive lock, released while a socket
+  call waits. DNS lookups are serialised separately (`dns_shim.c` shares
+  one wait slot).
 
 Building `posix_shim.c` with `POSIX_SHIM_CFLAGS=-DBMOS_TRACE_ENOSYS` (an
 environment variable read by `build-app.sh`, so it works through
@@ -100,14 +123,22 @@ settings. The app image is about 1.8 MiB. The runtime then reserves a
 64 MiB-aligned heap arena, which takes 128 MiB of guest RAM through
 hot-plug, but untouched memory costs the host nothing.
 
+## Networking
+
+Tested under QEMU with port forwarding (`HOSTFWD=18081:80 ./2-run-qemu.sh`):
+
+- **Server:** 200 requests, 10 at a time, all succeeded (about 0.8 ms per
+  request). Keep-alive works, and 1 MiB responses came back intact, both
+  sequential and 8 in parallel.
+- **Client:** HTTP to the host and to the internet, DNS, and HTTPS
+  (`https://example.com`, `https://www.google.com`) with certificate
+  verification.
+
 ## Known gaps
 
-- **Networking is untested.** `epoll` is in place and sockets go through
-  `net_shim.c`, but `net`/`net/http` haven't been run yet.
-- **Idle CPU.** Once there is more than one thread, `poll_wait()` (which
-  `epoll_wait()` uses) wakes every 1 ms instead of sleeping until an
-  interrupt (see `thread_shim_io_wait_until()`). Go always runs several
-  threads, so an idle Go app polls.
+- **IPv4 only**, like the rest of the port. `LookupTXT`/`LookupSRV`/
+  `LookupMX` use Go's own resolver and fail (no `/etc/resolv.conf`); host
+  lookups are fine.
 - **No `os.Args`/environment from Go's point of view beyond what
   `crt0.c` passes** (`argv` from Firecracker's `args=` token, empty
   environment).
