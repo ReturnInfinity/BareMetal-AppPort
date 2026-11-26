@@ -123,7 +123,12 @@ fi
 mkdir -p "$BUILD_DIR"
 
 APP_SRCS=("$@")
-APP_NAME="$(basename "${APP_SRCS[0]}" .c).app"
+APP_NAME="${APP_NAME:-$(basename "${APP_SRCS[0]}" .c).app}"
+
+# Extra static archives to link into this app, e.g. the Go archive
+# build-go-app.sh produces (see GO.md). Listed ahead of musl so their
+# libc references resolve against it.
+APP_LIBS="${APP_LIBS:-}"
 
 # BareMetal apps are flat binaries loaded at a fixed high-canonical
 # address (0xFFFF800000000000, see port/c.ld), with no syscall trap and
@@ -243,7 +248,7 @@ APP_CFLAGS="$CFLAGS -DCURL_STATICLIB -I $CURL_INC -I $SQLITE_INC -DSODIUM_STATIC
 echo "Building..."
 
 gcc $CFLAGS -o "$BUILD_DIR/crt0.o" "$PORT/crt0.c"
-gcc $CFLAGS -o "$BUILD_DIR/posix_shim.o" "$PORT/posix_shim.c"
+gcc $CFLAGS $POSIX_SHIM_CFLAGS -o "$BUILD_DIR/posix_shim.o" "$PORT/posix_shim.c"
 gcc $CFLAGS -o "$BUILD_DIR/thread_shim.o" "$PORT/thread_shim.c"
 gcc $LWEXT4_CFLAGS -o "$BUILD_DIR/ext4_shim.o" "$PORT/ext4_shim.c"
 gcc $LWEXT4_CFLAGS -o "$BUILD_DIR/blockdev_baremetal.o" "$LWEXT4_PORT/blockdev_baremetal.c"
@@ -366,7 +371,7 @@ ld --gc-sections --no-warn-rwx-segments --oformat elf64-x86-64 -T "$PORT/c.ld" -
 	"$BUILD_DIR/ext4_shim.o" "$BUILD_DIR/blockdev_baremetal.o" "$BUILD_DIR/net_glue.o" "$BUILD_DIR/net_shim.o" \
 	"$BUILD_DIR/dns_shim.o" "$BUILD_DIR/tls_shim.o" "$BUILD_DIR/entropy_hardware_poll.o" "$BUILD_DIR/cacert_data.o" \
 	"$BUILD_DIR/sqlite_vfs.o" "$BUILD_DIR/randombytes_baremetal.o" "$BUILD_DIR/dlfcn_shim.o" \
-	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS $LUA_OBJS $LIGHTTPD_LIB "$MUSL_LIB" "$LIBGCC"
+	"$BUILD_DIR/libBareMetal.o" $APP_OBJS $LWIP_OBJS $MBEDTLS_OBJS $CURL_OBJS $SQLITE_OBJS $SODIUM_OBJS $LWEXT4_OBJS $PYTHON_OBJS $LUA_OBJS $LIGHTTPD_LIB $APP_LIBS "$MUSL_LIB" "$LIBGCC"
 objcopy -O binary "$BUILD_DIR/$APP_NAME.elf" "$APP_NAME"
 
 echo "Built $APP_NAME"

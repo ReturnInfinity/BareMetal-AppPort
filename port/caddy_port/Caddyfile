@@ -1,0 +1,17 @@
+# Default config for caddy.app, installed as /caddy/Caddyfile by
+# install.sh. See CADDY.md.
+{
+	# The admin API listens on localhost, which nothing outside the VM
+	# can reach anyway.
+	admin off
+}
+
+# No public host name, so plain HTTP on port 80. With a real domain
+# pointing at this VM, replace ":80" with it and Caddy fetches a
+# certificate automatically (see CADDY.md).
+:80 {
+	root * /caddy/www
+	encode gzip
+	file_server
+	log
+}

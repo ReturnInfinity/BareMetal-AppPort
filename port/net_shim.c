@@ -179,7 +179,10 @@ static long net_wait(u32_t start, long timeout_ms)
 	u64 timer_ns = net_next_timer_ns();
 	if (timer_ns != ~0ULL && now + timer_ns < wake)
 		wake = now + timer_ns;
-	return thread_shim_io_wait_until(wake, NET_POLL_INTERVAL_NS);
+	int depth = net_unlock_all(); // see net_glue.h's net_lock()
+	long r = thread_shim_io_wait_until(wake, NET_POLL_INTERVAL_NS);
+	net_relock(depth);
+	return r;
 }
 
 // O_NONBLOCK set on the socket, or MSG_DONTWAIT passed for this call.
@@ -308,7 +311,7 @@ static void on_udp_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const i
 
 // ---- API ----
 
-long net_shim_socket(long domain, long type, long protocol)
+static long net_shim_socket_unlocked(long domain, long type, long protocol)
 {
 	(void)protocol;
 
@@ -343,7 +346,7 @@ long net_shim_socket(long domain, long type, long protocol)
 	return SOCK_FD_BASE + slot;
 }
 
-long net_shim_bind(long fd, const void *addr, long addrlen)
+static long net_shim_bind_unlocked(long fd, const void *addr, long addrlen)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 	if ((size_t)addrlen < sizeof(struct sockaddr_in))
@@ -369,7 +372,7 @@ long net_shim_bind(long fd, const void *addr, long addrlen)
 // established -- this just reads them back out, the same
 // pcb-field-to-sockaddr_in translation net_shim_accept() already does
 // for the accepted connection's remote address.
-long net_shim_getsockname(long fd, void *addr, socklen_t *addrlenp)
+static long net_shim_getsockname_unlocked(long fd, void *addr, socklen_t *addrlenp)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 	if (!addr || !addrlenp || *addrlenp < (socklen_t)sizeof(struct sockaddr_in))
@@ -391,7 +394,7 @@ long net_shim_getsockname(long fd, void *addr, socklen_t *addrlenp)
 	return 0;
 }
 
-long net_shim_getpeername(long fd, void *addr, socklen_t *addrlenp)
+static long net_shim_getpeername_unlocked(long fd, void *addr, socklen_t *addrlenp)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 	if (!addr || !addrlenp || *addrlenp < (socklen_t)sizeof(struct sockaddr_in))
@@ -410,7 +413,7 @@ long net_shim_getpeername(long fd, void *addr, socklen_t *addrlenp)
 	return 0;
 }
 
-long net_shim_listen(long fd, long backlog)
+static long net_shim_listen_unlocked(long fd, long backlog)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -438,7 +441,7 @@ long net_shim_listen(long fd, long backlog)
 	return 0;
 }
 
-long net_shim_accept(long fd, void *addr, socklen_t *addrlenp, long flags)
+static long net_shim_accept_unlocked(long fd, void *addr, socklen_t *addrlenp, long flags)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -488,7 +491,7 @@ long net_shim_accept(long fd, void *addr, socklen_t *addrlenp, long flags)
 	return SOCK_FD_BASE + slot;
 }
 
-long net_shim_connect(long fd, const void *addr, long addrlen)
+static long net_shim_connect_unlocked(long fd, const void *addr, long addrlen)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 	if ((size_t)addrlen < sizeof(struct sockaddr_in))
@@ -650,7 +653,7 @@ static long tcp_wait_rx(struct bsock *s, int nonblock)
 	}
 }
 
-long net_shim_recv(long fd, void *buf, size_t len, long flags)
+static long net_shim_recv_unlocked(long fd, void *buf, size_t len, long flags)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -677,7 +680,7 @@ long net_shim_recv(long fd, void *buf, size_t len, long flags)
 	return total;
 }
 
-long net_shim_recvfrom(long fd, void *buf, size_t len, long flags, void *addr, socklen_t *addrlenp)
+static long net_shim_recvfrom_unlocked(long fd, void *buf, size_t len, long flags, void *addr, socklen_t *addrlenp)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -764,7 +767,7 @@ static long udp_do_send(struct bsock *s, const void *buf, size_t len, const ip4_
 	return udp_do_sendv(s, &iov, 1, dst, dst_port);
 }
 
-long net_shim_send(long fd, const void *buf, size_t len, long flags)
+static long net_shim_send_unlocked(long fd, const void *buf, size_t len, long flags)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -801,7 +804,7 @@ long net_shim_send(long fd, const void *buf, size_t len, long flags)
 	}
 }
 
-long net_shim_sendto(long fd, const void *buf, size_t len, long flags, const void *addr, long addrlen)
+static long net_shim_sendto_unlocked(long fd, const void *buf, size_t len, long flags, const void *addr, long addrlen)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -827,7 +830,7 @@ long net_shim_sendto(long fd, const void *buf, size_t len, long flags, const voi
 // -EOPNOTSUPP, and receiving always reports msg_controllen = 0 -- and,
 // as with send()/recv(), flags (MSG_NOSIGNAL, MSG_CMSG_CLOEXEC, ...)
 // are accepted and ignored.
-long net_shim_sendmsg(long fd, const struct msghdr *msg, long flags)
+static long net_shim_sendmsg_unlocked(long fd, const struct msghdr *msg, long flags)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -866,7 +869,7 @@ long net_shim_sendmsg(long fd, const struct msghdr *msg, long flags)
 	return total;
 }
 
-long net_shim_recvmsg(long fd, struct msghdr *msg, long flags)
+static long net_shim_recvmsg_unlocked(long fd, struct msghdr *msg, long flags)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -932,7 +935,7 @@ long net_shim_recvmsg(long fd, struct msghdr *msg, long flags)
 // level/optname (SO_REUSEADDR, TCP_NODELAY, ...) is still an
 // accept-and-ignore stub, same as before this existed (see
 // posix_shim.c's sys_setsockopt()).
-long net_shim_setsockopt(long fd, long level, long optname, const void *optval, long optlen)
+static long net_shim_setsockopt_unlocked(long fd, long level, long optname, const void *optval, long optlen)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -955,7 +958,7 @@ long net_shim_setsockopt(long fd, long level, long optname, const void *optval, 
 	return 0;
 }
 
-long net_shim_getsockopt(long fd, long level, long optname, void *optval, socklen_t *optlenp)
+static long net_shim_getsockopt_unlocked(long fd, long level, long optname, void *optval, socklen_t *optlenp)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -1000,7 +1003,7 @@ long net_shim_getsockopt(long fd, long level, long optname, void *optval, sockle
 // reason posix_shim.c's non-socket fcntl() does -- there's no dup().
 // Everything else (F_GETFD/F_SETFD's FD_CLOEXEC, ...) is accept-and-
 // ignore.
-long net_shim_fcntl(long fd, long cmd, long arg)
+static long net_shim_fcntl_unlocked(long fd, long cmd, long arg)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -1021,7 +1024,7 @@ long net_shim_fcntl(long fd, long cmd, long arg)
 // ioctl() on a socket: FIONBIO (the other way to set O_NONBLOCK) and
 // FIONREAD (bytes readable right now without blocking -- for UDP, the
 // size of the next datagram, as on Linux).
-long net_shim_ioctl(long fd, long req, long arg)
+static long net_shim_ioctl_unlocked(long fd, long req, long arg)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 	int *p = (int *)arg;
@@ -1054,7 +1057,7 @@ long net_shim_ioctl(long fd, long req, long arg)
 // sockets there's nothing poll() could be waiting on here, and the
 // netif may never have been brought up (net_ensure_ready() runs on the
 // first socket() call).
-void net_shim_pump(void)
+static void net_shim_pump_unlocked(void)
 {
 	for (int i = 0; i < SOCK_MAX; i++) {
 		if (socks[i].state != SK_FREE) {
@@ -1064,7 +1067,7 @@ void net_shim_pump(void)
 	}
 }
 
-u64 net_shim_next_timer_ns(void)
+static u64 net_shim_next_timer_ns_unlocked(void)
 {
 	for (int i = 0; i < SOCK_MAX; i++) {
 		if (socks[i].state != SK_FREE)
@@ -1080,7 +1083,7 @@ u64 net_shim_next_timer_ns(void)
 // would accept at least one byte (or a pending connect() finished).
 // POLLERR/POLLHUP are always reported regardless of events, as poll(2)
 // specifies. Doesn't call net_poll() itself -- see net_shim_pump().
-int net_shim_poll(long fd, int events)
+static int net_shim_poll_unlocked(long fd, int events)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 	int r = 0;
@@ -1150,7 +1153,7 @@ static void close_queued_conn(struct bsock *ns)
 	ns->state = SK_FREE;
 }
 
-long net_shim_close(long fd)
+static long net_shim_close_unlocked(long fd)
 {
 	struct bsock *s = &socks[fd - SOCK_FD_BASE];
 
@@ -1202,6 +1205,179 @@ long net_shim_close(long fd)
 
 	s->state = SK_FREE;
 	return 0;
+}
+
+
+// -----------------------------------------------------------------------
+// Public entry points: each holds the lwIP lock (net_glue.h) around its
+// _unlocked body. net_wait() gives it up while a call blocks.
+// -----------------------------------------------------------------------
+
+long net_shim_socket(long domain, long type, long protocol)
+{
+	net_lock();
+	long r = net_shim_socket_unlocked(domain, type, protocol);
+	net_unlock();
+	return r;
+}
+
+long net_shim_bind(long fd, const void *addr, long addrlen)
+{
+	net_lock();
+	long r = net_shim_bind_unlocked(fd, addr, addrlen);
+	net_unlock();
+	return r;
+}
+
+long net_shim_getsockname(long fd, void *addr, socklen_t *addrlenp)
+{
+	net_lock();
+	long r = net_shim_getsockname_unlocked(fd, addr, addrlenp);
+	net_unlock();
+	return r;
+}
+
+long net_shim_getpeername(long fd, void *addr, socklen_t *addrlenp)
+{
+	net_lock();
+	long r = net_shim_getpeername_unlocked(fd, addr, addrlenp);
+	net_unlock();
+	return r;
+}
+
+long net_shim_listen(long fd, long backlog)
+{
+	net_lock();
+	long r = net_shim_listen_unlocked(fd, backlog);
+	net_unlock();
+	return r;
+}
+
+long net_shim_accept(long fd, void *addr, socklen_t *addrlenp, long flags)
+{
+	net_lock();
+	long r = net_shim_accept_unlocked(fd, addr, addrlenp, flags);
+	net_unlock();
+	return r;
+}
+
+long net_shim_connect(long fd, const void *addr, long addrlen)
+{
+	net_lock();
+	long r = net_shim_connect_unlocked(fd, addr, addrlen);
+	net_unlock();
+	return r;
+}
+
+long net_shim_recv(long fd, void *buf, size_t len, long flags)
+{
+	net_lock();
+	long r = net_shim_recv_unlocked(fd, buf, len, flags);
+	net_unlock();
+	return r;
+}
+
+long net_shim_recvfrom(long fd, void *buf, size_t len, long flags, void *addr, socklen_t *addrlenp)
+{
+	net_lock();
+	long r = net_shim_recvfrom_unlocked(fd, buf, len, flags, addr, addrlenp);
+	net_unlock();
+	return r;
+}
+
+long net_shim_send(long fd, const void *buf, size_t len, long flags)
+{
+	net_lock();
+	long r = net_shim_send_unlocked(fd, buf, len, flags);
+	net_unlock();
+	return r;
+}
+
+long net_shim_sendto(long fd, const void *buf, size_t len, long flags, const void *addr, long addrlen)
+{
+	net_lock();
+	long r = net_shim_sendto_unlocked(fd, buf, len, flags, addr, addrlen);
+	net_unlock();
+	return r;
+}
+
+long net_shim_sendmsg(long fd, const struct msghdr *msg, long flags)
+{
+	net_lock();
+	long r = net_shim_sendmsg_unlocked(fd, msg, flags);
+	net_unlock();
+	return r;
+}
+
+long net_shim_recvmsg(long fd, struct msghdr *msg, long flags)
+{
+	net_lock();
+	long r = net_shim_recvmsg_unlocked(fd, msg, flags);
+	net_unlock();
+	return r;
+}
+
+long net_shim_setsockopt(long fd, long level, long optname, const void *optval, long optlen)
+{
+	net_lock();
+	long r = net_shim_setsockopt_unlocked(fd, level, optname, optval, optlen);
+	net_unlock();
+	return r;
+}
+
+long net_shim_getsockopt(long fd, long level, long optname, void *optval, socklen_t *optlenp)
+{
+	net_lock();
+	long r = net_shim_getsockopt_unlocked(fd, level, optname, optval, optlenp);
+	net_unlock();
+	return r;
+}
+
+long net_shim_fcntl(long fd, long cmd, long arg)
+{
+	net_lock();
+	long r = net_shim_fcntl_unlocked(fd, cmd, arg);
+	net_unlock();
+	return r;
+}
+
+long net_shim_ioctl(long fd, long req, long arg)
+{
+	net_lock();
+	long r = net_shim_ioctl_unlocked(fd, req, arg);
+	net_unlock();
+	return r;
+}
+
+void net_shim_pump(void)
+{
+	net_lock();
+	net_shim_pump_unlocked();
+	net_unlock();
+}
+
+u64 net_shim_next_timer_ns(void)
+{
+	net_lock();
+	u64 r = net_shim_next_timer_ns_unlocked();
+	net_unlock();
+	return r;
+}
+
+int net_shim_poll(long fd, int events)
+{
+	net_lock();
+	int r = net_shim_poll_unlocked(fd, events);
+	net_unlock();
+	return r;
+}
+
+long net_shim_close(long fd)
+{
+	net_lock();
+	long r = net_shim_close_unlocked(fd);
+	net_unlock();
+	return r;
 }
 
 // =============================================================================

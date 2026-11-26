@@ -3,6 +3,7 @@
 #include "libBareMetal.h"
 
 extern int main(int argc, char **argv, char **envp);
+static int run_init_array_then_main(int argc, char **argv, char **envp);
 extern int __libc_start_main(int (*)(int, char **, char **), int, char **,
                               void (*)(), void (*)(), void (*)());
 
@@ -87,28 +88,100 @@ struct fake_phdr {
 /*
  * musl's own patched syscall_arch.h calls __bmos_syscall() (posix_shim.c)
  * directly, by symbol -- a plain CALL, nothing for the kernel to know about.
- * Some runtimes (Zig's std is the concrete case) don't go through libc at
- * all for a handful of syscalls (Thread/Mutex/Futex/getCurrentId,
- * std.debug.print's stderr lock) and instead emit the raw `syscall` x86
- * opcode directly -- BareMetal-Firecracker's kernel now has a second entry
- * point for that (int_syscall_fast, IA32_LSTAR), but it has no way to find
- * *this app's own* __bmos_syscall() by itself (every app is linked/compiled
- * independently; nothing about its address is guaranteed stable across
- * builds even though crt0.o/posix_shim.o happen to be byte-identical today).
- * Publishing it here, unconditionally, on every app regardless of language,
- * is what lets the kernel reach it -- see BareMetal-Firecracker's
- * sysvar.asm (app_bmos_syscall_ptr) and interrupt.asm's int_syscall_fast
- * for the other end of this, and BareMetal-AppPort's ZIG.md/OPENISSUES.md
- * Zig section for why this exists at all.
+ * Some runtimes (Zig's std, the Go runtime) don't go through libc for every
+ * syscall and instead emit the raw `syscall` x86 instruction.
+ * BareMetal-Firecracker's kernel catches that (int_syscall_fast, IA32_LSTAR)
+ * and immediately drops back to ring 3, into __bmos_syscall_tramp below,
+ * with interrupts as the app had them:
+ *
+ *   RAX = syscall number, RDI/RSI/RDX/R10/R8/R9 = args (Linux raw ABI)
+ *   RSP = the caller's RSP - 136: [RSP] = return RIP, then the caller's
+ *         untouched 128-byte red zone
+ *   RCX/R11 = clobbered (the Linux syscall ABI allows that)
+ *
+ * The trampoline saves the caller's registers there, then calls
+ * __bmos_syscall() on the running thread's own syscall stack
+ * (bmos_syscall_stack_top, thread_shim.c -- a Linux syscall uses no user
+ * stack, and the Go runtime makes them on goroutine stacks with only a few
+ * hundred bytes free), and returns to the caller as Linux would: only RAX
+ * (result), RCX and R11 change. If it's already on the syscall stack (a
+ * signal handler making a raw syscall), it stays there. A raw syscall
+ * therefore runs in ring 3 on the calling thread's stacks, so it can block
+ * or be preempted by thread_shim.c like any libc call.
+ *
+ * FXSAVE/FXRSTOR keep the SSE/x87 state too: __bmos_syscall() is plain C
+ * that may use XMM registers, which the SysV ABI lets a callee clobber but
+ * a real syscall never does -- and code written against raw syscalls (Zig's
+ * inline-asm syscall wrappers) may keep values live in them across one.
+ * Every app publishes the trampoline's address for the kernel (see
+ * BMOS_SYSCALL_PTR_ADDR), whatever its language: every app is linked
+ * independently, so the kernel can't know where it is.
  */
 extern long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6);
+extern unsigned long bmos_syscall_stack_top;
+void __bmos_syscall_tramp(void);
+__asm__ (
+	".text\n"
+	".global __bmos_syscall_tramp\n"
+	".type __bmos_syscall_tramp,@function\n"
+	"__bmos_syscall_tramp:\n"
+	"	pushfq\n"
+	"	push %rdi\n"
+	"	push %rsi\n"
+	"	push %rdx\n"
+	"	push %r10\n"
+	"	push %r8\n"
+	"	push %r9\n"
+	"	push %rbp\n"
+	"	mov %rsp, %rbp\n"
+	"	movabs $bmos_syscall_stack_top, %r11\n"
+	"	mov (%r11), %r11\n"
+	"	cmp %r11, %rsp\n"
+	"	ja 2f\n"			/* above the syscall stack: switch */
+	"	lea -65536(%r11), %rcx\n"	/* THREAD_SHIM_SYSCALL_STACK_SIZE */
+	"	cmp %rcx, %rsp\n"
+	"	ja 1f\n"			/* already on it: stay */
+	"2:	mov %r11, %rsp\n"
+	"1:	and $-16, %rsp\n"		/* the caller's RSP can be anything */
+	"	sub $512, %rsp\n"
+	"	fxsave (%rsp)\n"
+	"	sub $8, %rsp\n"			/* keeps RSP 16-aligned at the call */
+	"	push %r9\n"			/* a6, __bmos_syscall()'s 7th (stack) arg */
+	"	mov %r8, %r9\n"			/* a5 */
+	"	mov %r10, %r8\n"		/* a4 */
+	"	mov %rdx, %rcx\n"		/* a3 */
+	"	mov %rsi, %rdx\n"		/* a2 */
+	"	mov %rdi, %rsi\n"		/* a1 */
+	"	mov %rax, %rdi\n"		/* n */
+	"	cld\n"
+	"	movabs $__bmos_syscall, %r11\n"	/* -mcmodel=large: no assumption it's in rel32 range */
+	"	call *%r11\n"
+	"	add $16, %rsp\n"
+	"	fxrstor (%rsp)\n"
+	"	mov %rbp, %rsp\n"
+	"	pop %rbp\n"
+	"	pop %r9\n"
+	"	pop %r8\n"
+	"	pop %r10\n"
+	"	pop %rdx\n"
+	"	pop %rsi\n"
+	"	pop %rdi\n"
+	"	popfq\n"
+	"	ret $128\n"			/* pop the return RIP, then step back over the red zone */
+	".size __bmos_syscall_tramp, .-__bmos_syscall_tramp\n"
+);
 #define BMOS_SYSCALL_PTR_ADDR ((void **)0x8100UL)
 
 /*
  * Ensure RSP is 16-byte aligned. SSE instructions such as
  * MOVAPS will #GP on the mis-aligned stack.
  */
-__attribute__((naked)) void _start(void)
+/*
+ * .text.start: the kernel enters the flat image at its very first byte
+ * (__image_base), so _start has to be there, whatever order gcc happens
+ * to emit this file's functions in. c.ld places .text.start first.
+ */
+__attribute__((naked, section(".text.start"))) void _start(void)
 {
 	__asm__ volatile (
 		"pushq %%rbp\n\t"        /* save rbp (callee-saved)     */
@@ -196,11 +269,10 @@ int _start_c(void *entry_sp)
 	 * syscall, but nothing is stopping some future addition from doing so
 	 * (however unlikely before main()), and BMOS_SYSCALL_PTR_ADDR is
 	 * zeroed at boot precisely so a `syscall` reaching the kernel before
-	 * this line NULL-calls and faults cleanly instead of jumping into
-	 * whatever was here before. See BMOS_SYSCALL_PTR_ADDR's own comment
-	 * above for the full story.
+	 * this line faults cleanly instead of jumping into whatever was here
+	 * before. See __bmos_syscall_tramp's comment above for the full story.
 	 */
-	*BMOS_SYSCALL_PTR_ADDR = (void *)&__bmos_syscall;
+	*BMOS_SYSCALL_PTR_ADDR = (void *)&__bmos_syscall_tramp;
 
 	/*
 	 * zero_bss() below writes every byte from __bss_start through
@@ -273,7 +345,24 @@ int _start_c(void *entry_sp)
 	init_stack[idx++] = AT_PHNUM;  init_stack[idx++] = 1;
 	init_stack[idx++] = AT_NULL;   init_stack[idx++] = 0;
 
-	return __libc_start_main(main, fc_argc, (char **)init_stack, 0, 0, 0);
+	return __libc_start_main(run_init_array_then_main, fc_argc, (char **)init_stack, 0, 0, 0);
+}
+
+/*
+ * Constructors (.init_array) run here instead of in musl's
+ * __libc_start_init() -- see c.ld's .init_array comment. Same point in
+ * startup (libc and TLS are up, main() hasn't started), but each one
+ * gets (argc, argv, envp) like on glibc. Functions declared to take no
+ * arguments simply ignore them.
+ */
+extern void (*__bm_init_array_start[])(int, char **, char **);
+extern void (*__bm_init_array_end[])(int, char **, char **);
+
+static int run_init_array_then_main(int argc, char **argv, char **envp)
+{
+	for (void (**f)(int, char **, char **) = __bm_init_array_start; f < __bm_init_array_end; f++)
+		(*f)(argc, argv, envp);
+	return main(argc, argv, envp);
 }
 
 /* Renders v in decimal into the tail of buf (which must be at least

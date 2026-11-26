@@ -607,4 +607,15 @@ echo "- Building lighttpd.app"
 echo "- Building sqlite.app"
 "$SCRIPT_DIR/build-app.sh" "$SQLITE_PORT/sqlite.c"
 
+# caddy.app (see CADDY.md) is built with the host's own Go toolchain
+# (build-go-app.sh, GO.md), which the rest of this setup doesn't need,
+# so it's skipped when Go isn't installed. The first build downloads
+# Caddy's Go modules.
+if command -v go >/dev/null 2>&1; then
+	echo "- Building caddy.app"
+	APP_NAME=caddy.app "$SCRIPT_DIR/build-go-app.sh" "$SCRIPT_DIR/port/caddy_port"
+else
+	echo "- Skipping caddy.app: 'go' not found (see CADDY.md)"
+fi
+
 # echo -e "${BOLD}Library builds complete${NORMAL}"

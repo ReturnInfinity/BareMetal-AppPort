@@ -42,7 +42,9 @@
 #include "lwip/dns.h"
 #include "lwip/sys.h"
 
+#include "libBareMetal.h"
 #include "net_glue.h"
+#include "thread_shim.h"
 
 #define DNS_BLOCK_TIMEOUT_MS 30000
 
@@ -66,7 +68,23 @@ static void on_found(const char *name, const ip_addr_t *ipaddr, void *arg)
 
 // Blocks (like every other net_*/dns_* call in this port) until the
 // name resolves, fails, or DNS_BLOCK_TIMEOUT_MS elapses.
+static int resolve_one(const char *hostname, ip4_addr_t *out);
+
+// One lookup at a time (they share the static struct dns_wait below), and
+// threads do look up concurrently -- the Go runtime's resolver, for one
+// (see GO.md). lwIP itself is only touched under net_lock().
+static int dns_lock_word;
+
 static int resolve(const char *hostname, ip4_addr_t *out)
+{
+	while (__atomic_exchange_n(&dns_lock_word, 1, __ATOMIC_ACQUIRE))
+		thread_shim_sched_yield();
+	int r = resolve_one(hostname, out);
+	__atomic_store_n(&dns_lock_word, 0, __ATOMIC_RELEASE);
+	return r;
+}
+
+static int resolve_one(const char *hostname, ip4_addr_t *out)
 {
 	net_ensure_ready();
 
@@ -84,7 +102,9 @@ static int resolve(const char *hostname, ip4_addr_t *out)
 	// writes into memory nobody's reading anymore instead.
 	static struct dns_wait w;
 	memset(&w, 0, sizeof(w));
+	net_lock();
 	err_t e = dns_gethostbyname(hostname, out, on_found, &w);
+	net_unlock();
 
 	if (e == ERR_OK)
 		return 0; // already cached, or hostname was itself an IP literal
@@ -92,10 +112,11 @@ static int resolve(const char *hostname, ip4_addr_t *out)
 		return -1;
 
 	u32_t start = sys_now();
-	while (!w.done) {
+	while (!__atomic_load_n(&w.done, __ATOMIC_ACQUIRE)) {
 		net_poll();
 		if ((u32_t)(sys_now() - start) >= DNS_BLOCK_TIMEOUT_MS)
 			return -1;
+		thread_shim_sched_yield();
 	}
 
 	if (!w.ok)

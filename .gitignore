@@ -51,6 +51,8 @@ port/rust_port/PINNED_TOOLCHAIN
 
 # Kernel Module Compile Results
 *.mod*
+# ...but not Go module files (port/caddy_port/go.mod)
+!go.mod
 *.cmd
 .tmp_versions/
 modules.order

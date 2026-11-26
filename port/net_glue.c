@@ -27,6 +27,7 @@
 
 #include "libBareMetal.h"
 #include "net_glue.h"
+#include "thread_shim.h"
 
 // Built with -DBAREMETAL_DEBUG=1 (see build-app.sh's BAREMETAL_DEBUG
 // flag), this file's diagnostic printf's are compiled out entirely.
@@ -313,10 +314,54 @@ void net_init(void)
 	}
 }
 
+static int net_lock_owner;	// thread_shim_current_tid() of the holder, 0 = free
+static int net_lock_depth;
+
+void net_lock(void)
+{
+	int me = (int)thread_shim_current_tid();
+	if (__atomic_load_n(&net_lock_owner, __ATOMIC_ACQUIRE) == me) {
+		net_lock_depth++;
+		return;
+	}
+	int expected = 0;
+	while (!__atomic_compare_exchange_n(&net_lock_owner, &expected, me, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+		expected = 0;
+		thread_shim_sched_yield();
+	}
+	net_lock_depth = 1;
+}
+
+void net_unlock(void)
+{
+	if (--net_lock_depth == 0)
+		__atomic_store_n(&net_lock_owner, 0, __ATOMIC_RELEASE);
+}
+
+int net_unlock_all(void)
+{
+	if (__atomic_load_n(&net_lock_owner, __ATOMIC_ACQUIRE) != (int)thread_shim_current_tid())
+		return 0;
+	int depth = net_lock_depth;
+	net_lock_depth = 0;
+	__atomic_store_n(&net_lock_owner, 0, __ATOMIC_RELEASE);
+	return depth;
+}
+
+void net_relock(int depth)
+{
+	if (!depth)
+		return;
+	net_lock();
+	net_lock_depth = depth;
+}
+
 void net_poll(void)
 {
 	void *buf;
 	u64 len;
+
+	net_lock();
 
 	// b_net_rx() never blocks -- it returns len=0 immediately when
 	// nothing is pending (see net_virtio_mmio_poll) -- so this drains
@@ -331,11 +376,14 @@ void net_poll(void)
 	}
 
 	sys_check_timeouts();
+	net_unlock();
 }
 
 unsigned long long net_next_timer_ns(void)
 {
+	net_lock();
 	u32_t ms = sys_timeouts_sleeptime();
+	net_unlock();
 	if (ms == SYS_TIMEOUTS_SLEEPTIME_INFINITE)
 		return ~0ULL;
 	// sys_now() is in whole ms, so a timer can read as due (0) a little
@@ -409,11 +457,15 @@ static int net_ready;
 
 void net_ensure_ready(void)
 {
-	if (net_ready)
+	if (__atomic_load_n(&net_ready, __ATOMIC_ACQUIRE))
 		return;
-	net_init();
-	net_wait_ready(NET_ENSURE_TIMEOUT_MS);
-	net_ready = 1;
+	net_lock();
+	if (!net_ready) {
+		net_init();
+		net_wait_ready(NET_ENSURE_TIMEOUT_MS);
+		__atomic_store_n(&net_ready, 1, __ATOMIC_RELEASE);
+	}
+	net_unlock();
 }
 
 // =============================================================================
