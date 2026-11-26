@@ -9,6 +9,7 @@ SECTIONS
 	__image_base = .;
 
 	.text : {
+		KEEP(*(.text.start))
 		*(.text .text.*)
 	}
 
@@ -165,10 +166,21 @@ SECTIONS
 	 * constructors after lower-priority ones whenever more than one
 	 * library/TU-provided entry exists at once.
 	 */
+	/*
+	 * __bm_init_array_start/__bm_init_array_end, not musl's own
+	 * __init_array_start/__init_array_end: crt0.c walks this array
+	 * itself, right before main(), so it can pass each constructor
+	 * (argc, argv, envp) the way glibc does. musl calls them with no
+	 * arguments, and the Go runtime's library-mode entry point (see
+	 * GO.md) reads argv/auxv from those arguments. musl's own pair is
+	 * defined as an empty range at the end so it runs nothing twice.
+	 */
 	.init_array : {
-		__init_array_start = .;
+		__bm_init_array_start = .;
 		KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
 		KEEP(*(.init_array .ctors))
+		__bm_init_array_end = .;
+		__init_array_start = .;
 		__init_array_end = .;
 	}
 

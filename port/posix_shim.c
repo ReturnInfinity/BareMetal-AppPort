@@ -18,11 +18,14 @@
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <poll.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <time.h>
 #include <sys/utsname.h>
+#include <sys/resource.h>
 
 #include "libBareMetal.h"
 #include "posix_shim.h"
@@ -293,6 +296,33 @@ static void free_list_insert(void *addr, size_t size)
 	}
 }
 
+// Take [addr, addr+n) back off the free list, splitting any block it
+// overlaps -- for a MAP_FIXED mapping over memory that was munmap()'d.
+static void free_list_remove_range(char *addr, size_t n)
+{
+	char *end = addr + n;
+	struct free_block **pp = &free_list;
+
+	while (*pp) {
+		struct free_block *cur = *pp;
+		char *b = (char *)cur, *e = b + cur->size;
+		if (e <= addr || b >= end) {
+			pp = &cur->next;
+			continue;
+		}
+		struct free_block *next = cur->next;
+		*pp = next;
+		// Re-insert whatever lies outside the range. Both pieces are
+		// page multiples (every free-list range is), so either is
+		// big enough for a header or empty.
+		if (e > end)
+			free_list_insert(end, (size_t)(e - end));
+		if (b < addr)
+			free_list_insert(b, (size_t)(addr - b));
+		pp = &free_list; // the list changed under us; rescan
+	}
+}
+
 // First-fit: good enough for the large (>=128KB), comparatively
 // infrequent allocations mmap() actually serves.
 static void *free_list_alloc(size_t n)
@@ -319,14 +349,48 @@ static void *free_list_alloc(size_t n)
 	return 0;
 }
 
+// Is [p, p+n) entirely inside memory this arena has already handed
+// out (the image itself or anything below heap_cur)?
+static int heap_owns(u64 p, u64 n)
+{
+	heap_init();
+	return p >= (u64)__image_base && n <= (u64)heap_cur - p;
+}
+
 static long sys_mmap(long addr, long len, long prot, long flags, long fd, long off)
 {
-	(void)addr; (void)prot; (void)fd; (void)off;
+	(void)fd; (void)off;
 
 	if (!(flags & MAP_ANONYMOUS) || len <= 0)
 		return -ENODEV;
 
 	size_t n = ((size_t)len + 4095) & ~(size_t)4095;
+
+	// MAP_FIXED over a range we already handed out. The Go runtime
+	// (see GO.md) reserves address space with PROT_NONE first and
+	// later "commits" pieces of it with MAP_FIXED at the exact same
+	// address, and Linux gives back fresh zero pages there. Every
+	// reservation here is already real memory, so committing is just
+	// re-zeroing in place. Anywhere else can't be honored.
+	if (flags & MAP_FIXED) {
+		if ((addr & 4095) || !heap_owns((u64)addr, n))
+			return -ENOMEM;
+		free_list_remove_range((char *)addr, n); // if it had been munmap()'d
+		if (prot != PROT_NONE)
+			memset((void *)addr, 0, n);
+		return addr;
+	}
+
+	// A PROT_NONE mapping is a reservation: nothing may touch it until
+	// a MAP_FIXED commit (above) zeroes it, so skip zeroing it here.
+	// Go reserves -- and on a hint miss immediately unmaps again --
+	// tens of MiB at a time, so this saves a lot of memset()ing.
+	if (prot == PROT_NONE) {
+		void *r = free_list_alloc(n);
+		if (!r)
+			r = heap_alloc(n);
+		return r ? (long)r : -ENOMEM;
+	}
 
 	// Anonymous mmap() is contractually zero-filled, and musl relies
 	// on that (e.g. calloc() skips its own memset for mmap-backed
@@ -345,6 +409,21 @@ static long sys_mmap(long addr, long len, long prot, long flags, long fd, long o
 	return (long)p;
 }
 
+// madvise(): MADV_DONTNEED on private anonymous memory means "the next
+// read sees zeroes" on Linux, and the Go runtime relies on exactly that
+// when it hands scavenged pages back out. With no real paging the
+// memory can't be returned, but it can be zeroed. Every other advice
+// is only a hint and is accepted as-is.
+static long sys_madvise(long addr, long len, long advice)
+{
+	if ((addr & 4095) || len < 0)
+		return -EINVAL;
+	size_t n = ((size_t)len + 4095) & ~(size_t)4095;
+	if (advice == MADV_DONTNEED && n && heap_owns((u64)addr, n))
+		memset((void *)addr, 0, n);
+	return 0;
+}
+
 static long sys_munmap(long addr, long len)
 {
 	if (!addr || len <= 0)
@@ -358,6 +437,15 @@ static long sys_munmap(long addr, long len)
 // -----------------------------------------------------------------------
 // I/O
 // -----------------------------------------------------------------------
+
+// eventfd and epoll fds -- see their own sections further down.
+static int eventfd_is_fd(long fd);
+static long efd_read(long fd, void *buf, size_t len);
+static long efd_write(long fd, const void *buf, size_t len);
+static long eventfd_close(long fd);
+static int epoll_is_fd(long fd);
+static long epoll_close(long fd);
+static void epoll_forget_fd(long fd);
 
 // -----------------------------------------------------------------------
 // /dev/null and std fd redirection
@@ -433,6 +521,8 @@ static long sys_write(long fd, long buf, long len)
 		return ext4_shim_write(fd, (const void *)buf, (size_t)len);
 	if (net_shim_is_fd(fd))
 		return net_shim_send(fd, (const void *)buf, (size_t)len, 0);
+	if (eventfd_is_fd(fd))
+		return efd_write(fd, (const void *)buf, (size_t)len);
 	if (fd != 1 && fd != 2)
 		return -EBADF;
 	if (len > 0)
@@ -463,6 +553,8 @@ static long sys_read(long fd, long buf, long len)
 		return ext4_shim_read(fd, (void *)buf, (size_t)len);
 	if (net_shim_is_fd(fd))
 		return net_shim_recv(fd, (void *)buf, (size_t)len, 0);
+	if (eventfd_is_fd(fd))
+		return efd_read(fd, (void *)buf, (size_t)len);
 	if (fd != 0)
 		return -EBADF;
 	if (len <= 0)
@@ -536,6 +628,11 @@ static long sys_readv(long fd, long iov_addr, long iovcnt)
 
 static long sys_close(long fd)
 {
+	epoll_forget_fd(fd);
+	if (eventfd_is_fd(fd))
+		return eventfd_close(fd);
+	if (epoll_is_fd(fd))
+		return epoll_close(fd);
 	if (ext4_shim_is_fd(fd))
 		return ext4_shim_close(fd);
 	if (net_shim_is_fd(fd))
@@ -1026,6 +1123,98 @@ static long sys_getsockopt(long fd, long level, long optname, long optval, long 
 }
 
 // -----------------------------------------------------------------------
+// eventfd()
+//
+// A 64-bit counter with an fd: write() adds to it, read() returns it and
+// resets it to 0 (or takes 1 at a time with EFD_SEMAPHORE), and it polls
+// readable while non-zero. The Go runtime uses one to wake a thread
+// blocked in epoll_wait() (see GO.md). Its own fd range, between
+// ext4_shim.c's 3.. and the epoll fds below.
+// -----------------------------------------------------------------------
+
+#define EVENTFD_FD_BASE 70
+#define EVENTFD_MAX     8
+
+struct eventfd_state {
+	int used;
+	int flags;		// EFD_NONBLOCK / EFD_SEMAPHORE
+	u64 count;
+};
+
+static struct eventfd_state eventfds[EVENTFD_MAX];
+
+static void epoll_rearm(long fd, int bits);
+
+static int eventfd_is_fd(long fd)
+{
+	return fd >= EVENTFD_FD_BASE && fd < EVENTFD_FD_BASE + EVENTFD_MAX && eventfds[fd - EVENTFD_FD_BASE].used;
+}
+
+static long sys_eventfd2(long initval, long flags)
+{
+	if (flags & ~(EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE))
+		return -EINVAL;
+	for (int i = 0; i < EVENTFD_MAX; i++) {
+		if (__atomic_exchange_n(&eventfds[i].used, 1, __ATOMIC_ACQ_REL) == 0) {
+			eventfds[i].flags = (int)flags;
+			__atomic_store_n(&eventfds[i].count, (u64)(unsigned int)initval, __ATOMIC_RELEASE);
+			return EVENTFD_FD_BASE + i;
+		}
+	}
+	return -EMFILE;
+}
+
+static long efd_read(long fd, void *buf, size_t len)
+{
+	struct eventfd_state *e = &eventfds[fd - EVENTFD_FD_BASE];
+	if (len < 8)
+		return -EINVAL;
+	for (;;) {
+		u64 c = __atomic_load_n(&e->count, __ATOMIC_ACQUIRE);
+		if (c) {
+			u64 take = (e->flags & EFD_SEMAPHORE) ? 1 : c;
+			if (!__atomic_compare_exchange_n(&e->count, &c, c - take, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+				continue;
+			memcpy(buf, &take, 8);
+			return 8;
+		}
+		if (e->flags & EFD_NONBLOCK)
+			return -EAGAIN;
+		if (thread_shim_sleep_until(b_system(TIMECOUNTER, 0, 0) + 1000000ULL) == -EINTR)
+			return -EINTR;
+	}
+}
+
+static long efd_write(long fd, const void *buf, size_t len)
+{
+	struct eventfd_state *e = &eventfds[fd - EVENTFD_FD_BASE];
+	u64 add;
+	if (len < 8)
+		return -EINVAL;
+	memcpy(&add, buf, 8);
+	if (add == ~0ULL)
+		return -EINVAL;
+	// No blocking on overflow (it would take 2^64-2 writes to get there).
+	__atomic_add_fetch(&e->count, add, __ATOMIC_ACQ_REL);
+	epoll_rearm(fd, POLLIN); // every write is a new edge, as on Linux
+	return 8;
+}
+
+static long eventfd_close(long fd)
+{
+	__atomic_store_n(&eventfds[fd - EVENTFD_FD_BASE].used, 0, __ATOMIC_RELEASE);
+	return 0;
+}
+
+static int eventfd_revents(long fd, int events)
+{
+	int r = POLLOUT | POLLWRNORM;
+	if (__atomic_load_n(&eventfds[fd - EVENTFD_FD_BASE].count, __ATOMIC_ACQUIRE))
+		r |= POLLIN | POLLRDNORM;
+	return r & events;
+}
+
+// -----------------------------------------------------------------------
 // select()/poll()
 //
 // A real readiness wait. Each pass runs one net_poll() (via
@@ -1060,7 +1249,8 @@ static long sys_getsockopt(long fd, long level, long optname, long optval, long 
 
 static int fd_is_valid(long fd)
 {
-	return fd == 0 || fd == 1 || fd == 2 || ext4_shim_is_fd(fd) || net_shim_is_fd(fd) || devnull_is_fd(fd);
+	return fd == 0 || fd == 1 || fd == 2 || ext4_shim_is_fd(fd) || net_shim_is_fd(fd) || devnull_is_fd(fd) ||
+		eventfd_is_fd(fd);
 }
 
 // fd's poll() revents for events right now; POLLNVAL if fd isn't open.
@@ -1068,6 +1258,8 @@ static int fd_revents(long fd, int events)
 {
 	if (net_shim_is_fd(fd))
 		return net_shim_poll(fd, events);
+	if (eventfd_is_fd(fd))
+		return eventfd_revents(fd, events);
 	if (ext4_shim_is_fd(fd) || devnull_is_fd(fd) || std_is_devnull(fd))
 		return events & (POLL_READ_EVENTS | POLL_WRITE_EVENTS);
 	if (fd == 0)
@@ -1223,6 +1415,270 @@ static long sys_select(long nfds, long readfds_addr, long writefds_addr, long ex
 }
 
 // -----------------------------------------------------------------------
+// epoll
+//
+// Built on the same poll_wait() loop as poll()/select() above: each
+// pass asks every registered fd for its readiness through fd_revents().
+// Interest lists are small fixed tables (there are only a few dozen fds
+// in the whole port).
+//
+// EPOLLET is emulated rather than treated as level-triggered, because
+// the Go runtime (see GO.md) registers every socket with EPOLLIN|EPOLLOUT|
+// EPOLLET: level-triggered, an idle-but-writable socket would be reported
+// on every pass and its netpoller would never block. Each entry keeps an
+// "armed" mask. A ready bit is reported only while armed, and reporting
+// it disarms it. It is re-armed when a pass sees the fd not ready for it,
+// when a read/write/accept/connect on that fd comes back EAGAIN/
+// EINPROGRESS (the point at which an edge-triggered user goes back to
+// waiting -- see the dispatcher's eagain_rearm() calls), and on every
+// eventfd write. EPOLLONESHOT disables the entry after one report, until
+// EPOLL_CTL_MOD.
+//
+// Entries are dropped when their fd is closed, as Linux does when the
+// last reference to a file goes away -- fd numbers are reused here.
+// -----------------------------------------------------------------------
+
+#define EPOLL_FD_BASE     80
+#define EPOLL_MAX         4
+#define EPOLL_MAX_ENTRIES 64
+
+#define EPOLL_FLAG_BITS (EPOLLET | EPOLLONESHOT | EPOLLEXCLUSIVE | EPOLLWAKEUP)
+
+struct epoll_entry {
+	int fd;			// -1 = free slot
+	unsigned int events;	// as registered, flags included
+	unsigned int armed;	// EPOLLET: bits that may be reported
+	epoll_data_t data;
+};
+
+struct epoll_inst {
+	int used;
+	struct epoll_entry e[EPOLL_MAX_ENTRIES];
+};
+
+static struct epoll_inst epolls[EPOLL_MAX];
+
+// Interest lists are changed and scanned from different threads at once
+// (the Go runtime's netpoller blocks in epoll_wait() on one thread while
+// others epoll_ctl()), and thread_shim.c preempts. Held only across one
+// table update or scan pass, never across a wait.
+static int epoll_lock_word;
+
+static void epoll_lock(void)
+{
+	while (__atomic_exchange_n(&epoll_lock_word, 1, __ATOMIC_ACQUIRE))
+		thread_shim_sched_yield();
+}
+
+static void epoll_unlock(void)
+{
+	__atomic_store_n(&epoll_lock_word, 0, __ATOMIC_RELEASE);
+}
+
+static int epoll_is_fd(long fd)
+{
+	return fd >= EPOLL_FD_BASE && fd < EPOLL_FD_BASE + EPOLL_MAX && epolls[fd - EPOLL_FD_BASE].used;
+}
+
+static long sys_epoll_create1(long flags)
+{
+	if (flags & ~EPOLL_CLOEXEC)
+		return -EINVAL;
+	epoll_lock();
+	for (int i = 0; i < EPOLL_MAX; i++) {
+		if (!epolls[i].used) {
+			epolls[i].used = 1;
+			for (int j = 0; j < EPOLL_MAX_ENTRIES; j++)
+				epolls[i].e[j].fd = -1;
+			epoll_unlock();
+			return EPOLL_FD_BASE + i;
+		}
+	}
+	epoll_unlock();
+	return -EMFILE;
+}
+
+static long sys_epoll_ctl(long epfd, long op, long fd, long event_addr)
+{
+	if (!epoll_is_fd(epfd))
+		return -EBADF;
+	if (!fd_is_valid(fd))
+		return -EBADF;
+	if (fd == epfd || epoll_is_fd(fd))
+		return -EINVAL; // nesting epoll instances isn't supported
+	// Regular files and /dev/null can't be polled on Linux either (the Go
+	// runtime relies on this EPERM to know a file needs no netpoller).
+	if (ext4_shim_is_fd(fd) || devnull_is_fd(fd))
+		return -EPERM;
+	if (op != EPOLL_CTL_DEL && !event_addr)
+		return -EFAULT;
+
+	struct epoll_inst *ep = &epolls[epfd - EPOLL_FD_BASE];
+	const struct epoll_event *ev = (const struct epoll_event *)event_addr;
+	long ret = 0;
+
+	epoll_lock();
+	struct epoll_entry *found = 0, *free_slot = 0;
+	for (int i = 0; i < EPOLL_MAX_ENTRIES; i++) {
+		if (ep->e[i].fd == fd)
+			found = &ep->e[i];
+		else if (ep->e[i].fd < 0 && !free_slot)
+			free_slot = &ep->e[i];
+	}
+
+	switch (op) {
+	case EPOLL_CTL_ADD:
+		if (found) {
+			ret = -EEXIST;
+			break;
+		}
+		if (!free_slot) {
+			ret = -ENOSPC;
+			break;
+		}
+		found = free_slot;
+		found->fd = (int)fd;
+		/* fallthrough */
+	case EPOLL_CTL_MOD:
+		if (!found) {
+			ret = -ENOENT;
+			break;
+		}
+		found->events = ev->events;
+		found->armed = ~0u;
+		found->data = ev->data;
+		break;
+	case EPOLL_CTL_DEL:
+		if (!found)
+			ret = -ENOENT;
+		else
+			found->fd = -1;
+		break;
+	default:
+		ret = -EINVAL;
+	}
+	epoll_unlock();
+	return ret;
+}
+
+// Re-arm bits of fd in every interest list -- see this section's header.
+static void epoll_rearm(long fd, int bits)
+{
+	epoll_lock();
+	for (int i = 0; i < EPOLL_MAX; i++) {
+		if (!epolls[i].used)
+			continue;
+		for (int j = 0; j < EPOLL_MAX_ENTRIES; j++)
+			if (epolls[i].e[j].fd == fd)
+				epolls[i].e[j].armed |= (unsigned int)bits;
+	}
+	epoll_unlock();
+}
+
+// fd is being closed: forget it everywhere.
+static void epoll_forget_fd(long fd)
+{
+	epoll_lock();
+	for (int i = 0; i < EPOLL_MAX; i++) {
+		if (!epolls[i].used)
+			continue;
+		for (int j = 0; j < EPOLL_MAX_ENTRIES; j++)
+			if (epolls[i].e[j].fd == fd)
+				epolls[i].e[j].fd = -1;
+	}
+	epoll_unlock();
+}
+
+static long epoll_close(long fd)
+{
+	epoll_lock();
+	epolls[fd - EPOLL_FD_BASE].used = 0;
+	epoll_unlock();
+	return 0;
+}
+
+static long eagain_rearm(long fd, long ret, int bits)
+{
+	if (ret == -EAGAIN || ret == -EINPROGRESS)
+		epoll_rearm(fd, bits);
+	return ret;
+}
+
+struct epoll_ctx {
+	struct epoll_inst *ep;
+	struct epoll_event *out;
+	int max;
+};
+
+static long epoll_scan(void *arg)
+{
+	struct epoll_ctx *c = arg;
+	int n = 0;
+
+	epoll_lock();
+	for (int i = 0; i < EPOLL_MAX_ENTRIES && n < c->max; i++) {
+		struct epoll_entry *e = &c->ep->e[i];
+		unsigned int want = e->events & ~EPOLL_FLAG_BITS;
+		if (e->fd < 0 || !want)
+			continue;
+
+		unsigned int cur = (unsigned int)fd_revents(e->fd, (int)want);
+		if (cur & POLLNVAL)
+			continue;
+		cur &= want | EPOLLERR | EPOLLHUP;
+
+		unsigned int rep = cur;
+		if (e->events & EPOLLET) {
+			e->armed |= ~cur; // not ready now: the next ready is a new edge
+			rep &= e->armed;
+			e->armed &= ~rep;
+		}
+		if (!rep)
+			continue;
+
+		c->out[n].events = rep;
+		c->out[n].data = e->data;
+		n++;
+		if (e->events & EPOLLONESHOT)
+			e->events &= EPOLL_FLAG_BITS; // disabled until EPOLL_CTL_MOD
+	}
+	epoll_unlock();
+	return n;
+}
+
+static long epoll_wait_ns(long epfd, long events_addr, long maxevents, long long timeout_ns)
+{
+	if (!epoll_is_fd(epfd))
+		return -EBADF;
+	if (maxevents <= 0)
+		return -EINVAL;
+	if (!events_addr)
+		return -EFAULT;
+
+	struct epoll_ctx c = { &epolls[epfd - EPOLL_FD_BASE], (struct epoll_event *)events_addr, (int)maxevents };
+	return poll_wait(epoll_scan, &c, timeout_ns);
+}
+
+static long sys_epoll_wait(long epfd, long events_addr, long maxevents, long timeout_ms)
+{
+	return epoll_wait_ns(epfd, events_addr, maxevents, timeout_ms < 0 ? -1 : timeout_ms * 1000000LL);
+}
+
+// The signal mask argument of epoll_pwait()/epoll_pwait2() is ignored,
+// like ppoll()'s would be: no caller here relies on it.
+static long sys_epoll_pwait2(long epfd, long events_addr, long maxevents, long timeout_addr)
+{
+	long long timeout_ns = -1;
+	if (timeout_addr) {
+		const struct timespec *ts = (const struct timespec *)timeout_addr;
+		if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L)
+			return -EINVAL;
+		timeout_ns = ts->tv_sec * 1000000000LL + ts->tv_nsec;
+	}
+	return epoll_wait_ns(epfd, events_addr, maxevents, timeout_ns);
+}
+
+// -----------------------------------------------------------------------
 // Process / thread bootstrap
 //
 // arch_prctl(ARCH_SET_FS) is normally reached during startup, but on
@@ -1307,10 +1763,10 @@ void thread_shim_terminate_process(long code)
 long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6)
 {
 	switch (n) {
-	case SYS_read:            return sys_read(a1, a2, a3);
-	case SYS_write:            return sys_write(a1, a2, a3);
-	case SYS_readv:             return sys_readv(a1, a2, a3);
-	case SYS_writev:              return sys_writev(a1, a2, a3);
+	case SYS_read:            return eagain_rearm(a1, sys_read(a1, a2, a3), POLLIN);
+	case SYS_write:            return eagain_rearm(a1, sys_write(a1, a2, a3), POLLOUT);
+	case SYS_readv:             return eagain_rearm(a1, sys_readv(a1, a2, a3), POLLIN);
+	case SYS_writev:              return eagain_rearm(a1, sys_writev(a1, a2, a3), POLLOUT);
 	case SYS_close:                return sys_close(a1);
 	case SYS_dup2:                 return a1 == a2 && a2 >= 0 && a2 <= 2 ? a2 : sys_dup3(a1, a2, 0);
 	case SYS_dup3:                 return a1 == a2 ? -EINVAL : sys_dup3(a1, a2, a3);
@@ -1357,6 +1813,7 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_brk:                             return sys_brk(a1);
 	case SYS_mmap:                             return sys_mmap(a1, a2, a3, a4, a5, a6);
 	case SYS_munmap:                            return sys_munmap(a1, a2);
+	case SYS_madvise:                           return sys_madvise(a1, a2, a3);
 	case SYS_arch_prctl:                         return sys_arch_prctl(a1, a2);
 	case SYS_set_tid_address:                     return sys_set_tid_address(a1);
 	// A bare SYS_exit (as opposed to SYS_exit_group -- see sys_exit()'s
@@ -1383,15 +1840,15 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_socket:      return sys_socket(a1, a2, a3);
 	case SYS_bind:         return sys_bind(a1, a2, a3);
 	case SYS_listen:        return sys_listen(a1, a2);
-	case SYS_accept:         return sys_accept4(a1, a2, a3, 0);
-	case SYS_accept4:         return sys_accept4(a1, a2, a3, a4);
-	case SYS_connect:          return sys_connect(a1, a2, a3);
+	case SYS_accept:         return eagain_rearm(a1, sys_accept4(a1, a2, a3, 0), POLLIN);
+	case SYS_accept4:         return eagain_rearm(a1, sys_accept4(a1, a2, a3, a4), POLLIN);
+	case SYS_connect:          return eagain_rearm(a1, sys_connect(a1, a2, a3), POLLOUT);
 	case SYS_getsockname:       return sys_getsockname(a1, a2, a3);
 	case SYS_getpeername:        return sys_getpeername(a1, a2, a3);
-	case SYS_sendto:            return sys_sendto(a1, a2, a3, a4, a5, a6);
-	case SYS_recvfrom:           return sys_recvfrom(a1, a2, a3, a4, a5, a6);
-	case SYS_sendmsg:             return sys_sendmsg(a1, a2, a3);
-	case SYS_recvmsg:              return sys_recvmsg(a1, a2, a3);
+	case SYS_sendto:            return eagain_rearm(a1, sys_sendto(a1, a2, a3, a4, a5, a6), POLLOUT);
+	case SYS_recvfrom:           return eagain_rearm(a1, sys_recvfrom(a1, a2, a3, a4, a5, a6), POLLIN);
+	case SYS_sendmsg:             return eagain_rearm(a1, sys_sendmsg(a1, a2, a3), POLLOUT);
+	case SYS_recvmsg:              return eagain_rearm(a1, sys_recvmsg(a1, a2, a3), POLLIN);
 
 	// x86-64 musl's select()/poll() library functions issue these two
 	// syscalls directly (SYS_select/SYS_poll both exist on x86-64,
@@ -1399,6 +1856,17 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	// pselect6/ppoll) -- see the "select()/poll()" section above.
 	case SYS_select:      return sys_select(a1, a2, a3, a4, a5);
 	case SYS_poll:         return sys_poll(a1, a2, a3);
+
+	// epoll and eventfd -- see their sections above. Read/write/accept/
+	// connect results are passed through eagain_rearm() for EPOLLET.
+	case SYS_epoll_create:  return a1 <= 0 ? -EINVAL : sys_epoll_create1(0);
+	case SYS_epoll_create1: return sys_epoll_create1(a1);
+	case SYS_epoll_ctl:     return sys_epoll_ctl(a1, a2, a3, a4);
+	case SYS_epoll_wait:    return sys_epoll_wait(a1, a2, a3, a4);
+	case SYS_epoll_pwait:   return sys_epoll_wait(a1, a2, a3, a4);
+	case SYS_epoll_pwait2:  return sys_epoll_pwait2(a1, a2, a3, a4);
+	case SYS_eventfd:       return sys_eventfd2(a1, 0);
+	case SYS_eventfd2:      return sys_eventfd2(a1, a2);
 
 	// SO_RCVTIMEO/SO_SNDTIMEO are honored (see net_shim.c); every
 	// other option is still accept-and-ignore -- see sys_setsockopt()/
@@ -1451,7 +1919,46 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_set_robust_list:
 		return 0;
 
+	// Small process-model queries the Go runtime (GO.md) makes at
+	// startup and on every new thread.
+	case SYS_gettid:            return thread_shim_current_tid();
+	case SYS_getpid:            return 1; // one process, ever
+	// One CPU: CPU 0 in a mask of whatever size the caller passed.
+	case SYS_sched_getaffinity:
+		if (a2 < 8)
+			return -EINVAL;
+		memset((void *)a3, 0, (size_t)a2);
+		*(unsigned char *)a3 = 1;
+		return 8;
+	// No page protection to change (see the heap section above).
+	case SYS_mprotect:          return 0;
+	// No resource limits: report everything as unlimited, accept and
+	// ignore new ones.
+	case SYS_prlimit64:
+		if (a4) {
+			((struct rlimit *)a4)->rlim_cur = RLIM_INFINITY;
+			((struct rlimit *)a4)->rlim_max = RLIM_INFINITY;
+		}
+		return 0;
+	case SYS_getrlimit:
+		((struct rlimit *)a2)->rlim_cur = RLIM_INFINITY;
+		((struct rlimit *)a2)->rlim_max = RLIM_INFINITY;
+		return 0;
+	case SYS_setrlimit:         return 0;
+	// PR_SET_VMA (naming anonymous mappings) and friends: nothing to do.
+	case SYS_prctl:             return -EINVAL;
+
 	default:
+#ifdef BMOS_TRACE_ENOSYS
+		{
+			char m[48] = "posix_shim: ENOSYS syscall ";
+			int l = 27; long v = n; char d[8]; int k = 0;
+			do { d[k++] = (char)('0' + v % 10); v /= 10; } while (v);
+			while (k) m[l++] = d[--k];
+			m[l++] = '\n';
+			b_output(m, (u64)l);
+		}
+#endif
 		return -ENOSYS;
 	}
 }

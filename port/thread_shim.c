@@ -76,7 +76,11 @@
 #include <signal.h>
 #include <ucontext.h>
 
+#include <sys/mman.h>
+#include <sys/syscall.h>
+
 #include "libBareMetal.h"
+#include "posix_shim.h"
 #include "thread_shim.h"
 
 #define THREAD_SHIM_MAX_THREADS	32
@@ -99,6 +103,7 @@ enum wake_reason {
 struct bmos_thread {
 	unsigned long rsp;		// saved stack pointer -- meaningless while RUNNING
 	unsigned long tls;		// FS base to install while this thread runs
+	unsigned long sysstack_top;	// raw-syscall stack, see bmos_syscall_stack_top
 	int tid;
 	enum thread_state state;
 	int (*entry)(void *);		// musl's start()/start_c11() (see pthread_create.c)
@@ -136,6 +141,20 @@ struct bmos_thread {
 };
 
 static struct bmos_thread g_main_thread;
+
+// Raw-syscall stacks. crt0.c's __bmos_syscall_tramp (the ring-3 end of the
+// kernel's `syscall` instruction handler) runs __bmos_syscall() on the
+// running thread's own syscall stack rather than wherever the `syscall`
+// happened: a Linux syscall uses no user stack at all, and the Go runtime
+// makes them on goroutine stacks with only a few hundred bytes guaranteed
+// free, far less than this port's C syscall paths (lwIP, lwext4) need.
+// bmos_syscall_stack_top always holds the running thread's stack top (the
+// trampoline reads it directly), so it's updated at every switch.
+// Each thread slot gets its stack once, the first time it's used, and
+// keeps it when the slot is recycled.
+#define THREAD_SHIM_SYSCALL_STACK_SIZE (64 * 1024)	// also in crt0.c's __bmos_syscall_tramp
+static unsigned char g_main_syscall_stack[THREAD_SHIM_SYSCALL_STACK_SIZE] __attribute__((aligned(16)));
+unsigned long bmos_syscall_stack_top = (unsigned long)(g_main_syscall_stack + THREAD_SHIM_SYSCALL_STACK_SIZE);
 static struct bmos_thread g_threads[THREAD_SHIM_MAX_THREADS];
 static struct bmos_thread *g_current;
 static struct bmos_thread *g_ready_head, *g_ready_tail;
@@ -364,6 +383,7 @@ static void reschedule(int requeue)
 		if (next) {
 			next->state = T_RUNNING;
 			g_current = next;
+			bmos_syscall_stack_top = next->sysstack_top;
 			set_fsbase(next->tls);
 			fxsave_state(self->fxarea);
 			fxrstor_state(next->fxarea);
@@ -632,6 +652,7 @@ static void thread_shim_init(void)
 	g_main_thread.tid = 1;
 	g_main_thread.state = T_RUNNING;
 	g_main_thread.tls = get_fsbase();
+	g_main_thread.sysstack_top = (unsigned long)(g_main_syscall_stack + THREAD_SHIM_SYSCALL_STACK_SIZE);
 	g_current = &g_main_thread;
 	g_active = 1;
 
@@ -675,6 +696,14 @@ long thread_shim_clone(long flags, long child_stack, long ptid, long ctid, long 
 	struct bmos_thread *t = alloc_thread_slot();
 	if (!t)
 		return -EAGAIN;
+
+	if (!t->sysstack_top) {
+		long p = __bmos_syscall(SYS_mmap, 0, THREAD_SHIM_SYSCALL_STACK_SIZE, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if ((unsigned long)p >= -4095UL) // an errno -- heap addresses are "negative" here (0xFFFF8...)
+			return -EAGAIN;
+		t->sysstack_top = (unsigned long)p + THREAD_SHIM_SYSCALL_STACK_SIZE;
+	}
 
 	t->tid = g_next_tid++;
 	t->tls = (unsigned long)tls;
@@ -795,6 +824,7 @@ void thread_shim_exit_current(void)
 
 	next->state = T_RUNNING;
 	g_current = next;
+	bmos_syscall_stack_top = next->sysstack_top;
 	set_fsbase(next->tls);
 	fxrstor_state(next->fxarea); // see reschedule()'s comment on struct bmos_thread's fxarea
 	self->state = T_FREE; // recycle -- nothing of ours references this slot again

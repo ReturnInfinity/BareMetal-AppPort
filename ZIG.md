@@ -73,21 +73,27 @@ existing `int 0x80` gate (`int_syscall`) every `b_*` call already uses:
   posture `int 0x80`'s interrupt-gate semantics already give it for
   free).
 - `src/BareMetal/interrupt.asm`'s `int_syscall_fast` is the entry stub
-  itself (see its own, extensive header comment for the full blow-by-blow).
-  In short: swap to the fixed kernel stack (SYSCALL doesn't consult the
-  TSS RSP0 the way an interrupt/exception gate does, so this is done by
-  hand), save every register the real Linux ABI promises survives a
-  syscall, marshal into `__bmos_syscall(n, a1..a6)`'s plain SysV C call
-  ABI and call it directly (ring 0 can call the app's own ring-3-mapped
-  `__bmos_syscall()` -- reused instead of reimplementing a second syscall
-  dispatcher in assembly), restore every saved register, and return via
-  `iretq` -- not `sysret`. The app publishes its own `__bmos_syscall`
-  address into a fixed low-memory slot (`app_bmos_syscall_ptr`,
-  `sysvar.asm`) once, at `_start` time (see `crt0.c`'s own comment there),
-  since every app is compiled/linked independently and the kernel has no
-  other way to find it.
+  itself. It no longer services the syscall in ring 0: it stores the
+  return RIP just below the caller's 128-byte red zone and `iretq`s
+  straight back to ring 3, into `__bmos_syscall_tramp` (`crt0.c`), which
+  saves every register (and the SSE state) the real Linux ABI promises
+  survives a syscall, calls `__bmos_syscall(n, a1..a6)` on the calling
+  thread's own stack, restores everything and `ret 128`s back past the
+  red zone. The app publishes the trampoline's address into a fixed
+  low-memory slot (`app_bmos_syscall_ptr`, `sysvar.asm`) once, at
+  `_start` time, since every app is compiled/linked independently and
+  the kernel has no other way to find it.
+- The first version (described below, kept for the record) called
+  `__bmos_syscall()` from ring 0 on the single fixed kernel stack with
+  interrupts masked. That was fine for short calls but broke as soon as
+  a raw syscall blocked -- a futex wait or `nanosleep()` lets
+  `thread_shim.c` switch threads mid-call, and the next thread's raw
+  syscall reused the same kernel stack. The Go port (`GO.md`) hit this
+  immediately (`#GP` at `int_syscall_end`'s `iretq`); the ring-3 bounce
+  makes a raw syscall behave exactly like a libc one.
 
-**Two real bugs found and fixed while getting this working, both worth
+**Two real bugs found and fixed while getting the first (ring-0)
+version working, both worth
 knowing if this code is ever touched again:**
 
 1. **Stack alignment.** SysV requires `RSP % 16 == 0` immediately before

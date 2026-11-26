@@ -18,8 +18,10 @@ one.
   minimal fake initial stack for musl's startup path with `argc=0` and
   an empty `envp`. Programs that read `argv`/`getenv()` will always see
   nothing, regardless of how the app was invoked.
-- **`getpid`/`getppid`/`sysinfo`/`times` are unimplemented.** Anything
-  that queries "what process am I" will get `-ENOSYS`. `uname` *is*
+- **`getppid`/`sysinfo`/`times` are unimplemented.** Anything
+  that queries them will get `-ENOSYS`. `getpid` returns 1 and `gettid`
+  the calling thread's real tid (the Go runtime asks for both, see
+  `GO.md`). `uname` *is*
   implemented (`posix_shim.c`), returning fixed, honest placeholder
   values (`sysname` "BareMetal", `machine` "x86_64", etc.) — unlike
   `getpid`/`getuid`, a hostname/machine type is real, expected input to
@@ -95,16 +97,18 @@ one.
 ## Missing common syscalls
 
 Not implemented (all fall through to `-ENOSYS`):
-- `epoll_*`/`ppoll`/`pselect6` — only `poll()` and `select()` exist.
-  Those two are a real readiness wait (`posix_shim.c`): each pass
+- `ppoll`/`pselect6`. `poll()`, `select()` and `epoll` (`epoll_create1`/
+  `epoll_ctl`/`epoll_wait`/`epoll_pwait`/`epoll_pwait2`, with `EPOLLET`
+  and `EPOLLONESHOT` emulated -- see `posix_shim.c`'s epoll section;
+  added for the Go port, `GO.md`) all exist, as does `eventfd`. They are
+  a real readiness wait (`posix_shim.c`): each pass
   runs one `net_poll()` and checks every fd (sockets via
   `net_shim_poll()`: data/EOF/a pending connection, send-buffer room,
   a finished or failed `connect()`; EXT2 files always ready; fd 0 only
   once a console byte is actually waiting), sleeping 1ms between
   passes until something is ready, the timeout runs out, or a signal
   arrives (`-EINTR`). Enough for an event-loop server driven by
-  `poll()`/`select()` (see `poll_test.c`); a program that only knows
-  how to use epoll needs it added.
+  `poll()`/`select()` (see `poll_test.c`).
 - `pipe`/`pipe2`/`dup`/`socketpair` — no in-process fd duplication,
   pipes, or `AF_UNIX` socket pairs between fds. The one exception:
   `dup2()`/`dup3()` onto fd 0-2, from `/dev/null` or another std fd
@@ -120,6 +124,15 @@ Not implemented (all fall through to `-ENOSYS`):
   `ext4_shim.c`.)
 
 ## Heap (`posix_shim.c`)
+
+- **No demand paging: every mapping is real memory.** `PROT_NONE`
+  reservations aren't zeroed up front, `MAP_FIXED` is honored only over
+  a range the arena already handed out (it re-zeroes it in place -- how
+  the Go runtime commits reserved address space), and
+  `madvise(MADV_DONTNEED)` zeroes the range rather than freeing it. A
+  program that reserves far more address space than it uses (Go does,
+  by default -- see `GO.md` for how its reservations are shrunk) needs
+  that much RAM, though untouched memory costs the host nothing.
 
 - **`munmap()`'d memory can't be handed back to the OS, only reused by
   later `mmap()` calls.** `sys_munmap()` (`posix_shim.c`) keeps freed
@@ -587,6 +600,21 @@ account of why this works and everything it took.
   `examples/zig/hello/hello.zig`).
 - **Locale is always "C"/POSIX**, same posture as every other language
   here.
+
+## Go (`port/go_port/`)
+
+See `GO.md` for the full account.
+
+- **Networking (`net`, `net/http`) is untested.** The `epoll`/`eventfd`
+  support it runs on is in place.
+- **An idle Go app polls every 1 ms** rather than sleeping until an
+  interrupt, because it always has several threads (see
+  `thread_shim_io_wait_until()`).
+- **Async preemption is off** (`port/go_port/bm_runtime.go`). Signal
+  handlers here run without a real signal frame.
+- **The runtime is patched at build time** (`heapAddrBits`, via
+  `go build -overlay`); `build-go-app.sh` stops with an error if a new
+  Go version changes the line it patches.
 
 ## General
 
