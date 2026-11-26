@@ -18,10 +18,11 @@ one.
   minimal fake initial stack for musl's startup path with `argc=0` and
   an empty `envp`. Programs that read `argv`/`getenv()` will always see
   nothing, regardless of how the app was invoked.
-- **`getppid`/`sysinfo`/`times` are unimplemented.** Anything
+- **`getppid`/`times` are unimplemented.** Anything
   that queries them will get `-ENOSYS`. `getpid` returns 1 and `gettid`
   the calling thread's real tid (the Go runtime asks for both, see
-  `GO.md`). `uname` *is*
+  `GO.md`); `sysinfo` reports uptime and the app's RAM window, nothing
+  else. `uname` *is*
   implemented (`posix_shim.c`), returning fixed, honest placeholder
   values (`sysname` "BareMetal", `machine` "x86_64", etc.) — unlike
   `getpid`/`getuid`, a hostname/machine type is real, expected input to
@@ -122,6 +123,8 @@ Not implemented (all fall through to `-ENOSYS`):
   an I/O interrupt, until something is ready, the timeout runs out, or a
   signal arrives (`-EINTR`). Enough for an event-loop server driven by
   `poll()`/`select()` (see `poll_test.c`).
+- `sendmmsg`/`recvmmsg` are one `sendmsg`/`recvmsg` per message; only
+  the first receive of a batch may block.
 - `pipe`/`pipe2`/`dup`/`socketpair` — no in-process fd duplication,
   pipes, or `AF_UNIX` socket pairs between fds. The one exception:
   `dup2()`/`dup3()` onto fd 0-2, from `/dev/null` or another std fd
@@ -129,23 +132,30 @@ Not implemented (all fall through to `-ENOSYS`):
   terminal" startup sequence needs (lighttpd won't start without it).
   `open("/dev/null")` works too (reads return EOF, writes are
   discarded); no other `/dev` node exists.
-- `chmod`/`chown`/`umask` — no concept of permissions or ownership on
-  this port, even though lwext4 itself supports a mode/owner per inode
-  (see `ext4_mode_set()`/`ext4_owner_set()` in lwext4's `ext4.h`) —
-  see the EXT2 section below on why that's a bigger gap than a missing
-  syscall. (`getcwd`/`chdir`/`mkdir`/`rmdir` *are* wired up now, via
-  `ext4_shim.c`.)
+- Permissions and ownership: `chmod`/`fchmod`/`fchmodat` store the mode
+  bits in the inode (lwext4's `ext4_mode_set()`), but nothing enforces
+  them; the `chown` family and `umask` succeed without doing anything
+  (there are no users or groups) -- see the EXT2 section below.
+  (`getcwd`/`chdir`/`mkdir`/`rmdir` *are* wired up, via `ext4_shim.c`.)
+  `fsync`/`fdatasync`/`sync` succeed straight away: lwext4's block cache
+  is write-through here, so writes are already on the disk.
 
 ## Heap (`posix_shim.c`)
 
-- **No demand paging: every mapping is real memory.** `PROT_NONE`
-  reservations aren't zeroed up front, `MAP_FIXED` is honored only over
-  a range the arena already handed out (it re-zeroes it in place -- how
-  the Go runtime commits reserved address space), and
-  `madvise(MADV_DONTNEED)` zeroes the range rather than freeing it. A
-  program that reserves far more address space than it uses (Go does,
-  by default -- see `GO.md` for how its reservations are shrunk) needs
-  that much RAM, though untouched memory costs the host nothing.
+- **No demand paging, but reservations are lazy.** A `PROT_NONE`
+  mapping only takes address space (`heap_reserve()`), and may run past
+  the end of the RAM window. Making part of it usable -- `MAP_FIXED`
+  over it (how the Go runtime commits memory; re-zeroed in place) or
+  `mprotect()` (how musl makes a thread stack usable after its guard
+  page) -- hot-plugs the window up past that range first
+  (`heap_commit()`). `MAP_FIXED` is only honored inside the arena.
+  `madvise(MADV_DONTNEED)` zeroes the range rather than freeing it.
+  Reservations of 64 MiB or more start on a 64 MiB boundary (Go's heap
+  arena size), so Go doesn't trim them. Because the window only grows
+  at its top, a real allocation made after a big reservation also has
+  to grow it past that reservation. The out-of-memory message reports
+  how much of the arena is handed out, how much of that is free again,
+  and where the window ends.
 
 - **`munmap()`'d memory can't be handed back to the OS, only reused by
   later `mmap()` calls.** `sys_munmap()` (`posix_shim.c`) keeps freed
@@ -175,14 +185,14 @@ Not implemented (all fall through to `-ENOSYS`):
 
 ## EXT2 file I/O (`ext4_shim.c`, `lwext4_port/`)
 
-- **No `access()`/`chmod()`/permission enforcement.** `open()`'s `mode`
+- **No `access()`/permission enforcement.** `open()`'s `mode`
   argument is ignored entirely; whatever mode bits are already on an
   inode (or lwext4's own default for newly-created files) are reported
-  as-is, but nothing checks them against anything. `chmod()` itself
-  could be wired up via lwext4's `ext4_mode_set()`, but real
-  enforcement needs a uid/gid model this port has none of anywhere
-  (matches the "no process model" cuts above) — not just a missing
-  syscall.
+  as-is, and `chmod()` (`ext4_shim_chmod()`) changes them, but nothing
+  checks them against anything. Real enforcement needs a uid/gid model
+  this port has none of anywhere (matches the "no process model" cuts
+  above). `O_CREAT|O_EXCL` does fail with `EEXIST` when the path
+  exists, as lock files need.
 - **`rename()` replaces an existing target non-atomically.**
   lwext4's `ext4_frename()` refuses an existing destination, so
   `ext4_shim_rename()` removes it first (same file-vs-directory rules
@@ -628,6 +638,25 @@ See `GO.md` for the full account.
   plus small added files in `runtime` and `crypto/x509`, via
   `go build -overlay`); `build-go-app.sh` stops with an error if a new
   Go version changes the line it patches.
+
+## Caddy (`port/caddy_port/`)
+
+See `CADDY.md` for the full account.
+
+- **Needs at least 60 MiB of boot memory, and an even `MEMSIZE`**
+  (Firecracker; QEMU, with no hot-plug, needs its default 256 MiB). The
+  app image alone is about 57 MiB. An odd boot size page-faults once
+  the heap grows into hot-plugged memory -- that's a pre-existing
+  hot-plug bug, reproducible with `examples/c/memgrow` at `MEMSIZE=7`
+  on `main`, not something specific to Caddy.
+- **Automatic HTTPS with a public certificate is untested**: it needs a
+  real domain pointing at a reachable VM. The pieces it uses are tested:
+  outbound HTTPS and DNS (`GO.md`), certificate storage on the EXT2 disk,
+  and `tls internal`.
+- **About 12 connections at once.** The network stack has 16 sockets
+  (`net_shim.c`), and Caddy's listeners take some of them.
+- **No `os/exec`-based modules or anything needing a real process
+  model** (no `fork`), and no IPv6.
 
 ## General
 

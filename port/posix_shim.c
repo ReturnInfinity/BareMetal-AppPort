@@ -26,6 +26,7 @@
 #include <time.h>
 #include <sys/utsname.h>
 #include <sys/resource.h>
+#include <sys/sysinfo.h>
 
 #include "libBareMetal.h"
 #include "posix_shim.h"
@@ -158,32 +159,47 @@ static long sys_brk(long addr)
 // Reports how far a failed allocation overshot the remaining arena, so
 // an OOM in the field says how many more bytes were needed instead of
 // just that it happened.
-static void report_oom(u64 short_by)
+static struct free_block *free_list;
+static size_t free_list_total(void);
+
+static size_t append_str(char *buf, size_t len, const char *str)
 {
-	char buf[80];
-	size_t len = 0;
+	while (*str)
+		buf[len++] = *str++;
+	return len;
+}
 
-	static const char pre[] = "posix_shim: out of memory (short by ";
-	memcpy(buf, pre, sizeof(pre) - 1);
-	len += sizeof(pre) - 1;
-
+static size_t append_mib(char *buf, size_t len, u64 bytes)
+{
 	char digits[20];
 	int n = 0;
-	u64 v = short_by;
-	if (v == 0) {
-		digits[n++] = '0';
-	} else {
-		while (v) {
-			digits[n++] = (char)('0' + (v % 10));
-			v /= 10;
-		}
-	}
+	u64 v = bytes / (1024 * 1024);
+	do {
+		digits[n++] = (char)('0' + (v % 10));
+		v /= 10;
+	} while (v);
 	while (n > 0)
 		buf[len++] = digits[--n];
+	return append_str(buf, len, " MiB");
+}
 
-	static const char post[] = " bytes)\n";
-	memcpy(buf + len, post, sizeof(post) - 1);
-	len += sizeof(post) - 1;
+// Reports how far a failed allocation overshot the remaining arena, plus
+// the arena's shape (how much is handed out, how much of that is free
+// again, where the window ends), so an OOM in the field says why.
+static void report_oom(u64 short_by)
+{
+	char buf[200];
+	size_t len = 0;
+
+	len = append_str(buf, len, "posix_shim: out of memory (short by ");
+	len = append_mib(buf, len, short_by + 1024 * 1024 - 1);
+	len = append_str(buf, len, "; arena ");
+	len = append_mib(buf, len, (u64)heap_cur - (u64)__image_base);
+	len = append_str(buf, len, " handed out, ");
+	len = append_mib(buf, len, free_list_total());
+	len = append_str(buf, len, " of it free, window ");
+	len = append_mib(buf, len, (u64)heap_end - (u64)__image_base);
+	len = append_str(buf, len, ")\n");
 
 	b_output(buf, len);
 }
@@ -263,6 +279,14 @@ struct free_block {
 };
 
 static struct free_block *free_list = 0;
+
+static size_t free_list_total(void)
+{
+	size_t total = 0;
+	for (struct free_block *b = free_list; b; b = b->next)
+		total += b->size;
+	return total;
+}
 
 static void free_list_insert(void *addr, size_t size)
 {
@@ -349,12 +373,64 @@ static void *free_list_alloc(size_t n)
 	return 0;
 }
 
-// Is [p, p+n) entirely inside memory this arena has already handed
-// out (the image itself or anything below heap_cur)?
+// Is [p, p+n) entirely inside what this arena has already handed out
+// (the image itself or anything below heap_cur)? Some of it may only be
+// reserved address space past heap_end -- see heap_reserve().
 static int heap_owns(u64 p, u64 n)
 {
 	heap_init();
-	return p >= (u64)__image_base && n <= (u64)heap_cur - p;
+	return p >= (u64)__image_base && p <= (u64)heap_cur && n <= (u64)heap_cur - p;
+}
+
+// PROT_NONE reservations: address space only. heap_cur moves on but no
+// memory has to exist behind it yet -- it may run past heap_end, the top
+// of the RAM window, and nothing touches it until heap_commit() has made
+// it real. The Go runtime (see GO.md) reserves 128 MiB for every 64 MiB
+// heap arena and commits it a few MiB at a time, so backing reservations
+// eagerly ran a small VM out of memory with most of it unused.
+//
+// Reservations of 64 MiB or more start on a 64 MiB boundary. That's the Go
+// runtime's heap arena size: it asks for 128 MiB to carve one aligned
+// 64 MiB arena out of, and gives the unaligned ends back. Handed an
+// aligned address, it keeps all 128 MiB as two arenas instead. Trimming
+// left the ends on the free list in pieces too small for the next
+// 128 MiB request, which then had to go past the end of a fixed-size
+// window (QEMU has no hot-plug): out of memory with 126 MiB free.
+#define HEAP_RESERVE_ALIGN (64ULL * 1024 * 1024)
+
+static void free_list_insert(void *addr, size_t size);
+static size_t heap_backed_len(u64 p, u64 n);
+
+static void *heap_reserve(size_t n)
+{
+	heap_init();
+	u64 start = ((u64)heap_cur + 4095) & ~(u64)4095;
+	u64 p = start;
+	if (n >= HEAP_RESERVE_ALIGN) {
+		p = (start + HEAP_RESERVE_ALIGN - 1) & ~(HEAP_RESERVE_ALIGN - 1);
+		size_t gap = heap_backed_len(start, p - start); // the skipped part that is real memory
+		if (gap)
+			free_list_insert((void *)start, gap);
+	}
+	heap_cur = (char *)(p + n);
+	return (void *)p;
+}
+
+// Make [p, p+n) real memory: hot-plug the window up past it if needed.
+static int heap_commit(u64 p, u64 n)
+{
+	while (p + n > (u64)heap_end)
+		if (!heap_grow(p + n - (u64)heap_end))
+			return 0;
+	return 1;
+}
+
+// How much of [p, p+n) is real memory (below heap_end).
+static size_t heap_backed_len(u64 p, u64 n)
+{
+	if (p >= (u64)heap_end)
+		return 0;
+	return (size_t)(p + n <= (u64)heap_end ? n : (u64)heap_end - p);
 }
 
 static long sys_mmap(long addr, long len, long prot, long flags, long fd, long off)
@@ -369,27 +445,36 @@ static long sys_mmap(long addr, long len, long prot, long flags, long fd, long o
 	// MAP_FIXED over a range we already handed out. The Go runtime
 	// (see GO.md) reserves address space with PROT_NONE first and
 	// later "commits" pieces of it with MAP_FIXED at the exact same
-	// address, and Linux gives back fresh zero pages there. Every
-	// reservation here is already real memory, so committing is just
-	// re-zeroing in place. Anywhere else can't be honored.
+	// address, and Linux gives back fresh zero pages there: make sure
+	// the memory exists (heap_commit()), then zero it in place. A
+	// PROT_NONE MAP_FIXED just turns a range back into a reservation.
+	// Anywhere else can't be honored.
 	if (flags & MAP_FIXED) {
 		if ((addr & 4095) || !heap_owns((u64)addr, n))
 			return -ENOMEM;
 		free_list_remove_range((char *)addr, n); // if it had been munmap()'d
-		if (prot != PROT_NONE)
+		if (prot != PROT_NONE) {
+			if (!heap_commit((u64)addr, n)) {
+				report_oom((u64)addr + n - (u64)heap_end);
+				return -ENOMEM;
+			}
 			memset((void *)addr, 0, n);
+		}
 		return addr;
 	}
 
-	// A PROT_NONE mapping is a reservation: nothing may touch it until
-	// a MAP_FIXED commit (above) zeroes it, so skip zeroing it here.
-	// Go reserves -- and on a hint miss immediately unmaps again --
-	// tens of MiB at a time, so this saves a lot of memset()ing.
+	// A PROT_NONE mapping is a reservation (heap_reserve()): nothing
+	// may touch it until a MAP_FIXED commit (above) makes it real.
+	// A free-list block is real memory that held something before, so
+	// it's zeroed now: it may become accessible through mprotect(),
+	// which (unlike a MAP_FIXED commit) keeps the contents.
 	if (prot == PROT_NONE) {
 		void *r = free_list_alloc(n);
-		if (!r)
-			r = heap_alloc(n);
-		return r ? (long)r : -ENOMEM;
+		if (r)
+			memset(r, 0, n);
+		else
+			r = heap_reserve(n);
+		return (long)r;
 	}
 
 	// Anonymous mmap() is contractually zero-filled, and musl relies
@@ -409,6 +494,26 @@ static long sys_mmap(long addr, long len, long prot, long flags, long fd, long o
 	return (long)p;
 }
 
+// sysinfo(): uptime and the app's RAM window (see heap_init()); the
+// rest (load, swap) is zero. Only the kernel's 112-byte struct is
+// written: musl's struct sysinfo adds 256 reserved bytes at the end that
+// a caller using the real kernel layout (the Go runtime and libraries --
+// Caddy calls this at startup) doesn't have room for.
+#define KERNEL_SYSINFO_SIZE 112
+_Static_assert(__builtin_offsetof(struct sysinfo, mem_unit) + sizeof(unsigned) <= KERNEL_SYSINFO_SIZE,
+	"struct sysinfo's kernel part doesn't fit KERNEL_SYSINFO_SIZE");
+static long sys_sysinfo(struct sysinfo *si)
+{
+	heap_init();
+	memset(si, 0, KERNEL_SYSINFO_SIZE);
+	si->uptime = (long)(b_system(TIMECOUNTER, 0, 0) / 1000000000ULL);
+	si->totalram = (unsigned long)(heap_end - __image_base);
+	si->freeram = heap_cur < heap_end ? (unsigned long)(heap_end - heap_cur) : 0;
+	si->procs = 1;
+	si->mem_unit = 1;
+	return 0;
+}
+
 // madvise(): MADV_DONTNEED on private anonymous memory means "the next
 // read sees zeroes" on Linux, and the Go runtime relies on exactly that
 // when it hands scavenged pages back out. With no real paging the
@@ -420,7 +525,7 @@ static long sys_madvise(long addr, long len, long advice)
 		return -EINVAL;
 	size_t n = ((size_t)len + 4095) & ~(size_t)4095;
 	if (advice == MADV_DONTNEED && n && heap_owns((u64)addr, n))
-		memset((void *)addr, 0, n);
+		memset((void *)addr, 0, heap_backed_len((u64)addr, n)); // the rest was never real
 	return 0;
 }
 
@@ -430,7 +535,40 @@ static long sys_munmap(long addr, long len)
 		return 0;
 
 	size_t n = ((size_t)len + 4095) & ~(size_t)4095;
-	free_list_insert((void *)addr, n);
+	heap_init();
+
+	// The free list keeps its headers inside the freed memory, so only
+	// the part that is real memory (below heap_end) can go on it; it's
+	// re-zeroed when reused. The rest is only address space: if it's
+	// the top of the arena (Go trims the unaligned tail of every arena
+	// reservation), heap_cur is pulled back over it, otherwise it's
+	// dropped. heap_cur never moves back over real memory -- bump
+	// allocations rely on everything above it never having been
+	// written.
+	size_t backed = heap_backed_len((u64)addr, n);
+	if (backed)
+		free_list_insert((void *)addr, backed);
+	if ((char *)addr + n == heap_cur && backed < n)
+		heap_cur = (char *)addr + backed;
+	return 0;
+}
+
+// mprotect(): no page protection here, but making a reservation
+// accessible has to make it real memory -- musl's pthread_create() maps
+// each thread stack PROT_NONE (for its guard page) and then mprotect()s
+// the rest read/write. Contents are kept, as mprotect() requires;
+// reserved memory has never been written, so it reads as zero.
+static long sys_mprotect(long addr, long len, long prot)
+{
+	if ((addr & 4095) || len < 0)
+		return -EINVAL;
+	size_t n = ((size_t)len + 4095) & ~(size_t)4095;
+	if (prot != PROT_NONE && n && heap_owns((u64)addr, n)) {
+		if (!heap_commit((u64)addr, n)) {
+			report_oom((u64)addr + n - (u64)heap_end);
+			return -ENOMEM;
+		}
+	}
 	return 0;
 }
 
@@ -1101,6 +1239,50 @@ static long sys_recvmsg(long fd, long msg, long flags)
 	if (((const struct msghdr *)msg)->msg_iovlen > SHIM_MAX_IOV)
 		return -EMSGSIZE;
 	return net_shim_recvmsg(fd, (struct msghdr *)msg, flags);
+}
+
+// sendmmsg()/recvmmsg(): one sendmsg()/recvmsg() per entry. Only the
+// first receive may block (later ones add MSG_DONTWAIT, so a batch ends
+// as soon as nothing more is queued), and an error after at least one
+// message just ends the batch, as on Linux. The Go QUIC stack behind
+// Caddy's HTTP/3 batches its UDP I/O this way.
+// The kernel's struct mmsghdr (musl only declares it under _GNU_SOURCE).
+struct bm_mmsghdr {
+	struct msghdr msg_hdr;
+	unsigned int msg_len;
+};
+#ifndef MSG_WAITFORONE
+#define MSG_WAITFORONE 0x10000
+#endif
+
+static long sys_sendmmsg(long fd, long vec, long vlen, long flags)
+{
+	struct bm_mmsghdr *m = (struct bm_mmsghdr *)vec;
+	long n;
+	for (n = 0; n < vlen; n++) {
+		long r = sys_sendmsg(fd, (long)&m[n].msg_hdr, flags);
+		if (r < 0)
+			return n ? n : r;
+		m[n].msg_len = (unsigned)r;
+	}
+	return n;
+}
+
+static long sys_recvmmsg(long fd, long vec, long vlen, long flags, long timeout)
+{
+	(void)timeout; // only bounds the wait for later messages, which never wait here
+	struct bm_mmsghdr *m = (struct bm_mmsghdr *)vec;
+	long n;
+	for (n = 0; n < vlen; n++) {
+		long f = flags & ~MSG_WAITFORONE;
+		if (n > 0)
+			f |= MSG_DONTWAIT;
+		long r = sys_recvmsg(fd, (long)&m[n].msg_hdr, f);
+		if (r < 0)
+			return n ? n : r;
+		m[n].msg_len = (unsigned)r;
+	}
+	return n;
 }
 
 // SO_RCVTIMEO/SO_SNDTIMEO are wired through to net_shim.c (they bound
@@ -1797,6 +1979,29 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 		return sys_getdents(a1, (void *)a2, a3);
 	case SYS_symlink:                                        return sys_symlink((const char *)a1, AT_FDCWD, (const char *)a2);
 	case SYS_readlink:                                         return sys_readlink(AT_FDCWD, (const char *)a1, (char *)a2, (size_t)a3);
+	case SYS_readlinkat:                                       return sys_readlink(a1, (const char *)a2, (char *)a3, (size_t)a4);
+	// lwext4 runs with its block cache in write-through mode here (no
+	// ext4_cache_write_back() anywhere), so every write() is already on
+	// the disk by the time it returns: there's nothing left to flush.
+	case SYS_fsync:
+	case SYS_fdatasync:
+		return fd_is_valid(a1) ? 0 : -EBADF;
+	case SYS_sync:                                             return 0;
+	// Modes are stored (ext4_shim.c), not enforced. There are no users
+	// or groups, so changing an owner always "succeeds".
+	case SYS_chmod:                return ext4_shim_chmod(AT_FDCWD, (const char *)a1, a2);
+	case SYS_fchmodat:             return ext4_shim_chmod(a1, (const char *)a2, a3);
+	case SYS_fchmod:
+		if (ext4_shim_is_fd(a1))
+			return ext4_shim_fchmod(a1, a2);
+		return fd_is_valid(a1) ? 0 : -EBADF;
+	case SYS_chown:
+	case SYS_lchown:
+	case SYS_fchownat:
+		return 0;
+	case SYS_fchown:                return fd_is_valid(a1) ? 0 : -EBADF;
+	case SYS_umask:                 return 022; // the "previous" mask; nothing is masked here
+	case SYS_sysinfo:                                          return sys_sysinfo((struct sysinfo *)a1);
 	// musl's __fstatat() takes the SYS_stat/SYS_lstat fast path for
 	// plain stat(path)/lstat(path) (fd==AT_FDCWD, flag in {0,
 	// AT_SYMLINK_NOFOLLOW}) and only falls through to the general
@@ -1849,6 +2054,8 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 	case SYS_recvfrom:           return eagain_rearm(a1, sys_recvfrom(a1, a2, a3, a4, a5, a6), POLLIN);
 	case SYS_sendmsg:             return eagain_rearm(a1, sys_sendmsg(a1, a2, a3), POLLOUT);
 	case SYS_recvmsg:              return eagain_rearm(a1, sys_recvmsg(a1, a2, a3), POLLIN);
+	case SYS_sendmmsg:             return eagain_rearm(a1, sys_sendmmsg(a1, a2, a3, a4), POLLOUT);
+	case SYS_recvmmsg:             return eagain_rearm(a1, sys_recvmmsg(a1, a2, a3, a4, a5), POLLIN);
 
 	// x86-64 musl's select()/poll() library functions issue these two
 	// syscalls directly (SYS_select/SYS_poll both exist on x86-64,
@@ -1930,8 +2137,7 @@ long __bmos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6
 		memset((void *)a3, 0, (size_t)a2);
 		*(unsigned char *)a3 = 1;
 		return 8;
-	// No page protection to change (see the heap section above).
-	case SYS_mprotect:          return 0;
+	case SYS_mprotect:          return sys_mprotect(a1, a2, a3);
 	// No resource limits: report everything as unlimited, accept and
 	// ignore new ones.
 	case SYS_prlimit64:

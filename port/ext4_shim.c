@@ -196,6 +196,14 @@ long ext4_shim_open(long dirfd, const char *path, int flags, int mode)
 	// open(path, O_RDONLY|O_DIRECTORY)). ext4_fopen2() always forces
 	// EXT4_DE_REG_FILE and fails EISDIR on a real directory, so route
 	// those through ext4_dir_open() instead.
+	// O_CREAT|O_EXCL: fail if anything is already there. lwext4's own
+	// open doesn't check, and lock-file schemes depend on it (Caddy's
+	// certificate storage, see CADDY.md).
+	if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL) &&
+	    (ext4_inode_exist(p, EXT4_DE_REG_FILE) == EOK || ext4_inode_exist(p, EXT4_DE_DIR) == EOK ||
+	     ext4_inode_exist(p, EXT4_DE_SYMLINK) == EOK))
+		return -EEXIST;
+
 	if (ext4_inode_exist(p, EXT4_DE_DIR) == EOK) {
 		if ((flags & O_ACCMODE) != O_RDONLY)
 			return -EISDIR;
@@ -474,6 +482,31 @@ long ext4_shim_mkdir(long dirfd, const char *path)
 		return -EBADF;
 
 	int r = ext4_dir_mk(p);
+	return r == EOK ? 0 : -r;
+}
+
+// chmod()/fchmod(): permission bits are stored in the inode (lwext4
+// keeps the file-type bits), but nothing here enforces them -- see
+// OPENISSUES.md. Enough for programs that set a mode and read it back
+// (Caddy chmods its private keys and certificates).
+long ext4_shim_chmod(long dirfd, const char *path, long mode)
+{
+	ext4_shim_mount();
+
+	char pathbuf[EXT4_SHIM_PATH_MAX];
+	const char *p = ext4_shim_resolve(dirfd, path, pathbuf, sizeof(pathbuf));
+	if (!p)
+		return -EBADF;
+
+	int r = ext4_mode_set(p, (uint32_t)mode & 07777);
+	return r == EOK ? 0 : -r;
+}
+
+long ext4_shim_fchmod(long fd, long mode)
+{
+	if (!ext4_shim_is_fd(fd))
+		return -EBADF;
+	int r = ext4_mode_set(files[fd - EXT4_SHIM_FD_BASE].path, (uint32_t)mode & 07777);
 	return r == EOK ? 0 : -r;
 }
 

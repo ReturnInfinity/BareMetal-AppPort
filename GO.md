@@ -83,10 +83,9 @@ An `-overlay` changes two things in the Go runtime without forking GOROOT:
   arguments, right before `main()`. `c.ld` gives musl an empty range.
   This also needed `_start` pinned to the front of the image
   (`.text.start`): the kernel enters the flat binary at its first byte.
-- **`mmap` semantics** (`posix_shim.c`): `MAP_FIXED` over an
-  already-allocated range re-zeroes it in place (how Go commits reserved
-  memory), `PROT_NONE` reservations aren't zeroed up front, and
-  `madvise(MADV_DONTNEED)` zeroes the range.
+- **`mmap` semantics** (`posix_shim.c`): `PROT_NONE` reservations are only
+  address space, `MAP_FIXED` over one commits it (hot-plugging memory if
+  needed, and zeroing it), and `madvise(MADV_DONTNEED)` zeroes the range.
 - **`epoll` and `eventfd`** (`posix_shim.c`). Go's timers and network
   poller run on them. `EPOLLET` is emulated (see that section's comment).
   Plain level-triggered reporting would make the netpoller spin.
@@ -119,9 +118,10 @@ That's the quickest way to find what a new program is missing.
 ## Memory
 
 `examples/go/hello` boots with `MEMSIZE=6` and the default hot-plug
-settings. The app image is about 1.8 MiB. The runtime then reserves a
-64 MiB-aligned heap arena, which takes 128 MiB of guest RAM through
-hot-plug, but untouched memory costs the host nothing.
+settings; the app image is about 1.8 MiB. The runtime reserves address
+space in big pieces (128 MiB per 64 MiB heap arena) but the shim only
+makes the parts it commits into real memory (see `OPENISSUES.md`'s heap
+section), and untouched memory costs the host nothing.
 
 ## Networking
 

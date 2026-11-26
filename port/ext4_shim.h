@@ -44,6 +44,8 @@ long ext4_shim_getcwd(char *buf, size_t size);
 long ext4_shim_fchdir(long fd);
 
 long ext4_shim_mkdir(long dirfd, const char *path);
+long ext4_shim_chmod(long dirfd, const char *path, long mode);
+long ext4_shim_fchmod(long fd, long mode);
 long ext4_shim_rmdir(long dirfd, const char *path);
 long ext4_shim_rename(long olddirfd, const char *oldpath, long newdirfd, const char *newpath);
 

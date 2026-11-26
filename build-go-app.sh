@@ -7,7 +7,7 @@ set -e
 #        ./build-go-app.sh path/to/package-dir (a main package inside a module)
 #
 # The output is named after the .go file (or the directory), e.g.
-# hello.go -> hello.app.
+# hello.go -> hello.app, unless APP_NAME is set.
 #
 # The Go code is compiled by the host's own Go toolchain with
 # -buildmode=c-archive. That produces position-independent code (so it
@@ -45,7 +45,10 @@ else
 	echo "error: $1 is neither a .go file nor a directory" >&2
 	exit 1
 fi
-APP_NAME="$APP_BASE.app"
+# APP_NAME in the environment overrides the output name (e.g.
+# port/caddy_port -> caddy.app).
+APP_NAME="${APP_NAME:-$APP_BASE.app}"
+APP_BASE="${APP_NAME%.app}"
 
 cd "$SCRIPT_DIR"
 mkdir -p "$BUILD_DIR/go"
